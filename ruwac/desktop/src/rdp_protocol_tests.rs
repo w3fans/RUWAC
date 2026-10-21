@@ -209,21 +209,25 @@ fn clearcodec_short_bar_renders_all_rows_with_exact_bgra_pixels() {
 
 #[test]
 fn srl_complete_zero_chunks_retain_state_across_bands_without_reading_a_nonzero() {
-    use ironrdp::graphics::srl::{SrlDecoder, SrlError, decode_srl};
+    use ironrdp::graphics::srl::{SrlDecoder, decode_srl};
     // Eight complete zero chunks encode 2+2+4+4+8+8+16+16 coefficients.
-    let encoded = [0, 0]; // The second byte is the specified trailing zero byte.
+    let encoded = [0, 0]; // The second byte is an optional trailing zero byte.
     assert_eq!(decode_srl(&encoded, 60, 1), Ok(vec![0; 60]));
     let mut decoder = SrlDecoder::new(&encoded).unwrap();
     assert_eq!(decoder.decode(1, 1), Ok(vec![0]));
     assert_eq!(decoder.decode(59, 1), Ok(vec![0; 59]));
-    assert_eq!(decoder.decode(1, 1), Err(SrlError::Truncated));
+    // Past the end, bits read as zero chunks, as in FreeRDP.
+    assert_eq!(decoder.decode(1, 1), Ok(vec![0]));
 }
 
 #[test]
-fn srl_padding_magnitude_and_truncation_guards_are_retained() {
+fn srl_streams_from_windows_without_trailing_zero_byte_decode() {
     use ironrdp::graphics::srl::{SrlError, decode_srl};
     assert_eq!(decode_srl(&[0x84, 0], 1, 4), Ok(vec![3]));
     assert_eq!(decode_srl(&[0xa0, 0, 0], 1, 3), Ok(vec![-7]));
-    assert_eq!(decode_srl(&[0x84], 1, 4), Err(SrlError::MissingTerminator));
-    assert_eq!(decode_srl(&[0x80, 0], 1, 4), Err(SrlError::Truncated));
+    // Windows Progressive tiles: no trailing zero byte, or an empty stream.
+    assert_eq!(decode_srl(&[0x84], 1, 4), Ok(vec![3]));
+    assert_eq!(decode_srl(&[], 2, 4), Ok(vec![0, 0]));
+    // Magnitude bounds remain enforced.
+    assert_eq!(decode_srl(&[0x84], 1, 0), Err(SrlError::InvalidBitCount(0)));
 }

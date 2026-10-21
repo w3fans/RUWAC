@@ -42,7 +42,7 @@
     "src/rectangle_processing.rs": "ef8ceebc65a94979a959b9cdd77bd359a0b1d6d4402277ae73300d9a4bbe8936",
     "src/rle.rs": "933427bfacfc6b3cae3e133024f2b0347ed58f64e794719a7b0b2fb74844ec9e",
     "src/rlgr.rs": "fbb029327d888401abbe00bc8b64de3dd67d4b53e4e3ba847e32de9bfee7804f",
-    "src/srl.rs": "673ec00967a89dab30bd754cabec826ead7761334f722ca178127a9e6669417a",
+    "src/srl.rs": "3acc7209280fa84b70c0629985bf1c7e630f567e7214752cc2608d2a79e9eac9",
     "src/subband_reconstruction.rs": "f4ceeeb8b4618a2c7f2a08ee72e8d0a89c194f66e7ce1f918f6aafb5f78f0773",
     "src/utils.rs": "ee1231283fbfd58ef9319ae22891f2a0f6cb134a50028353c7268892474a9a40",
     "src/zgfx/api.rs": "699bd0bdfb7ec6c59c2452c449c947d57a83d957585021dc85550d800e3e072a",
@@ -62,7 +62,7 @@
     "src/zgfx/test_assets/encoded.4.bin": "e8d21ac0f8051c89cbf6af6fcc5d8db5c5b47fac8de3f1db08cff527a0875ef5",
     "src/zgfx/wrapper.rs": "f88e8d08cd3f773c6010fb13d1eda73e35efe9948298d637f53e51ad36edd83f"
   },
-  "patch": "Standalone manifest and old core diagnostic API adaptation; unchanged validation and codec behavior; decode complete SRL zero chunks while retaining required trailing zero byte",
+  "patch": "Standalone manifest and old core diagnostic API adaptation; unchanged validation and codec behavior; decode complete SRL zero chunks; trailing zero byte optional and bits past the end read as zero (FreeRDP-compatible, Windows Progressive tiles)",
   "upstream_files_sha256": {
     "Cargo.toml": "158aa7a32db2ed76c9b0b23f295bbc3117de13f526309d0e5f88c10c141a1bb3",
     "README.md": "e572850be719aa8442b7d2cd50b62c835932272a77a6c69de2df6587a5c942d2",

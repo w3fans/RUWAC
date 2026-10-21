@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v0.4.34 — 2026-10-21 — Stable source release
+
+- Remote RUWAC installation (Install / update remote RUWAC CLI…, and agent launches with automatic RUWAC installation) installs its own dependencies first: missing `python3` or GitHub CLI (`gh`, which verifies the signed prebuilt package) come from the system's signed repositories via `sudo dnf install`, which may ask for the password in the SSH terminal. The verified prebuilt per-user installation then runs unchanged. If dependencies cannot be installed, nothing is installed.
+
+- Windows RDP no longer drops with "RDP decode failed … Progressive: SRL stream → SRL: missing terminator": Progressive (RemoteFX) upgrade passes accept SRL streams without the trailing zero byte, and empty streams, as Windows sends them; bits past the end read as zero, matching FreeRDP. Previously the whole connection failed and later input was refused.
+
 ## v0.4.33 — 2026-10-21 — Stable source release
 
 - GNOME automatic sign-in works on login screens without the Fedora logo: GDM's own user list ("Not listed?" exactly once and no focused input field of any kind) now identifies the login screen and leads only to the "Not listed?" click; the username and password fields are then accepted within that same sign-in. Screens with the logo work as before; nothing is typed into an unrecognized screen.

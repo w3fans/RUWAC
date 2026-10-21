@@ -52,18 +52,16 @@ pub struct SrlDecoder<'a> {
 }
 
 impl<'a> SrlDecoder<'a> {
-    /// Create a decoder for an SRL stream including its required trailing zero byte.
+    /// Create a decoder for an SRL stream.
+    ///
+    /// Encoders may end the stream with a zero byte, but servers (Windows)
+    /// also send streams without it, or empty streams. As in FreeRDP, the
+    /// trailing byte is optional and bits past the end read as zero, which in
+    /// SRL are complete zero chunks: missing refinement stays zero instead of
+    /// failing the whole remote desktop connection.
     pub fn new(data: &'a [u8]) -> Result<Self, SrlError> {
-        let Some((&terminator, payload)) = data.split_last() else {
-            return Err(SrlError::MissingTerminator);
-        };
-
-        if terminator != 0 {
-            return Err(SrlError::MissingTerminator);
-        }
-
         Ok(Self {
-            reader: BitReader::new(payload),
+            reader: BitReader::new(data),
             kp: INITIAL_KP,
             zero_run_remaining: 0,
             nonzero_pending: false,
@@ -270,7 +268,7 @@ impl<'a> BitReader<'a> {
 
     fn read_bit(&mut self) -> Result<bool, SrlError> {
         let Some(&byte) = self.data.get(self.byte_idx) else {
-            return Err(SrlError::Truncated);
+            return Ok(false);
         };
 
         let bit = (byte >> (7 - self.bit_idx)) & 1 != 0;
@@ -343,14 +341,17 @@ mod tests {
         let mut decoder = SrlDecoder::new(&[0x00, 0x00]).unwrap();
         assert_eq!(decoder.decode(1, 1), Ok(vec![0]));
         assert_eq!(decoder.decode(59, 1), Ok(vec![0; 59]));
-        assert_eq!(decoder.decode(1, 1), Err(SrlError::Truncated));
+        // Past the end, bits read as zero chunks (FreeRDP behaviour).
+        assert_eq!(decoder.decode(1, 1), Ok(vec![0]));
     }
 
     #[test]
-    fn rejects_missing_required_padding_and_bounds_zero_chunks() {
-        assert_eq!(decode_srl(&[0x84], 1, 4), Err(SrlError::MissingTerminator));
-        assert_eq!(decode_srl(&[], 1, 4), Err(SrlError::MissingTerminator));
-        assert_eq!(decode_srl(&[0x00, 0x00], 61, 1), Err(SrlError::Truncated));
+    fn trailing_zero_byte_is_optional_and_empty_streams_decode_as_zeros() {
+        // Windows may omit the trailing zero byte or send an empty stream.
+        assert_eq!(decode_srl(&[0x84], 1, 4), Ok(vec![3]));
+        assert_eq!(decode_srl(&[0x84, 0x00], 1, 4), Ok(vec![3]));
+        assert_eq!(decode_srl(&[], 4, 4), Ok(vec![0; 4]));
+        assert_eq!(decode_srl(&[0x00, 0x00], 61, 1), Ok(vec![0; 61]));
     }
 
     #[test]
@@ -377,8 +378,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_truncated_stream() {
-        assert_eq!(decode_srl(&[0x80, 0x00], 1, 4), Err(SrlError::Truncated));
+    fn short_stream_reads_missing_bits_as_zero() {
+        // Zero run 0 (10), then sign and unary bits past the data are zeros:
+        // the largest positive magnitude, never an error.
+        assert_eq!(decode_srl(&[0x80, 0x00], 1, 4), Ok(vec![15]));
     }
 
     #[test]

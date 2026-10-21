@@ -15,6 +15,25 @@ fn agent_command(agent: u32) -> Result<(&'static str, &'static str), String> {
         _ => Err("Choose Codex, Claude or Kimi".into()),
     }
 }
+/// Remote RUWAC installation with its dependencies: python3 and GitHub CLI
+/// (which verifies the signed prebuilt package) come from the system's signed
+/// repositories via sudo/dnf, which may ask for the password in the terminal;
+/// then the verified prebuilt per-user install runs unchanged.
+fn install_ruwac_command() -> String {
+    let deps = "missing=''; command -v python3 >/dev/null 2>&1 || missing=\"$missing python3\"; \
+                command -v gh >/dev/null 2>&1 || missing=\"$missing gh\"; \
+                if [ -n \"$missing\" ]; then \
+                  if command -v dnf >/dev/null 2>&1; then \
+                    echo \"Installing RUWAC dependencies:$missing (sudo may ask for your password)\"; \
+                    sudo dnf install -y $missing || { echo 'Dependency installation failed; RUWAC was not installed.'; exit 1; }; \
+                  else echo \"Install$missing with your package manager, then retry.\"; exit 1; fi; \
+                fi";
+    format!(
+        "{deps}; python3 -c {} --bootstrap --headless --prebuilt",
+        quote(include_str!("../../../scripts/update-user.py"))
+    )
+}
+
 fn ssh_command(profile: &profiles::Profile, command: String) -> Result<Vec<String>, String> {
     let mut argv = profiles::ssh_argv(profile)?;
     let position = argv
@@ -96,13 +115,7 @@ pub(crate) fn argv(
         return Ok(command);
     }
     if agent == 2 {
-        return ssh_command(
-            profile,
-            format!(
-                "python3 -c {} --bootstrap --headless --prebuilt",
-                quote(include_str!("../../../scripts/update-user.py"))
-            ),
-        );
+        return ssh_command(profile, install_ruwac_command());
     }
     let (name, default) = agent_command(agent)?;
     let configured = if agent == 0 {
@@ -171,9 +184,9 @@ pub(crate) fn argv(
     // Optional: install the RUWAC CLI first (prebuilt, per user) when missing.
     let script = if profile.preferences.ruwac_install_missing {
         format!(
-            "{{ command -v {} >/dev/null 2>&1 || test -x \"$HOME/.local/bin/ruwac\" || {{ echo 'Installing RUWAC…'; python3 -c {} --bootstrap --headless --prebuilt; }}; }} && {}",
+            "{{ command -v {} >/dev/null 2>&1 || test -x \"$HOME/.local/bin/ruwac\" || {{ echo 'Installing RUWAC…'; {}; }}; }} && {}",
             quote(binary),
-            quote(include_str!("../../../scripts/update-user.py")),
+            install_ruwac_command(),
             script
         )
     } else {
