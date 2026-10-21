@@ -913,16 +913,20 @@ fn history(s: &mut UnixStream, pane: &str) -> io::Result<copy::Copy> {
     let result = (|| -> io::Result<copy::Copy> {
         let total = metadata["total_lines"]
             .as_u64()
-            .filter(|n| *n > 0 && *n <= 50000)
-            .ok_or_else(|| io::Error::other("History snapshot row cap rejected"))?
+            .filter(|n| *n > 0)
+            .ok_or_else(|| io::Error::other("History snapshot is empty"))?
             as usize;
         let cols = metadata["cols"]
             .as_u64()
-            .filter(|n| *n > 0 && *n <= 200)
+            .filter(|n| *n > 0 && *n <= u64::from(ruwac_protocol::TerminalLimits::CURRENT.cols))
             .ok_or_else(|| io::Error::other("History columns rejected"))?
             as usize;
-        let mut lines = Vec::new();
-        let mut offset = 0;
+        // Long-lived sessions keep the newest lines in view: at most 50,000
+        // lines and 8 MiB, dropping the oldest instead of refusing.
+        let mut lines = std::collections::VecDeque::new();
+        let mut offset = total.saturating_sub(50_000);
+        // Index in the full history of the first line kept.
+        let mut first = offset;
         let mut bytes = 0;
         while offset < total {
             let page = call(
@@ -945,16 +949,22 @@ fn history(s: &mut UnixStream, pane: &str) -> io::Result<copy::Copy> {
                     return Err(io::Error::other("Canonical row controls rejected"));
                 }
                 bytes += text.len() + 1;
-                if bytes > 8 * 1024 * 1024 {
-                    return Err(io::Error::other("Copy view exceeds 8 MiB"));
-                }
                 let wrapped = row["wrapped"]
                     .as_bool()
                     .ok_or_else(|| io::Error::other("Canonical wrap flag missing"))?;
-                lines.push(copy::Line {
+                lines.push_back(copy::Line {
                     text: text.into(),
                     wrapped,
                 });
+                while bytes > 8 * 1024 * 1024 {
+                    match lines.pop_front() {
+                        Some(old) => {
+                            bytes -= old.text.len() + 1;
+                            first += 1;
+                        }
+                        None => break,
+                    }
+                }
             }
             let next = page["next_offset"].as_u64().unwrap_or(0) as usize;
             if next != offset + rows.len() || next <= offset || next > total {
@@ -963,10 +973,10 @@ fn history(s: &mut UnixStream, pane: &str) -> io::Result<copy::Copy> {
             offset = next;
         }
         Ok(copy::Copy::new(
-            lines,
+            lines.into(),
             cols,
             copy::Position {
-                row: metadata["cursor_row"].as_u64().unwrap_or(0) as usize,
+                row: (metadata["cursor_row"].as_u64().unwrap_or(0) as usize).saturating_sub(first),
                 col: metadata["cursor_col"].as_u64().unwrap_or(0) as usize,
             },
             metadata["dropped_lines"].as_u64().unwrap_or(0) as usize,
@@ -1526,12 +1536,14 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
                         );
                         let release = event["release"] == true;
                         match event["button"].as_u64().unwrap_or(0) {
-                            64 => {
-                                let mut c = history(&mut s, &pane)?;
-                                c.align_bottom(height);
-                                c.scroll(-3, height);
-                                mode = Mode::Copy(c);
-                            }
+                            64 => match history(&mut s, &pane) {
+                                Ok(mut c) => {
+                                    c.align_bottom(height);
+                                    c.scroll(-3, height);
+                                    mode = Mode::Copy(c);
+                                }
+                                Err(e) => status = format!("Scrollback unavailable: {e}"),
+                            },
                             0 if !release => drag = Some((pane.clone(), x, y)),
                             32 => {
                                 if let Some((start_pane, sx, sy)) = drag.take() {
@@ -1546,12 +1558,18 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
                                             as usize;
                                         // Pane row r is history line len-rows+r.
                                         let offset = height.saturating_sub(rows);
-                                        let mut c = history(&mut s, &pane)?;
-                                        c.align_bottom(height);
-                                        c.point(offset + sy, sx);
-                                        c.mark();
-                                        c.point(offset + y, x);
-                                        mode = Mode::Copy(c);
+                                        match history(&mut s, &pane) {
+                                            Ok(mut c) => {
+                                                c.align_bottom(height);
+                                                c.point(offset + sy, sx);
+                                                c.mark();
+                                                c.point(offset + y, x);
+                                                mode = Mode::Copy(c);
+                                            }
+                                            Err(e) => {
+                                                status = format!("Selection unavailable: {e}")
+                                            }
+                                        }
                                     }
                                 }
                             }

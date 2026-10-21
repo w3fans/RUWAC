@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## v0.4.33 — 2026-10-21 — Stable source release
+
+- GNOME automatic sign-in works on login screens without the Fedora logo: GDM's own user list ("Not listed?" exactly once and no focused input field of any kind) now identifies the login screen and leads only to the "Not listed?" click; the username and password fields are then accepted within that same sign-in. Screens with the logo work as before; nothing is typed into an unrecognized screen.
+
+- Password boxes in the machine editor show whether a password (RDP, GNOME, SSH key passphrase) is already saved in Secret Service, and update after Set or Forget, so nothing has to be re-entered to find out.
+
+- SSH login choice per endpoint: saved key / agent / `~/.ssh`, saved password, or "Install my SSH key on this machine now…", which starts the confirmed `ssh-copy-id` action for the endpoint's saved, explicitly chosen key (choose one under Detected keys first). The login method itself stays unchanged, so cancelling changes nothing.
+
+- Mouse-wheel scrollback in `ruwac -r`/`-S` sessions works in wide terminals (over 200 columns, up to the engine's 1024) and long-lived sessions: it opens the newest 50,000 lines / 8 MiB instead of silently refusing; failures are shown in the status bar.
+
+- Vivid terminal colours (Controls, on by default) render the 16 standard colours with GNOME Terminal's palette, so programs such as btm look as they do elsewhere; switch it off for the scheme's softer colours.
+
 ## v0.4.32 — 2026-10-20 — Stable source release
 
 - Replace startup/periodic SSH discovery with explicit public-key checks. Require selection, separate confirmation and fresh source/key/trust inputs before adding endpoints; preserve existing credentials and manual identities. Bound output, cancellation, jump helpers and batch lifetime.

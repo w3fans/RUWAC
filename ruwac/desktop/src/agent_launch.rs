@@ -54,6 +54,8 @@ pub(crate) fn argv(
         return Err("Invalid remote RUWAC executable or socket".into());
     }
     if agent == 4 {
+        // One explicitly chosen key: the confirmation names exactly what is
+        // installed (ssh-copy-id would otherwise add every agent identity).
         let key = &profile.preferences.identity_file;
         if key.is_empty() || key.starts_with('-') || key.chars().any(char::is_control) {
             return Err(

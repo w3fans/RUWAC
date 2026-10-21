@@ -200,6 +200,7 @@ impl Chrome {
             saved.term_size_pt = p.term_size_pt;
             saved.line_height = p.line_height;
             saved.bar_labels = p.bar_labels;
+            saved.vivid_colors = p.vivid_colors;
             saved.actions_collapsed = p.actions_collapsed;
             saved.controls_docked = p.controls_docked;
         }) {
@@ -218,6 +219,7 @@ impl Chrome {
     fn apply(&self) {
         let p = self.prefs.borrow();
         let s = schemes::select(&p.scheme).unwrap_or(&schemes::SCHEMES[0]);
+        schemes::set_vivid(p.vivid_colors);
         self.scheme.load_from_string(&schemes::css(s));
         adw::StyleManager::default().set_color_scheme(if s.id == "paper" {
             adw::ColorScheme::ForceLight
@@ -443,6 +445,22 @@ impl Chrome {
         labels.connect_active_notify(move |s| {
             if let Some(c) = weak.upgrade() {
                 c.update(|p| p.bar_labels = s.is_active());
+            }
+        });
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.append(&gtk::Label::new(Some("Vivid terminal colours")));
+        let vivid = gtk::Switch::new();
+        vivid.set_widget_name("vivid-terminal-colours");
+        vivid.set_tooltip_text(Some(
+            "Standard GNOME Terminal colours for programs like btm; off uses the scheme's softer colours",
+        ));
+        vivid.set_active(self.prefs.borrow().vivid_colors);
+        row.append(&vivid);
+        body.append(&row);
+        let weak = Rc::downgrade(self);
+        vivid.connect_active_notify(move |s| {
+            if let Some(c) = weak.upgrade() {
+                c.update(|p| p.vivid_colors = s.is_active());
             }
         });
         body.append(&self.status);

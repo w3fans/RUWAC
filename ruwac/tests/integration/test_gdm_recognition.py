@@ -71,6 +71,45 @@ print(f'30\\t30\\t150\\t30\\t{{confidence}}\\t{{label}}')
         self.image.write_bytes(b'not an image')
         self.assertEqual(self.run_helper(), ('unavailable', 1))
 
+    def observe(self, tool, trusted=False):
+        env = dict(os.environ, RUWAC_GDM_OCR_TOOL=str(tool))
+        argv = ['python3', str(HELPER), str(self.image)] + (['--trusted-sequence'] if trusted else [])
+        result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=7)
+        return json.loads(result.stdout)['kind']
+
+    def unbranded_ocr(self, entry_label='Password'):
+        """No Fedora logo: the full frame shows GDM's "Not listed?" link; field crops read entry_label."""
+        tool = self.root / 'unbranded-ocr'
+        tool.write_text(f"""#!/usr/bin/python3
+from pathlib import Path
+import sys
+print('left\\ttop\\twidth\\theight\\tconf\\ttext')
+if Path(sys.argv[1]).name == 'layout.png':
+    print('480\\t540\\t30\\t12\\t96\\tNot')
+    print('514\\t540\\t44\\t12\\t96\\tlisted?')
+else:
+    print('30\\t30\\t150\\t30\\t99\\t{entry_label}')
+""")
+        tool.chmod(0o700)
+        return tool
+
+    def test_unbranded_user_list_only_leads_to_the_not_listed_click(self):
+        self.assertEqual(self.observe(self.unbranded_ocr()), 'users')
+
+    def test_unbranded_fields_need_a_sign_in_that_passed_the_login_screen(self):
+        self.focus_boxes(1)
+        tool = self.unbranded_ocr()
+        # A user list with an input field visible is not the plain GDM list.
+        self.assertEqual(self.observe(tool), 'unknown')
+        self.assertEqual(self.observe(tool, trusted=True), 'password')
+        self.assertEqual(self.observe(self.unbranded_ocr('Username'), trusted=True), 'username')
+
+    def test_unbranded_user_list_with_any_focused_field_is_unknown(self):
+        # Codex review: an unrecognized field (e.g. Email) must not establish
+        # the GDM user list and so must never lead to trusted recognition.
+        self.focus_boxes(1)
+        self.assertEqual(self.observe(self.unbranded_ocr('Email')), 'unknown')
+
     def test_two_focused_password_fields_are_ambiguous(self):
         self.focus_boxes(2)
         self.assertEqual(self.run_helper(self.fake_ocr()), ('ambiguous', 0))

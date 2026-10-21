@@ -4046,7 +4046,11 @@ impl RdpView {
                     return;
                 }
                 a.scan_binding = Some((transport, generation, epoch));
-                a.pending = Some(crate::gdm::recognize(w, h, pixels));
+                let trusted = !matches!(
+                    a.sequence.step,
+                    crate::gdm::Step::UserList | crate::gdm::Step::Stopped
+                );
+                a.pending = Some(crate::gdm::recognize(w, h, pixels, trusted));
                 a.scan_at = std::time::Instant::now();
             }
         }

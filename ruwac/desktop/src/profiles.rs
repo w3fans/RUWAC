@@ -1575,6 +1575,43 @@ fn ssh_access_review(
     dialog.present();
 }
 
+/// Show in a password box whether a secret is already saved, so nothing has
+/// to be typed again to find out. The secret itself is discarded at once.
+fn credential_hint(entry: &gtk::PasswordEntry, reference: String, what: &'static str) {
+    if reference.trim().is_empty() {
+        entry.set_placeholder_text(Some(&format!("No {what} saved — type one, then Set")));
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let saved = crate::credentials::lookup(&reference).is_ok();
+        let _ = tx.send(saved);
+    });
+    let entry = entry.downgrade();
+    gtk::glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+        let Some(entry) = entry.upgrade() else {
+            return gtk::glib::ControlFlow::Break;
+        };
+        match rx.try_recv() {
+            Ok(saved) => {
+                entry.set_placeholder_text(Some(&if saved {
+                    format!("●●●●●● {what} saved — leave empty to keep, type to replace")
+                } else {
+                    format!("No {what} saved (or keyring locked) — type one, then Set")
+                }));
+                entry.set_tooltip_text(Some(if saved {
+                    "Saved in Secret Service"
+                } else {
+                    "Nothing saved for this reference"
+                }));
+                gtk::glib::ControlFlow::Break
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+            Err(_) => gtk::glib::ControlFlow::Break,
+        }
+    });
+}
+
 fn shortcut_action(
     button: &gtk::Button,
     store: &Rc<RefCell<Store>>,
@@ -3396,6 +3433,31 @@ fn editor_seed(
         .placeholder_text("Key passphrase — stored only in Secret Service")
         .build();
     key_secret.set_widget_name("ssh-key-passphrase");
+    // Saved/not-saved status in every password box, refreshed after Set/Forget
+    // (each reports in `info`).
+    let refresh_hints = {
+        let (secret, rdp_ref, gnome_password, gnome_ref, key_secret, key_ref) = (
+            secret.downgrade(),
+            fields[9].downgrade(),
+            gnome_password.downgrade(),
+            gnome_ref.downgrade(),
+            key_secret.downgrade(),
+            identity_reference.downgrade(),
+        );
+        move || {
+            if let (Some(e), Some(r)) = (secret.upgrade(), rdp_ref.upgrade()) {
+                credential_hint(&e, r.text().into(), "password");
+            }
+            if let (Some(e), Some(r)) = (gnome_password.upgrade(), gnome_ref.upgrade()) {
+                credential_hint(&e, r.text().into(), "GNOME password");
+            }
+            if let (Some(e), Some(r)) = (key_secret.upgrade(), key_ref.upgrade()) {
+                credential_hint(&e, r.text().into(), "key passphrase");
+            }
+        }
+    };
+    refresh_hints();
+    info.connect_label_notify(move |_| refresh_hints());
     grid.attach(&key_secret, 1, 30, 1, 1);
     let key_actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     grid.attach(&key_actions, 1, 31, 1, 1);
@@ -3681,7 +3743,11 @@ fn editor_seed(
         menu.set_widget_name("ssh-detected-keys");
         key_row.append(&menu);
     }
-    let login = gtk::DropDown::from_strings(&["SSH key", "Password (saved in Secret Service)"]);
+    let login = gtk::DropDown::from_strings(&[
+        "SSH key (saved key, agent or ~/.ssh)",
+        "Password (saved in Secret Service)",
+        "Install my SSH key on this machine now…",
+    ]);
     login.set_widget_name("ssh-login-method");
     login.set_selected(u32::from(original.preferences.ssh_auth == "password"));
     if original.protocol == "SSH" {
@@ -3942,6 +4008,29 @@ fn editor_seed(
     agents.append(&setup);
     let authorize = gtk::Button::with_label("Authorize SSH public key on machine…");
     authorize.set_widget_name("ssh-authorize-key");
+    // The third login choice only starts the confirmed install action for the
+    // saved, explicitly chosen key; the login method stays as it was, so
+    // cancelling changes nothing. Choose "SSH key" once the key is installed.
+    let install_now = authorize.downgrade();
+    let previous = std::rc::Rc::new(std::cell::Cell::new(login.selected().min(1)));
+    let install_info = info.downgrade();
+    login.connect_selected_notify(move |l| {
+        if l.selected() != 2 {
+            previous.set(l.selected());
+            return;
+        }
+        l.set_selected(previous.get());
+        let Some(b) = install_now.upgrade() else {
+            return;
+        };
+        if !b.is_sensitive() {
+            if let Some(info) = install_info.upgrade() {
+                info.set_text("Save this endpoint first; key installation uses its saved route");
+            }
+            return;
+        }
+        b.emit_clicked();
+    });
     authorize.set_sensitive(existing.is_some());
     authorize.set_tooltip_text(Some("Save the selected key first. Opens ssh-copy-id in a terminal; only your public key is installed after confirmation and SSH authentication."));
     let (s, st, cb, launcher, saved_id) = (

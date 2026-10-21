@@ -22,6 +22,10 @@ pub struct Settings {
     pub line_height: f32,
     #[serde(default = "default_labels")]
     pub bar_labels: bool,
+    /// Standard (GNOME Terminal) colours for the 16 ANSI colours instead of
+    /// the scheme's softer ones.
+    #[serde(default = "default_vivid")]
+    pub vivid_colors: bool,
     #[serde(default)]
     pub actions_collapsed: bool,
     #[serde(default)]
@@ -49,6 +53,9 @@ fn default_height() -> f32 {
 }
 pub const LINE_HEIGHTS: [f32; 5] = [0.95, 1.0, 1.15, 1.30, 1.45];
 fn default_labels() -> bool {
+    true
+}
+fn default_vivid() -> bool {
     true
 }
 pub const FONTS: [&str; 6] = [
@@ -86,6 +93,7 @@ impl Default for Settings {
             term_size_pt: default_size(),
             line_height: default_height(),
             bar_labels: true,
+            vivid_colors: default_vivid(),
             actions_collapsed: false,
             controls_docked: false,
             primary_receive: false,
