@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.4.36 — 2026-10-22 — Stable source release
+
+- Updating RUWAC on a remote machine ("Install / update remote RUWAC CLI…" and agent launches that install RUWAC) now works where the RUWAC desktop is also installed for that user: the command-line update brings the existing desktop along instead of refusing with "Retain the desktop installation with --desktop". A refused installation no longer leaves a partial version folder behind that blocked the next attempt with "Existing immutable installation differs".
+
 ## v0.4.35 — 2026-10-22 — Stable source release
 
 - RDP connections no longer drop when the link is briefly slow. A full input queue used to close the whole connection with "CLIPRDR queue full; transfer not sent"; now pointer motion is skipped while the queue is busy and other commands wait in order, and only a connection that accepts nothing for 30 seconds is closed. Reconnection after network loss retries for about a minute and a half with growing backoff (previously three tries in about 3.5 seconds, once per tab lifetime); the budget renews after a connection has been up for 30 seconds, and GNOME login handovers no longer use it. RDP sockets use TCP keepalive, and write, reactivation and clipboard response time limits are longer.

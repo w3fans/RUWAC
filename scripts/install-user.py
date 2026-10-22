@@ -39,6 +39,9 @@ lock=os.open(base/'.install.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600);m=os
 if not stat.S_ISREG(m.st_mode)or m.st_uid!=os.geteuid()or m.st_nlink!=1 or m.st_mode&0o077:raise SystemExit('Unsafe installation lock')
 try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
 except BlockingIOError:raise SystemExit('Another RUWAC installation is active')
+# Refuse before writing anything: a refused install must not leave a partial
+# immutable release behind that blocks the next, correct attempt.
+if not a.desktop and (prefix/'bin'/'ruwac-desktop').is_symlink():raise SystemExit('Retain the desktop installation with --desktop')
 release=base/'releases'/version;release.parent.mkdir(exist_ok=True)
 if release.parent.is_symlink():raise SystemExit('Unsafe releases directory')
 resources={}

@@ -891,7 +891,9 @@ def main():
         result = installation_status(result, installation_identity(prefix, args.current, args.running_executable))
         if 'skipped' not in result and (args.install or args.install_auto or args.bootstrap) and result['available']:
             cache = private_directory(Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')) / 'RUWAC/updates')
-            desktop = not args.headless
+            # --headless installs only the CLI on a fresh machine; an existing
+            # per-user desktop is updated with it rather than refused.
+            desktop = not args.headless or (prefix / 'bin/ruwac-desktop').is_symlink()
             if args.install_auto:
                 receipt = prefix / 'lib/ruwac/current/installation.json'
                 artifacts = json.loads(receipt.read_text()).get('artifacts', {})
