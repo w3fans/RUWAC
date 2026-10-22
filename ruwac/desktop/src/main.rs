@@ -28,6 +28,7 @@ mod launches;
 mod primary;
 mod profiles;
 mod rdp;
+mod rdp_retry;
 mod rdp_trust;
 mod remote_content;
 mod remote_image;

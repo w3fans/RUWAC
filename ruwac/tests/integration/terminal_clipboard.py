@@ -226,6 +226,36 @@ try:
  text=select_source(history=True);rdp_focus();baseline=contents();count=len(middle_events);(root/'proxy-delay').write_text('.65');old=(root/'proxy-started').read_text();middle();eventually(lambda:(root/'proxy-started').read_text()!=old);command('source','switch');time.sleep(1.2);forward_middle();assert contents()==baseline and len(middle_events)==count;mark('tab-change-cancels-delayed-selection-with-zero-remote-button-events')
  (root/'proxy-delay').write_text('0');text=select_source(history=True);rdp_focus();command('source','rdp-policy',policy=4);count=len(middle_events);middle();time.sleep(.4);forward_middle();assert len(middle_events)==count and contents()==baseline;mark('disabled-clipboard-policy-refuses-selection-paste')
  command('source','rdp-policy',policy=0);check_clipboards();
+ # A selection received from an RDP tab must remain a deliberate application
+ # selection when the user pastes into another tab. Require the confirmed SSH
+ # PRIMARY path, not an unconfirmed middle-button replay with stale text.
+ rdp_focus();tap(remote_input,42)
+ # Exercise the production RDP drag path that retires a previous local
+ # selection before the remote desktop makes its own deliberate selection.
+ command('source','rdp-pointer',x=100.,y=100.,button=1,release=False)
+ command('source','rdp-pointer',x=130.,y=110.,button=0,release=False)
+ command('source','rdp-pointer',x=130.,y=110.,button=1,release=True)
+ prior_trace=len((root/'selection-peer.log').read_text().splitlines())
+ command('receiver','copy',primary=True);remote_selection=command('receiver','copy-state')['selection'];assert remote_selection
+ command('receiver','switch')
+ # PRIMARY is delivered to the focused Wayland client; an inactive GTK peer
+ # has no current selection offer. Allow the active RDP bridge to publish it,
+ # then focus the independent peer for the compositor read and return.
+ def relayed():
+  rows=(root/'selection-peer.log').read_text().splitlines()[prior_trace:]
+  return any((d:=json.loads(line)).get('primary_trace')=='complete'and d.get('size')==len(remote_selection.encode())for line in rows if line.startswith('{'))
+ eventually(relayed,10)
+ tick=command('source','inspect')['ticks'];eventually(lambda:command('source','inspect')['ticks']>=tick+3)
+ for _ in range(8):
+  if peer_command('local-peer','state')['active']:break
+  alt_tab(local_input)
+ else:raise AssertionError('Independent PRIMARY consumer could not gain focus')
+ eventually(lambda:peer_command('local-peer','read',which='primary')==remote_selection,10)
+ rdp_focus()
+ previous=(root/'proxy-started').read_text();before=contents();middle()
+ eventually(lambda:(root/'proxy-started').read_text()!=previous,8)
+ wait_input(before+b'\x1b[200~'+remote_selection.encode()+b'\x1b[201~')
+ check_clipboards();mark('RDP-origin-PRIMARY-remains-pasteable-through-confirmed-tab-path')
  # Invalid write requests are refused by the actual native receiver without
  # exposing any read or input operation through the GUI API.
  for value in [{'text':''},{'text':'x\0y'},{'text':'x'*(128*1024+1)},{'text':'test','extra':True}]:

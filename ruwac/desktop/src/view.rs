@@ -171,6 +171,7 @@ pub struct View {
     selection_serials: Cell<(u64, u64)>,
     /// The user's last forwarded left release (0) or middle press (1).
     mouse_gesture: Cell<Option<(u32, std::time::Instant)>>,
+    selection_middle: Cell<bool>,
     primary_handler: RefCell<Option<glib::SignalHandlerId>>,
     drag_start: Cell<(f64, f64)>,
     pressed: Cell<Option<u32>>,
@@ -320,6 +321,7 @@ impl View {
             primary_provider: RefCell::new(None),
             selection_serials: Cell::new((0, 0)),
             mouse_gesture: Cell::new(None),
+            selection_middle: Cell::new(false),
             primary_handler: RefCell::new(None),
             drag_start: Cell::new((0.0, 0.0)),
             pressed: Cell::new(None),
@@ -1677,6 +1679,35 @@ impl View {
     ) {
         if !release {
             self.focus_at(x, y);
+        }
+        if button == 2 {
+            if release && self.selection_middle.replace(false) {
+                return;
+            }
+            if !release {
+                self.selection_middle.set(false);
+                // A deliberate selection from another RUWAC tab already has
+                // a compositor-owned provider. Deliver it as a normal paste,
+                // including through a nested TUI on an older preserved engine
+                // that cannot answer OSC 52 PRIMARY. Other application mouse
+                // events and external PRIMARY owners keep their usual routing.
+                if self.clipboard_action_enabled("paste")
+                    && self.area.has_focus()
+                    && self
+                        .root
+                        .root()
+                        .and_downcast::<gtk::Window>()
+                        .is_some_and(|w| w.is_active())
+                {
+                    if let Some(text) =
+                        crate::terminal_primary::selected(&self.area.display().primary_clipboard())
+                    {
+                        self.selection_middle.set(true);
+                        self.paste(text);
+                        return;
+                    }
+                }
+            }
         }
         if self.mouse_enabled() && !mods.contains(gdk::ModifierType::SHIFT_MASK) {
             self.pressed.set(if release {

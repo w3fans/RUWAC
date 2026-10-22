@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v0.4.38 — 2026-10-22 — Stable source release
+
+- Keep deliberate terminal and RDP mouse selections pasteable between tabs. Middle-click pastes an application-owned selection directly into terminal tabs, including nested RUWAC sessions on preserved older engines that cannot exchange desktop selections through OSC 52. Ctrl+C/V stays separate, and other applications retain normal mouse routing when the selection comes from outside RUWAC.
+- Count connection setup as part of RDP's one-minute foreground recovery budget, then keep retrying the saved connection quietly with short setup limits. Reconnect remains available immediately while recovery or automatic sign-in is pending; failed authentication and certificate checks still stop retries.
+- Restart enabled GNOME automatic sign-in after a completed desktop later reconnects through a new authenticated service handover. Network recovery no longer consumes the login-recognition time limit, and stable connections renew the per-outage handover limit instead of exhausting it over a tab's lifetime. Explicit cancellation, current-profile checks and recognized-field/password guards remain enforced.
+
 ## v0.4.37 — 2026-10-22 — Stable source release
 
 - GNOME automatic sign-in now completes in every tab, not just the selected one. With several machines connecting at once, unselected tabs used to wait for focus until their 90-second limit expired and then showed GDM; they now sign in on their own, because credentials go only over that tab's own verified connection and your input to it stays paused until sign-in finishes. Switching tabs or focus no longer cancels it. If the connection drops and reconnects before the password is submitted, sign-in starts over on the new login screen instead of stopping. The manual "GNOME sign-in" dialog still requires the selected, focused tab.

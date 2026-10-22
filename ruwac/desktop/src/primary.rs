@@ -100,6 +100,7 @@ pub struct Bridge {
     child: Option<Child>,
     input: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
     incoming: std::sync::Arc<std::sync::Mutex<Incoming>>,
+    selection_origin: std::sync::Arc<()>,
     last: Instant,
     modes: Option<(bool, bool)>,
     next_offer: u64,
@@ -183,6 +184,7 @@ impl Bridge {
             child: Some(child),
             input: Some(sender),
             incoming,
+            selection_origin: std::sync::Arc::new(()),
             last: Instant::now() - Duration::from_secs(2),
             modes: None,
             next_offer: 0,
@@ -271,17 +273,22 @@ impl Bridge {
         let Some((text, initial)) = self.take_incoming() else {
             return Ok(None);
         };
-        if initial && crate::terminal_primary::selected(clipboard).is_some() {
+        if initial && crate::terminal_primary::selected_elsewhere(clipboard, &self.selection_origin)
+        {
             return Ok(None);
         }
         let size = text.len();
         let provider = gtk::gdk::ContentProvider::for_bytes(
             "text/plain;charset=utf-8",
-            &gtk::glib::Bytes::from_owned(text.into_bytes()),
+            &gtk::glib::Bytes::from_owned(text.as_bytes().to_vec()),
         );
         clipboard
             .set_content(Some(&provider))
             .map_err(|_| "The desktop refused the remote mouse selection".to_string())?;
+        // Keep its origin while it is still this compositor's actual PRIMARY
+        // owner. Another tab must be able to deliberately paste an RDP-origin
+        // selection just as it can paste a terminal-origin selection.
+        crate::terminal_primary::remember_remote(&provider, &text, &self.selection_origin);
         Ok(Some(size))
     }
     fn take_incoming(&self) -> Option<(String, bool)> {

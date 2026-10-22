@@ -95,6 +95,34 @@ try:
  before=state()['received'];cmd('remote','set',text=payload);wait(lambda:state()['received']>before);peer_front();assert cmd('local','read')==payload;mark('same-remote-selection-after-local-replacement')
  write(root/'receiver-command.json',{'present':True});time.sleep(.3);receiver_front();write(root/'receiver-command.json',{'enabled':True});keyboard(local_input,65505)
  before=state()['received'];bulk='large_native_Ž\n'*12000;cmd('remote','set',text=bulk);wait(lambda:state()['received']>before and state().get('received_bytes')==len(bulk.encode('utf-8')));peer_front();assert cmd('local','read')==bulk;mark('large-native-multiline-selection')
+ # A different connection's initial snapshot must not steal this selection.
+ # Replace the actual production bridge while retaining its published owner;
+ # the old origin stays alive in the selection record, even after drop.
+ write(root/'receiver-command.json',{'enabled':False});time.sleep(.15)
+ other='OTHER_CONNECTION_INITIAL_'+'x'*963
+ assert len(other.encode())==988
+ trace=root/'ssh-peer.log';prior_trace=trace.read_text()
+ cmd('remote','set',text=other);time.sleep(.15)
+ before=state()['received'];write(root/'receiver-command.json',{'present':True,'enabled':True,'restart':1});time.sleep(.3);receiver_front();write(root/'receiver-command.json',{'enabled':True,'restart':1})
+ wait(lambda:state().get('generation')==1 and state().get('ready'))
+ # Native PRIMARY becomes readable after a fresh owner event; the restarted
+ # bridge still marks its first forwarded value as an initial snapshot.
+ cmd('remote','set',text=other)
+ def initial_forwarded():
+     for line in trace.read_text()[len(prior_trace):].splitlines():
+         try:value=json.loads(line)
+         except ValueError:continue
+         if value.get('primary_trace')=='complete' and value.get('size')==len(other.encode()):return True
+     return False
+ wait(initial_forwarded);ticks=state()['ticks'];wait(lambda:state()['ticks']>=ticks+8 and state()['active']);assert state()['received']==before
+ peer_front();assert cmd('local','read')==bulk;mark('another-connection-initial-snapshot-preserves-selected-RDP-text')
+ # A later deliberate selection from the new connection still propagates.
+ write(root/'receiver-command.json',{'present':True,'enabled':True,'restart':1});time.sleep(.3);receiver_front();write(root/'receiver-command.json',{'enabled':True,'restart':1})
+ # Reading through the independent native app above paused reception. Consume
+ # that focus return's protected initial snapshot before the next live change.
+ prior_trace=trace.read_text();cmd('remote','set',text=other);wait(initial_forwarded)
+ ticks=state()['ticks'];wait(lambda:state()['ticks']>=ticks+8 and state()['active']);assert state()['received']==before
+ cmd('remote','set',text=payload);wait(lambda:state()['received']>before);peer_front();assert cmd('local','read')==payload;mark('new-connection-deliberate-selection-still-updates')
  write(root/'receiver-command.json',{'close':True});assert receiver.wait(timeout=7)==0;mark('receiver-exit-closes-SSH-peer')
  (root/'acceptance.json').write_text(json.dumps({'checks':checks,'PASS':True,'actual_production_Rust_receiver':True,'native_Wayland_desktops':2,'SSH':'private executable stand-in, exact production peer command','physical_input':False,'remote_RDP_connection':False},indent=2)+'\n')
 finally:

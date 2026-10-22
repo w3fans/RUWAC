@@ -466,9 +466,14 @@ struct State {
     handovers: u32,
     generation: u64,
     connection_stage: String,
+    connection_attempt: u64,
     phase: String,
     frame: Option<Frame>,
     frames: u64,
+    connected_since: Option<std::time::Instant>,
+    reconnect_attempt: u32,
+    reconnect_elapsed: Duration,
+    reconnect_background: bool,
     display_cap: Option<u64>,
     display_channel_opened: bool,
     display_capability_messages: u64,
@@ -664,11 +669,11 @@ async fn run(
     halt: Arc<AtomicBool>,
     state: Arc<Mutex<State>>,
 ) -> Result<(), String> {
-    // Network loss gets a patient, growing backoff (about 1.5 minutes in
-    // total). A session that stayed up earns a fresh budget, so brief drops
-    // hours apart never exhaust it. GNOME handovers are counted separately.
-    const RETRY_DELAYS_MS: [u64; 9] = [500, 1000, 2000, 4000, 8000, 15000, 15000, 20000, 30000];
-    let mut failures = 0usize;
+    // Setup and backoff share one foreground budget. Afterwards keep trying
+    // quietly, so an endpoint returning online needs no new profile/tab.
+    let mut failures = 0u32;
+    let mut recovery_began = std::time::Instant::now();
+    let mut setup_limit = crate::rdp_retry::SETUP_LIMIT;
     let mut handovers = 0u32;
     let mut first = true;
     loop {
@@ -678,9 +683,11 @@ async fn run(
                 p.desktop_size = size;
             }
             st.generation += 1;
+            st.connection_attempt += 1;
             st.phase = if first { "connecting" } else { "reconnecting" }.into();
             st.frame = None;
             st.frames = 0;
+            st.connected_since = None;
         }
         if halt.load(Ordering::Relaxed) {
             return Ok(());
@@ -697,38 +704,58 @@ async fn run(
                 // A retried setup failure must not linger as this
                 // connection's final error once it succeeds.
                 st.protocol_error = None;
-                st.status = Some(if failures > 0 {
-                    format!(
-                        "Reconnecting · attempt {failures}/{} · bounded backoff",
-                        RETRY_DELAYS_MS.len()
-                    )
-                } else {
-                    "Reconnecting · GNOME session handover".into()
-                });
             }
             while input.try_recv().is_ok() {}
             let delay = if failures > 0 {
-                RETRY_DELAYS_MS[failures - 1]
+                let elapsed = recovery_began.elapsed();
+                let plan = crate::rdp_retry::plan(elapsed, failures);
+                setup_limit = plan.setup;
+                let mut st = state.lock().unwrap();
+                st.reconnect_attempt = failures;
+                st.reconnect_elapsed = elapsed;
+                st.reconnect_background = plan.background;
+                st.status = Some(if plan.background {
+                    "Connection unavailable · retrying saved connection in 15 seconds · Reconnect to try now".into()
+                } else {
+                    format!("Reconnecting · attempt {failures} · Reconnect to try now")
+                });
+                plan.delay
             } else {
-                500
+                setup_limit = crate::rdp_retry::SETUP_LIMIT;
+                state.lock().unwrap().status = Some("Reconnecting · GNOME session handover".into());
+                Duration::from_millis(500)
             };
-            for _ in 0..delay / 100 {
+            let until = tokio::time::Instant::now() + delay;
+            while tokio::time::Instant::now() < until {
                 if halt.load(Ordering::Relaxed) {
                     return Ok(());
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep_until(
+                    until.min(tokio::time::Instant::now() + Duration::from_millis(50)),
+                )
+                .await;
             }
         }
         first = false;
-        let began = std::time::Instant::now();
         let result = run_session(
             p.next_attempt(),
             password.clone(),
             &mut input,
             halt.clone(),
             state.clone(),
+            setup_limit,
         )
         .await;
+        let stable = state
+            .lock()
+            .unwrap()
+            .connected_since
+            .is_some_and(|at| at.elapsed() >= Duration::from_secs(30));
+        if stable {
+            failures = 0;
+            handovers = 0;
+            recovery_began = std::time::Instant::now();
+        }
         if let Some(plan) = state.lock().unwrap().handover.take() {
             handovers += 1;
             if handovers > 4 {
@@ -762,14 +789,10 @@ async fn run(
         if retry && p.handover.is_some() && failures >= 1 {
             p.handover = None;
         }
-        let stable = state.lock().unwrap().frames > 0 && began.elapsed() > Duration::from_secs(30);
-        if stable {
-            failures = 0;
-        }
-        if !p.reconnect || !retry || failures == RETRY_DELAYS_MS.len() {
+        if !p.reconnect || !retry {
             return result;
         }
-        failures += 1;
+        failures = failures.saturating_add(1);
     }
 }
 fn encode_resize(
@@ -904,6 +927,7 @@ async fn run_session(
     input: &mut tokio::sync::mpsc::Receiver<Command>,
     halt: Arc<AtomicBool>,
     state: Arc<Mutex<State>>,
+    setup_limit: Duration,
 ) -> Result<(), String> {
     let gfx: crate::gfx::Shared = Arc::new(Mutex::new(crate::gfx::Pending::default()));
     let session = async {
@@ -1081,7 +1105,7 @@ async fn run_session(
         }
         Ok::<_, String>((result, framed))
     };
-    let (result, framed) = tokio::select! {r=tokio::time::timeout(Duration::from_secs(30),session)=>r.map_err(|_|format!("RDP connection timed out during {}",state.lock().unwrap().connection_stage))??,_=async{while !halt.load(Ordering::Relaxed){tokio::time::sleep(Duration::from_millis(50)).await;}}=>return Ok(())};
+    let (result, framed) = tokio::select! {r=tokio::time::timeout(setup_limit,session)=>r.map_err(|_|format!("RDP connection timed out during {}",state.lock().unwrap().connection_stage))??,_=async{while !halt.load(Ordering::Relaxed){tokio::time::sleep(Duration::from_millis(50)).await;}}=>return Ok(())};
     let activation_factory = result.activation_factory.clone();
     let mut image = DecodedImage::new(
         ironrdp::graphics::image_processing::PixelFormat::BgrX32,
@@ -1222,6 +1246,9 @@ async fn run_session(
                         }
                     }
                     st.phase = "connected".into();
+                    st.connected_since
+                        .get_or_insert_with(std::time::Instant::now);
+                    st.reconnect_background = false;
                     if st.display_request == Some((image.width(), image.height())) {
                         st.display_request = None;
                         st.status = Some(format!(
@@ -1407,6 +1434,7 @@ struct AutoGdm {
     image: Option<(u16, u16, u64, Vec<u8>)>,
     fetching: bool,
     submitted_handovers: u32,
+    submitted_attempt: u64,
     password_queued: bool,
     /// Shown on the covered canvas while a guard holds the sign-in back.
     waiting: Option<&'static str>,
@@ -1414,6 +1442,9 @@ struct AutoGdm {
     notice: Option<String>,
     /// Retry stays offered while the greeter of this handover is current.
     stopped_at: Option<u32>,
+    /// A verified completed automatic login may be repeated only when this
+    /// same transport receives a later authenticated GNOME service handover.
+    completed: Option<(String, u64, u32)>,
 }
 impl Default for AutoGdm {
     fn default() -> Self {
@@ -1429,19 +1460,29 @@ impl Default for AutoGdm {
             image: None,
             fetching: false,
             submitted_handovers: 0,
+            submitted_attempt: 0,
             password_queued: false,
             waiting: None,
             notice: None,
             stopped_at: None,
+            completed: None,
         }
     }
 }
 impl AutoGdm {
-    fn authenticated_desktop_handover(&self, handovers: u32) -> bool {
+    fn reconnects_to_greeter(&self, transport: &str, generation: u64, handovers: u32) -> bool {
+        !self.armed
+            && self
+                .completed
+                .as_ref()
+                .is_some_and(|(t, g, h)| t == transport && generation > *g && handovers > *h)
+    }
+    fn authenticated_desktop_handover(&self, handovers: u32, attempt: u64) -> bool {
         self.sequence.step == crate::gdm::Step::Submitted
             && self.password_queued
             && !self.fetching
-            && handovers > self.submitted_handovers
+            && handovers == self.submitted_handovers.saturating_add(1)
+            && attempt == self.submitted_attempt.saturating_add(1)
     }
 }
 #[derive(Clone)]
@@ -2349,12 +2390,12 @@ impl RdpView {
                 .unwrap_or("disconnected")
                 .to_owned();
             let configured = !v.entries[0].text().is_empty();
-            let show = configured && phase != "connected" && !v.auto_gdm.borrow().armed;
+            let show = configured && phase != "connected";
             v.disconnect_card.set_visible(show);
             if show {
                 let message = match phase.as_str() {
                     "connecting" => "Connecting…".to_owned(),
-                    "reconnecting" => "Connection interrupted · reconnecting…".to_owned(),
+                    "reconnecting" => v.status.text().to_string(),
                     "error" => v.status.text().to_string(),
                     _ => "Disconnected".to_owned(),
                 };
@@ -2905,7 +2946,7 @@ impl RdpView {
                     "disconnected".into()
                 }
             });
-        serde_json::json!({"id":self.root.widget_name().as_str(),"phase":phase,"display_mode":format!("{:?}",self.mode.get()),"viewport":[self.scroll.width(),self.scroll.height()],"zoom":self.zoom.get(),"input_paused_for_login":self.auto_gdm.borrow().armed,"reactivating":connection.as_ref().is_some_and(|c|c.state.lock().unwrap().reactivating),"mouse_selection":self.primary_status.text().as_str(),"connection_stage":connection.as_ref().map(|c|c.state.lock().unwrap().connection_stage.clone()),"size":self.size.get(),"transport_id":connection.as_ref().map(|c|c.id.as_str()),"decoded_updates":connection.as_ref().map(|c|c.state.lock().unwrap().frames).unwrap_or(0),"clipboard_owner":self.broker.borrow().active()==Some(self.id.as_str()),"display_control":connection.as_ref().map(|c|{let s=c.state.lock().unwrap();serde_json::json!({"channel_opened":s.display_channel_opened,"capability_messages":s.display_capability_messages,"negotiated":s.display_cap.is_some()})}),"clipboard_channel_negotiated":connection.as_ref().is_some_and(|c|c.state.lock().unwrap().clipboard_channel_negotiated),"verified_tls_sha256":connection.as_ref().and_then(|c|c.state.lock().unwrap().verified_tls_sha256.clone()),"protocol_error":connection.as_ref().and_then(|c|c.state.lock().unwrap().protocol_error.clone()),"authentication_error":connection.as_ref().and_then(|c|c.state.lock().unwrap().authentication_error.clone()),"certificate_review":self.certificate.borrow().as_ref().map(|r|serde_json::json!({"sha256":r.fingerprint(),"changed":r.changed,"valid_now":r.valid_now})),"profile":self.profile_metadata.borrow().as_ref().map(|p|p.id.clone())})
+        serde_json::json!({"id":self.root.widget_name().as_str(),"phase":phase,"display_mode":format!("{:?}",self.mode.get()),"viewport":[self.scroll.width(),self.scroll.height()],"zoom":self.zoom.get(),"input_paused_for_login":self.auto_gdm.borrow().armed,"reactivating":connection.as_ref().is_some_and(|c|c.state.lock().unwrap().reactivating),"mouse_selection":self.primary_status.text().as_str(),"connection_stage":connection.as_ref().map(|c|c.state.lock().unwrap().connection_stage.clone()),"recovery":connection.as_ref().map(|c|{let st=c.state.lock().unwrap();serde_json::json!({"attempt":st.reconnect_attempt,"elapsed_ms":st.reconnect_elapsed.as_millis() as u64,"background":st.reconnect_background})}),"size":self.size.get(),"transport_id":connection.as_ref().map(|c|c.id.as_str()),"decoded_updates":connection.as_ref().map(|c|c.state.lock().unwrap().frames).unwrap_or(0),"clipboard_owner":self.broker.borrow().active()==Some(self.id.as_str()),"display_control":connection.as_ref().map(|c|{let s=c.state.lock().unwrap();serde_json::json!({"channel_opened":s.display_channel_opened,"capability_messages":s.display_capability_messages,"negotiated":s.display_cap.is_some()})}),"clipboard_channel_negotiated":connection.as_ref().is_some_and(|c|c.state.lock().unwrap().clipboard_channel_negotiated),"verified_tls_sha256":connection.as_ref().and_then(|c|c.state.lock().unwrap().verified_tls_sha256.clone()),"protocol_error":connection.as_ref().and_then(|c|c.state.lock().unwrap().protocol_error.clone()),"authentication_error":connection.as_ref().and_then(|c|c.state.lock().unwrap().authentication_error.clone()),"certificate_review":self.certificate.borrow().as_ref().map(|r|serde_json::json!({"sha256":r.fingerprint(),"changed":r.changed,"valid_now":r.valid_now})),"profile":self.profile_metadata.borrow().as_ref().map(|p|p.id.clone())})
     }
     pub fn connect_profile(&self) {
         fn find(w: &gtk::Widget) -> Option<gtk::Button> {
@@ -4007,6 +4048,7 @@ impl RdpView {
         let was_armed = a.armed;
         a.sequence.stop();
         a.armed = false;
+        a.completed = None;
         a.pending = None;
         a.fetching = false;
         a.waiting = None;
@@ -4023,7 +4065,7 @@ impl RdpView {
     }
     fn auto_gdm_tick(self: &Rc<Self>) {
         use crate::gdm::{Action, Step};
-        if !self.auto_gdm.borrow().armed {
+        if !self.auto_gdm.borrow().armed && self.auto_gdm.borrow().completed.is_none() {
             return;
         }
         {
@@ -4037,7 +4079,7 @@ impl RdpView {
             self.auto_gdm_stop("Automatic sign-in stopped: profile unavailable");
             return;
         };
-        let Some((transport, generation, handovers, phase, frames)) =
+        let Some((transport, generation, handovers, phase, frames, attempt)) =
             self.connection.borrow().as_ref().map(|c| {
                 let st = c.state.lock().unwrap();
                 (
@@ -4046,11 +4088,30 @@ impl RdpView {
                     st.handovers,
                     st.phase.clone(),
                     st.frames,
+                    st.connection_attempt,
                 )
             })
         else {
             return;
         };
+        if !self.auto_gdm.borrow().armed {
+            let restart = phase == "connected"
+                && frames > 0
+                && self
+                    .auto_gdm
+                    .borrow()
+                    .reconnects_to_greeter(&transport, generation, handovers)
+                && auto_sign_in_missing(&p).is_none()
+                && crate::profiles::assist_profile_current(&p);
+            if !restart {
+                return;
+            }
+            let mut a = self.auto_gdm.borrow_mut();
+            *a = AutoGdm::default();
+            a.armed = true;
+            self.status
+                .set_text("Automatic sign-in · reconnected GNOME login");
+        }
         if phase == "error" || phase == "disconnected" {
             let service_auth_failed = handovers == 0
                 && self
@@ -4067,6 +4128,13 @@ impl RdpView {
                 self.status.text().to_string()
             };
             self.auto_gdm_stop(&reason);
+            return;
+        }
+        // Transport recovery is not time spent recognizing a login form. A
+        // slow/offline server must not consume the sign-in budget before its
+        // greeter has even produced a frame.
+        if phase != "connected" || frames == 0 || handovers == 0 {
+            self.auto_gdm.borrow_mut().began = std::time::Instant::now();
             return;
         }
         if self.auto_gdm.borrow().began.elapsed() > Duration::from_secs(90) {
@@ -4095,7 +4163,7 @@ impl RdpView {
             }
             let complete = {
                 let a = self.auto_gdm.borrow();
-                a.authenticated_desktop_handover(handovers)
+                a.authenticated_desktop_handover(handovers, attempt)
                     && frames > 0
                     && phase == "connected"
                     && self.surface_generation.get() == generation
@@ -4105,10 +4173,18 @@ impl RdpView {
                 let mut a = self.auto_gdm.borrow_mut();
                 a.sequence.authenticated_handover();
                 a.armed = false;
+                a.completed = Some((transport.clone(), generation, handovers));
                 a.image = None;
                 a.pending = None;
                 self.status.set_text("GNOME sign-in completed");
                 self.area.queue_draw();
+            } else if attempt > self.auto_gdm.borrow().submitted_attempt
+                && !self
+                    .auto_gdm
+                    .borrow()
+                    .authenticated_desktop_handover(handovers, attempt)
+            {
+                self.auto_gdm_stop("Connection changed after password submission; use Retry automatic sign-in on the new login screen");
             }
             return;
         }
@@ -4298,12 +4374,11 @@ impl RdpView {
                                     let mut a = v.auto_gdm.borrow_mut();
                                     a.fetching = false;
                                     a.password_queued = true;
-                                    a.submitted_handovers = v
-                                        .connection
-                                        .borrow()
-                                        .as_ref()
-                                        .map(|c| c.state.lock().unwrap().handovers)
-                                        .unwrap_or(0);
+                                    // Bind completion to the connection/frame
+                                    // that authorized this lookup, not a retry
+                                    // that may have started while it finished.
+                                    a.submitted_handovers = handovers;
+                                    a.submitted_attempt = attempt;
                                     drop(a);
                                     v.command(Command::Assisted(
                                         text,
@@ -4636,20 +4711,104 @@ impl RdpView {
 mod tests {
     use super::*;
     #[test]
+    fn completed_login_rearms_only_for_a_later_verified_service_handover() {
+        let mut a = AutoGdm::default();
+        assert!(!a.reconnects_to_greeter("transport", 8, 3));
+        a.completed = Some(("transport".into(), 7, 2));
+        assert!(!a.reconnects_to_greeter("other", 8, 3));
+        assert!(!a.reconnects_to_greeter("transport", 7, 3));
+        assert!(!a.reconnects_to_greeter("transport", 8, 2));
+        assert!(a.reconnects_to_greeter("transport", 8, 3));
+        a.armed = true;
+        assert!(!a.reconnects_to_greeter("transport", 8, 3));
+        a.armed = false;
+        a.completed = None; // An explicit stop/cancel clears this permission.
+        assert!(!a.reconnects_to_greeter("transport", 8, 3));
+    }
+
+    #[test]
+    fn blackholed_setup_obeys_the_remaining_recovery_budget_and_cancel() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            for cancel in [false, true] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let port = listener.local_addr().unwrap().port();
+                let peer = tokio::spawn(async move {
+                    let (_socket, _) = listener.accept().await.unwrap();
+                    std::future::pending::<()>().await;
+                });
+                let profile = Profile {
+                    host: "127.0.0.1".into(),
+                    port,
+                    user: "generated".into(),
+                    reference: String::new(),
+                    ca: None,
+                    reconnect: true,
+                    desktop_size: (800, 600),
+                    graphics: false,
+                    clipboard: false,
+                    handover: None,
+                };
+                let (_tx, mut rx) = tokio::sync::mpsc::channel(1);
+                let halt = Arc::new(AtomicBool::new(false));
+                let stop = halt.clone();
+                let canceller = tokio::spawn(async move {
+                    if cancel {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                });
+                let at = std::time::Instant::now();
+                let result = run_session(
+                    profile,
+                    "generated".into(),
+                    &mut rx,
+                    halt,
+                    Arc::new(Mutex::new(State::default())),
+                    if cancel {
+                        Duration::from_secs(30)
+                    } else {
+                        Duration::from_millis(80)
+                    },
+                )
+                .await;
+                peer.abort();
+                let _ = peer.await;
+                let _ = canceller.await;
+                assert!(at.elapsed() < Duration::from_secs(3));
+                if cancel {
+                    assert!(result.is_ok());
+                } else {
+                    assert!(result.unwrap_err().starts_with("RDP connection timed out"));
+                }
+            }
+        });
+    }
+
+    #[test]
     fn initial_gdm_handover_cannot_finish_pending_password_lookup() {
         let mut a = AutoGdm::default();
         a.sequence.step = crate::gdm::Step::Submitted;
         a.fetching = true;
+        a.binding = Some(("generated-transport".into(), 4, 1));
+        a.submitted_attempt = 4;
         // The real service-to-GDM handover is already counted before lookup.
-        assert!(!a.authenticated_desktop_handover(1));
+        assert!(!a.authenticated_desktop_handover(1, 4));
         a.fetching = false;
-        assert!(!a.authenticated_desktop_handover(1));
+        assert!(!a.authenticated_desktop_handover(1, 4));
         a.submitted_handovers = 1;
         a.password_queued = true;
-        assert!(!a.authenticated_desktop_handover(1));
-        assert!(a.authenticated_desktop_handover(2));
+        assert!(!a.authenticated_desktop_handover(1, 4));
+        assert!(a.authenticated_desktop_handover(2, 5));
+        // A transport retry through service->greeter is not the desktop
+        // handover caused by this password submission.
+        assert!(!a.authenticated_desktop_handover(2, 6));
+        assert!(!a.authenticated_desktop_handover(3, 6));
         a.sequence.stop();
-        assert!(!a.authenticated_desktop_handover(2));
+        assert!(!a.authenticated_desktop_handover(2, 5));
     }
     #[test]
     fn handover_is_consumed_once_and_service_identity_survives_retry() {
