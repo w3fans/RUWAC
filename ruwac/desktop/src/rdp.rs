@@ -694,6 +694,9 @@ async fn run(
                 st.display_capability_messages = 0;
                 st.reactivating = true;
                 st.bridge.reset();
+                // A retried setup failure must not linger as this
+                // connection's final error once it succeeds.
+                st.protocol_error = None;
                 st.status = Some(if failures > 0 {
                     format!(
                         "Reconnecting · attempt {failures}/{} · bounded backoff",
@@ -735,19 +738,30 @@ async fn run(
             failures = 0;
             continue;
         }
-        let retry = result.as_ref().err().is_some_and(|e| {
-            matches!(
-                e.as_str(),
-                "RDP TCP connection failed"
-                    | "RDP stream disconnected"
-                    | "RDP connect timed out"
-                    | "RDP response write timeout"
-                    | "RDP response write failed"
-                    | "RDP reactivation read failed"
-                    | "RDP reactivation write failed"
-                    | "RDP reactivation timed out"
-            )
-        });
+        // Transport-level failures (including a connection that closes or
+        // stalls during setup) are retried; authentication, certificate and
+        // server-initiated disconnects are not.
+        let retry = state.lock().unwrap().authentication_error.is_none()
+            && result.as_ref().err().is_some_and(|e| {
+                matches!(
+                    e.as_str(),
+                    "RDP TCP connection failed"
+                        | "RDP stream disconnected"
+                        | "RDP response write timeout"
+                        | "RDP response write failed"
+                        | "RDP reactivation read failed"
+                        | "RDP reactivation write failed"
+                        | "RDP reactivation timed out"
+                        | "RDP security negotiation failed"
+                        | "RDP protocol/session setup failed"
+                ) || e.starts_with("RDP connection timed out")
+            });
+        // GNOME aborts a handover the client did not complete within about
+        // half a minute; after a second failure, start again from the
+        // service login (automatic sign-in then runs on the new greeter).
+        if retry && p.handover.is_some() && failures >= 1 {
+            p.handover = None;
+        }
         let stable = state.lock().unwrap().frames > 0 && began.elapsed() > Duration::from_secs(30);
         if stable {
             failures = 0;
@@ -1067,7 +1081,7 @@ async fn run_session(
         }
         Ok::<_, String>((result, framed))
     };
-    let (result, framed) = tokio::select! {r=tokio::time::timeout(Duration::from_secs(20),session)=>r.map_err(|_|format!("RDP connection timed out during {}",state.lock().unwrap().connection_stage))??,_=async{while !halt.load(Ordering::Relaxed){tokio::time::sleep(Duration::from_millis(50)).await;}}=>return Ok(())};
+    let (result, framed) = tokio::select! {r=tokio::time::timeout(Duration::from_secs(30),session)=>r.map_err(|_|format!("RDP connection timed out during {}",state.lock().unwrap().connection_stage))??,_=async{while !halt.load(Ordering::Relaxed){tokio::time::sleep(Duration::from_millis(50)).await;}}=>return Ok(())};
     let activation_factory = result.activation_factory.clone();
     let mut image = DecodedImage::new(
         ironrdp::graphics::image_processing::PixelFormat::BgrX32,
@@ -1746,7 +1760,11 @@ impl RdpView {
         v.area.connect_has_focus_notify(move |area| {
             if !area.has_focus() {
                 if let Some(v) = weak.upgrade() {
-                    v.assist_epoch.fetch_add(1, Ordering::AcqRel);
+                    // Automatic sign-in continues in the background; only a
+                    // manual, confirmed sign-in is tied to keyboard focus.
+                    if !v.auto_gdm.borrow().armed {
+                        v.assist_epoch.fetch_add(1, Ordering::AcqRel);
+                    }
                 }
             }
         });
@@ -2980,7 +2998,9 @@ impl RdpView {
     }
     pub fn inactive(&self) {
         self.primary_click.borrow_mut().take();
-        self.assist_epoch.fetch_add(1, Ordering::AcqRel);
+        if !self.auto_gdm.borrow().armed {
+            self.assist_epoch.fetch_add(1, Ordering::AcqRel);
+        }
         self.bridge.borrow().epoch.store(0, Ordering::Release);
         self.release_keys();
     }
@@ -3906,6 +3926,32 @@ impl RdpView {
                     && s.authentication_error.is_none()
             })
     }
+    /// Automatic sign-in needs the verified connection and profile, not local
+    /// focus: credentials go only over this tab's own pinned connection, and
+    /// user input to it is paused while armed. So a background tab (several
+    /// machines reconnecting at once) signs in without being selected.
+    fn auto_ready(&self, p: &crate::profiles::Profile, transport: &str, generation: u64) -> bool {
+        p.preferences.rdp_mode == "gnome-remote-login"
+            && self.held.borrow().is_empty()
+            && self.buttons.borrow().is_empty()
+            && self.entries[0].text() == p.server
+            && self.entries[1].text() == p.username
+            && self.entries[2].text() == p.secret_reference
+            && self.entries[3].text() == p.preferences.trust
+            && crate::profiles::assist_profile_current(p)
+            && self.connection.borrow().as_ref().is_some_and(|c| {
+                let s = c.state.lock().unwrap();
+                c.id == transport
+                    && !c.stop.load(Ordering::Acquire)
+                    && s.generation == generation
+                    && self.surface_generation.get() == generation
+                    && self.size.get() != (0, 0)
+                    && s.frames > 0
+                    && !s.reactivating
+                    && s.verified_tls_sha256.is_some()
+                    && s.authentication_error.is_none()
+            })
+    }
     /// After a stop, the same greeter (no later handover) may be retried.
     fn auto_gdm_retry_available(&self) -> bool {
         let a = self.auto_gdm.borrow();
@@ -3938,19 +3984,7 @@ impl RdpView {
     }
     /// Which guard holds automatic sign-in back, in words for the cover.
     fn assist_wait_reason(&self, p: &crate::profiles::Profile) -> &'static str {
-        let window_active = self
-            .root
-            .root()
-            .and_downcast::<gtk::Window>()
-            .is_some_and(|w| w.is_active());
-        if !self.selected.borrow().as_ref().is_some_and(|f| f()) || !self.root.is_mapped() {
-            "Waiting: select this tab"
-        } else if !window_active {
-            "Waiting: bring this RUWAC window to the front"
-        } else if !self.area.has_focus() || self.broker.borrow().active() != Some(self.id.as_str())
-        {
-            "Waiting: click here to continue"
-        } else if !self.held.borrow().is_empty() || !self.buttons.borrow().is_empty() {
+        if !self.held.borrow().is_empty() || !self.buttons.borrow().is_empty() {
             "Waiting: release held keys and mouse buttons"
         } else if !crate::profiles::assist_profile_current(p)
             || self.entries[0].text() != p.server
@@ -4052,17 +4086,6 @@ impl RdpView {
                 .is_some_and(|(t, _, e)| {
                     t == &transport && *e == self.assist_epoch.load(Ordering::Acquire)
                 })
-                && self
-                    .selected
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|selected| selected())
-                && self.area.has_focus()
-                && self
-                    .root
-                    .root()
-                    .and_downcast::<gtk::Window>()
-                    .is_some_and(|w| w.is_active())
                 && crate::profiles::assist_profile_current(&p);
             if !target_ok {
                 self.auto_gdm_stop(
@@ -4075,7 +4098,7 @@ impl RdpView {
                 a.authenticated_desktop_handover(handovers)
                     && frames > 0
                     && phase == "connected"
-                    && self.rendered_generation.get() == generation
+                    && self.surface_generation.get() == generation
                     && self.size.get() != (0, 0)
             };
             if complete {
@@ -4096,27 +4119,12 @@ impl RdpView {
             return;
         }
         let epoch = self.assist_epoch.load(Ordering::Acquire);
-        if !self.assist_ready(&p, &transport, generation, true) {
+        if !self.auto_ready(&p, &transport, generation) {
             if self.auto_gdm.borrow().binding.is_some() {
                 self.auto_gdm_stop(
                     "Automatic sign-in stopped: selected tab, profile or focus changed",
                 );
                 return;
-            }
-            // Nothing has been sent yet. A selected tab in the active window
-            // takes keyboard focus itself (opening from the sidebar leaves it
-            // elsewhere), unless the user is typing into another field.
-            let window = self.root.root().and_downcast::<gtk::Window>();
-            let editing = window
-                .as_ref()
-                .and_then(|w| gtk::prelude::GtkWindowExt::focus(w))
-                .is_some_and(|f| f.is::<gtk::Text>() || f.is::<gtk::TextView>());
-            if !self.area.has_focus()
-                && !editing
-                && self.selected.borrow().as_ref().is_some_and(|f| f())
-                && window.is_some_and(|w| w.is_active())
-            {
-                self.focus();
             }
             let reason = self.assist_wait_reason(&p);
             let mut a = self.auto_gdm.borrow_mut();
@@ -4147,6 +4155,26 @@ impl RdpView {
                 }
             });
         if let Some(reason) = changed {
+            // A reconnect after a brief network loss shows a fresh greeter.
+            // Before the password was submitted, start over on that screen.
+            let restart = {
+                let a = self.auto_gdm.borrow();
+                a.binding
+                    .as_ref()
+                    .is_some_and(|(t, g, e)| t == &transport && *e == epoch && *g != generation)
+                    && !a.fetching
+                    && !a.password_queued
+            };
+            if restart {
+                let mut a = self.auto_gdm.borrow_mut();
+                a.sequence = Default::default();
+                a.binding = None;
+                a.pending = None;
+                a.scan_binding = None;
+                a.image = None;
+                a.began = std::time::Instant::now();
+                return;
+            }
             self.auto_gdm_stop(reason);
             return;
         }
@@ -4250,7 +4278,7 @@ impl RdpView {
                         };
                         if !v.auto_gdm.borrow().armed
                             || v.assist_epoch.load(Ordering::Acquire) != epoch
-                            || !v.assist_ready(&p, &transport, generation, true)
+                            || !v.auto_ready(&p, &transport, generation)
                         {
                             v.auto_gdm_stop(
                                 "Automatic sign-in stopped: credential target or focus changed",
@@ -4732,7 +4760,11 @@ mod tests {
                     port,
                     user: "synthetic-fixture".into(),
                     reference: String::new(),
-                    reconnect: true,
+                    // A certificate failure is never retried, even with
+                    // reconnect on; a setup that closes after TLS is a
+                    // retried transport failure, so it is classified here
+                    // with reconnect off.
+                    reconnect: !trusted,
                     desktop_size: (1280, 720),
                     graphics: false,
                     clipboard: true,

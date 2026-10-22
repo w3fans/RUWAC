@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v0.4.37 — 2026-10-22 — Stable source release
+
+- GNOME automatic sign-in now completes in every tab, not just the selected one. With several machines connecting at once, unselected tabs used to wait for focus until their 90-second limit expired and then showed GDM; they now sign in on their own, because credentials go only over that tab's own verified connection and your input to it stays paused until sign-in finishes. Switching tabs or focus no longer cancels it. If the connection drops and reconnects before the password is submitted, sign-in starts over on the new login screen instead of stopping. The manual "GNOME sign-in" dialog still requires the selected, focused tab.
+- RDP tabs recover from more kinds of network failure instead of staying disconnected: a connection that times out (setup limit now 30 seconds), is reset during security negotiation, or closes during session setup is retried with the usual backoff. A GNOME login handover that cannot be completed in time is restarted from the beginning instead of being abandoned. Authentication, certificate and server-initiated disconnects are still not retried.
+
 ## v0.4.36 — 2026-10-22 — Stable source release
 
 - Updating RUWAC on a remote machine ("Install / update remote RUWAC CLI…" and agent launches that install RUWAC) now works where the RUWAC desktop is also installed for that user: the command-line update brings the existing desktop along instead of refusing with "Retain the desktop installation with --desktop". A refused installation no longer leaves a partial version folder behind that blocked the next attempt with "Existing immutable installation differs".
