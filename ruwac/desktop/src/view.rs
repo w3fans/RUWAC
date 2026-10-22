@@ -167,6 +167,10 @@ pub struct View {
     pub warning: RefCell<Option<String>>,
     selection: RefCell<Option<((usize, usize), (usize, usize))>>,
     primary_provider: RefCell<Option<gdk::ContentProvider>>,
+    /// Last handled OSC 52 PRIMARY (offer, request) serials of the target pane.
+    selection_serials: Cell<(u64, u64)>,
+    /// The user's last forwarded left release (0) or middle press (1).
+    mouse_gesture: Cell<Option<(u32, std::time::Instant)>>,
     primary_handler: RefCell<Option<glib::SignalHandlerId>>,
     drag_start: Cell<(f64, f64)>,
     pressed: Cell<Option<u32>>,
@@ -314,6 +318,8 @@ impl View {
             warning: RefCell::new(None),
             selection: RefCell::new(None),
             primary_provider: RefCell::new(None),
+            selection_serials: Cell::new((0, 0)),
+            mouse_gesture: Cell::new(None),
             primary_handler: RefCell::new(None),
             drag_start: Cell::new((0.0, 0.0)),
             pressed: Cell::new(None),
@@ -1412,7 +1418,22 @@ impl View {
                     self.selection.borrow_mut().take();
                 }
             }
+            let serials = {
+                let target = self.target.borrow();
+                panes
+                    .iter()
+                    .find(|p| p["id"].as_str() == Some(target.as_str()))
+                    .map(|p| {
+                        (
+                            p["selection_offer"].as_u64().unwrap_or(0),
+                            p["selection_request"].as_u64().unwrap_or(0),
+                        )
+                    })
+            };
             *self.frame.borrow_mut() = Some(frame);
+            if let Some(serials) = serials {
+                self.program_selection(serials);
+            }
             if !self.navigation.get() && !self.target.borrow().is_empty() {
                 let pending = std::mem::take(&mut *self.early.borrow_mut());
                 for text in pending {
@@ -1424,6 +1445,11 @@ impl View {
             }
         }
         if let Some((method, v)) = s.reply.pop_front() {
+            if method == "pane.selection" {
+                if let Some(text) = v["text"].as_str() {
+                    self.offer_program_selection(text);
+                }
+            }
             if method == "client.retireEnded" && v["closed"] == true && self.retiring.get() {
                 self.finished.set(true);
             }
@@ -1632,6 +1658,12 @@ impl View {
                 } else {
                     0
                 };
+            match (button & !28, release) {
+                (0, true) | (1, false) => self
+                    .mouse_gesture
+                    .set(Some((button & !28, std::time::Instant::now()))),
+                _ => (),
+            }
             self.command("client.input",json!({"pane":pane,"kind":"mouse","text":"","mouse_event":{"button":button,"x":c+1,"y":r+1,"release":release}}));
         }
     }
@@ -1773,6 +1805,75 @@ impl View {
         } else {
             "Selection copied to CLIPBOARD"
         });
+    }
+    /// A program in the target pane (typically a nested RUWAC client) used
+    /// OSC 52 PRIMARY. Its selection reaches the desktop, and the desktop
+    /// selection reaches it, only right after the user's own mouse gesture
+    /// in this pane; otherwise the program keeps its internal fallback.
+    fn program_selection(self: &Rc<Self>, (offer, request): (u64, u64)) {
+        let (seen_offer, seen_request) = self.selection_serials.get();
+        if (offer, request) == (seen_offer, seen_request) {
+            return;
+        }
+        self.selection_serials.set((offer, request));
+        let recent = |button: u32, within: u64| {
+            self.mouse_gesture.get().is_some_and(|(b, at)| {
+                b == button && at.elapsed() < std::time::Duration::from_millis(within)
+            })
+        };
+        if !self.broker.borrow().desktop_enabled() || !self.area.has_focus() {
+            return;
+        }
+        let pane = self.target.borrow().clone();
+        if offer > seen_offer && recent(0, 2000) {
+            self.mouse_gesture.set(None);
+            self.command("pane.selection", json!({"pane":pane,"serial":offer}));
+        }
+        if request > seen_request && recent(1, 1500) {
+            self.mouse_gesture.set(None);
+            let weak = Rc::downgrade(self);
+            let display = self.area.display();
+            let epoch = self.broker.borrow().epoch();
+            clipboard::read_text(
+                &display.primary_clipboard(),
+                self.broker.clone(),
+                epoch,
+                ruwac_clipboard::ClipScope::Primary,
+                std::time::Duration::ZERO,
+                move |result| {
+                    if let (Some(v), Ok(text)) = (weak.upgrade(), result) {
+                        if *v.target.borrow() == pane && text.len() <= 128 * 1024 {
+                            v.command(
+                                "pane.selectionReply",
+                                json!({"pane":pane,"serial":request,"text":text}),
+                            );
+                        }
+                    }
+                },
+            );
+        }
+    }
+    fn offer_program_selection(&self, text: &str) {
+        if text.is_empty() || text.len() > ruwac_clipboard::MAX_DESKTOP_TEXT {
+            return;
+        }
+        self.broker.borrow_mut().local_copy();
+        let provider = gdk::ContentProvider::for_value(&text.to_value());
+        *self.primary_provider.borrow_mut() = Some(provider.clone());
+        if self
+            .area
+            .display()
+            .primary_clipboard()
+            .set_content(Some(&provider))
+            .is_err()
+        {
+            self.primary_provider.borrow_mut().take();
+            self.status
+                .set_text("The desktop could not publish this PRIMARY selection");
+            return;
+        }
+        crate::terminal_primary::remember(&provider, text);
+        self.status.set_text("Selection offered to PRIMARY");
     }
     pub fn paste_clipboard(self: &Rc<Self>, primary: bool) {
         let display = self.area.display();

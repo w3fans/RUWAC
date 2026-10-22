@@ -24,6 +24,8 @@ pub enum Input {
     Keyboard(Vec<u8>),
     Mouse(Vec<u8>),
     Paste(Vec<u8>),
+    /// The outer terminal's OSC 52 answer with the desktop mouse selection.
+    Selection(String),
     Rejected(&'static str),
 }
 #[derive(Default)]
@@ -152,8 +154,14 @@ impl Decoder {
                     .position(|b| *b == 7)
                     .map(|i| i + 1)
                     .or_else(|| find(&self.buf, b"\x1b\\").map(|i| i + 2));
+                // A selection answer carries up to 128 KiB as base64.
+                let limit = if self.buf.starts_with(b"\x1b]52;") {
+                    SELECTION_LIMIT * 4 / 3 + 64
+                } else {
+                    4096
+                };
                 let Some(n) = end else {
-                    if self.buf.len() > 4096 {
+                    if self.buf.len() > limit {
                         out.push(Input::Keyboard(self.buf.drain(..).collect()));
                     }
                     break;
@@ -161,7 +169,18 @@ impl Decoder {
                 let b: Vec<_> = self.buf.drain(..n).collect();
                 let cap = (b.starts_with(b"\x1b]10;rgb:") || b.starts_with(b"\x1b]11;rgb:"))
                     && b.iter().all(|x| x.is_ascii());
-                if !cap {
+                if let Some(data) = b.strip_prefix(b"\x1b]52;p;") {
+                    let data = data
+                        .strip_suffix(b"\x07")
+                        .or_else(|| data.strip_suffix(b"\x1b\\"))
+                        .unwrap_or(data);
+                    if let Some(text) = base64_decode(data)
+                        .and_then(|t| String::from_utf8(t).ok())
+                        .filter(|t| t.len() <= SELECTION_LIMIT)
+                    {
+                        out.push(Input::Selection(text));
+                    }
+                } else if !cap {
                     out.push(Input::Keyboard(b))
                 }
                 continue;
@@ -178,6 +197,54 @@ impl Decoder {
             vec![]
         }
     }
+}
+/// Mouse selections exchanged with the outer terminal over OSC 52 PRIMARY.
+const SELECTION_LIMIT: usize = 128 * 1024;
+const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+fn base64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() {
+                BASE64[(n >> (18 - 6 * i) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    out
+}
+fn base64_decode(data: &[u8]) -> Option<Vec<u8>> {
+    let data = data
+        .strip_suffix(b"==")
+        .or_else(|| data.strip_suffix(b"="))
+        .unwrap_or(data);
+    let mut out = Vec::with_capacity(data.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in data {
+        acc = acc << 6 | BASE64.iter().position(|b| b == c)? as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+/// Offer a mouse selection to the outer terminal's desktop PRIMARY (OSC 52);
+/// terminals without OSC 52 ignore it and the session buffer still has it.
+fn offer_selection(text: &str) {
+    if text.is_empty() || text.len() > SELECTION_LIMIT {
+        return;
+    }
+    let mut stdout = io::stdout().lock();
+    let _ = write!(stdout, "\x1b]52;p;{}\x07", base64_encode(text.as_bytes()));
+    let _ = stdout.flush();
 }
 fn find(b: &[u8], needle: &[u8]) -> Option<usize> {
     b.windows(needle.len()).position(|x| x == needle)
@@ -1382,6 +1449,8 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
     let mut screen_size = terminal_dimensions();
     // Left-button press on a pane without mouse support: (pane, column, row).
     let mut drag: Option<(String, usize, usize)> = None;
+    // Middle-click awaiting the outer terminal's selection: (pane, asked at).
+    let mut primary_paste: Option<(String, Instant)> = None;
     let mut size = dimensions(limits);
     call(
         &mut s,
@@ -1437,8 +1506,29 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
             }
         };
         let mut dirty = !events.is_empty();
+        if primary_paste
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > Duration::from_millis(400))
+        {
+            let (pane, _) = primary_paste.take().unwrap();
+            if let Err(e) = call(&mut s, "buffer.paste", json!({"pane":pane})) {
+                status = e.to_string();
+            }
+            dirty = true;
+        }
         for event in events {
             match event {
+                Input::Selection(text) => {
+                    if let Some((pane, _)) = primary_paste.take() {
+                        if let Err(e) = call(
+                            &mut s,
+                            "client.input",
+                            json!({"pane":pane,"kind":"paste","text":text}),
+                        ) {
+                            status = e.to_string();
+                        }
+                    }
+                }
                 Input::Rejected(e) => {
                     prefix = false;
                     status = e.into();
@@ -1475,6 +1565,7 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
                                 if release && c.anchor.is_some() {
                                     let text = c.selected(MAX_TEXT).map_err(io::Error::other)?;
                                     let bytes = text.len();
+                                    offer_selection(&text);
                                     call(
                                         &mut s,
                                         "buffer.set",
@@ -1573,8 +1664,14 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
                                     }
                                 }
                             }
+                            // Middle-click pastes the desktop mouse selection
+                            // when the outer terminal answers OSC 52 promptly,
+                            // otherwise the session buffer.
                             1 if !release => {
-                                call(&mut s, "buffer.paste", json!({"pane":pane}))?;
+                                let mut stdout = io::stdout().lock();
+                                stdout.write_all(b"\x1b]52;p;?\x07")?;
+                                stdout.flush()?;
+                                primary_paste = Some((pane.clone(), Instant::now()));
                             }
                             _ => {
                                 if release {
@@ -2144,6 +2241,29 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn desktop_selection_answers_decode_and_base64_round_trips() {
+        for text in ["", "a", "ab", "abc", "Že界\n tail"] {
+            let encoded = base64_encode(text.as_bytes());
+            assert_eq!(base64_decode(encoded.as_bytes()).unwrap(), text.as_bytes());
+        }
+        assert_eq!(base64_encode(b"hi"), "aGk=");
+        let mut d = Decoder::default();
+        assert_eq!(
+            d.feed(b"\x1b]52;p;aGk=\x07x"),
+            vec![
+                Input::Selection("hi".into()),
+                Input::Keyboard(b"x".to_vec())
+            ]
+        );
+        // Large answers arrive in pieces and exceed the ordinary OSC bound.
+        let text = "y".repeat(100_000);
+        let answer = format!("\x1b]52;p;{}\x1b\\", base64_encode(text.as_bytes()));
+        let (head, tail) = answer.as_bytes().split_at(30_000);
+        assert!(d.feed(head).is_empty());
+        assert_eq!(d.feed(tail), vec![Input::Selection(text)]);
+        assert!(d.feed(b"\x1b]52;p;!!\x07").is_empty());
+    }
     #[test]
     fn unrelated_revision_is_acknowledged_without_repeated_full_frames() {
         let mut snapshot = json!({"revision":1,"panes":[{"id":"p","grid":{"cells":[["x"]]}}]});

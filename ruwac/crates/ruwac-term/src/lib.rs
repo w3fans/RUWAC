@@ -4,19 +4,35 @@ use alacritty_terminal::{
     grid::{Dimensions, Grid},
     index::{Column, Line, Point},
     term::{
-        Config, TermMode,
+        ClipboardType, Config, Osc52, TermMode,
         cell::{Cell, Flags},
     },
     vte::ansi::{Color, Processor},
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
+type Formatter = Arc<dyn Fn(&str) -> String + Sync + Send>;
+/// Largest OSC 52 mouse selection a program may offer to the desktop.
+pub const MAX_SELECTION: usize = 128 * 1024;
+#[derive(Default)]
+struct Pending {
+    replies: Vec<String>,
+    store: Option<String>,
+    load: Option<Formatter>,
+}
 #[derive(Clone, Default)]
-struct Events(Arc<Mutex<Vec<String>>>);
+struct Events(Arc<Mutex<Pending>>);
 impl EventListener for Events {
     fn send_event(&self, e: Event) {
-        if let Event::PtyWrite(s) = e {
-            self.0.lock().unwrap().push(s)
+        let mut pending = self.0.lock().unwrap();
+        match e {
+            Event::PtyWrite(s) => pending.replies.push(s),
+            // OSC 52 PRIMARY ("p"/"s") only, e.g. a nested RUWAC client's mouse
+            // selection. The desktop decides whether a user gesture backs it;
+            // CLIPBOARD ("c") writes and reads stay ignored.
+            Event::ClipboardStore(ClipboardType::Selection, text) => pending.store = Some(text),
+            Event::ClipboardLoad(ClipboardType::Selection, format) => pending.load = Some(format),
+            _ => (),
         }
     }
 }
@@ -170,6 +186,9 @@ pub struct Terminal {
     term: Term<Events>,
     parser: Processor,
     events: Events,
+    selection_serial: u64,
+    selection: Option<(u64, String)>,
+    selection_request: Option<(u64, Formatter)>,
     pub rows: u16,
     pub cols: u16,
     pub history_epoch: u64,
@@ -179,6 +198,7 @@ impl Terminal {
         let events = Events::default();
         let config = Config {
             scrolling_history: history_limit(cols),
+            osc52: Osc52::CopyPaste,
             ..Config::default()
         };
         let term = Term::new(config, &Size(rows as usize, cols as usize), events.clone());
@@ -187,6 +207,9 @@ impl Terminal {
             term,
             parser: Processor::new(),
             events,
+            selection_serial: 0,
+            selection: None,
+            selection_request: None,
             rows,
             cols,
             history_epoch: 0,
@@ -198,7 +221,50 @@ impl Terminal {
         }
         self.history_epoch = self.history_epoch.wrapping_add(1);
         self.parser.advance(&mut self.term, b);
-        std::mem::take(&mut *self.events.0.lock().unwrap())
+        let (replies, store, load) = {
+            let mut pending = self.events.0.lock().unwrap();
+            (
+                std::mem::take(&mut pending.replies),
+                pending.store.take(),
+                pending.load.take(),
+            )
+        };
+        if let Some(text) =
+            store.filter(|t| !t.is_empty() && t.len() <= MAX_SELECTION && !t.contains('\0'))
+        {
+            self.selection_serial += 1;
+            self.selection = Some((self.selection_serial, text));
+        }
+        if let Some(format) = load {
+            self.selection_serial += 1;
+            self.selection_request = Some((self.selection_serial, format));
+        }
+        replies
+    }
+    /// Serials of the latest OSC 52 PRIMARY offer and read request.
+    pub fn selection_serials(&self) -> (Option<u64>, Option<u64>) {
+        (
+            self.selection.as_ref().map(|(n, _)| *n),
+            self.selection_request.as_ref().map(|(n, _)| *n),
+        )
+    }
+    pub fn selection_offer(&self, serial: u64) -> Option<&str> {
+        self.selection
+            .as_ref()
+            .filter(|(n, _)| *n == serial)
+            .map(|(_, t)| t.as_str())
+    }
+    /// The program's OSC 52 answer for one outstanding read request.
+    pub fn selection_reply(&mut self, serial: u64, text: &str) -> Option<String> {
+        if self
+            .selection_request
+            .as_ref()
+            .is_none_or(|(n, _)| *n != serial)
+        {
+            return None;
+        }
+        let (_, format) = self.selection_request.take()?;
+        Some(format(text))
     }
     pub fn resize(&mut self, rows: u16, cols: u16) {
         self.history_epoch = self.history_epoch.wrapping_add(1);
@@ -209,6 +275,7 @@ impl Terminal {
         }
         self.term.set_options(Config {
             scrolling_history: history_limit(cols),
+            osc52: Osc52::CopyPaste,
             ..Config::default()
         });
         self.term.resize(Size(rows as usize, cols as usize))
@@ -1134,6 +1201,25 @@ mod tests {
         let mut t = Terminal::new(4, 20);
         assert!(!t.feed(b"\x1b[6n").is_empty());
         assert!(t.feed(b"\x1b]52;c;QUJD\x07").is_empty());
+        assert_eq!(t.selection_serials(), (None, None));
+        // PRIMARY offers and read requests wait for the desktop; nothing is
+        // answered by the engine itself.
+        assert!(t.feed(b"\x1b]52;p;QUJD\x07").is_empty());
+        let (Some(offer), None) = t.selection_serials() else {
+            panic!("offer expected")
+        };
+        assert_eq!(t.selection_offer(offer), Some("ABC"));
+        assert_eq!(t.selection_offer(offer + 1), None);
+        assert!(t.feed(b"\x1b]52;p;?\x07").is_empty());
+        let (_, Some(request)) = t.selection_serials() else {
+            panic!("request expected")
+        };
+        assert_eq!(t.selection_reply(request + 1, "x"), None);
+        assert_eq!(
+            t.selection_reply(request, "hi").as_deref(),
+            Some("\x1b]52;p;aGk=\x07")
+        );
+        assert_eq!(t.selection_reply(request, "hi"), None);
     }
     #[test]
     fn compact_dual_grid_preserves_canonical_cells_and_history() {

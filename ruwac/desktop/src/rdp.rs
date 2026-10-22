@@ -490,6 +490,10 @@ struct Connection {
     tx: tokio::sync::mpsc::Sender<Command>,
     stop: Arc<AtomicBool>,
     state: Arc<Mutex<State>>,
+    /// Commands waiting while the session queue is briefly full (slow link),
+    /// kept in order; and since when the backlog has not drained.
+    backlog: RefCell<std::collections::VecDeque<Command>>,
+    stalled: std::cell::Cell<Option<std::time::Instant>>,
 }
 impl Connection {
     fn start(p: Profile) -> Self {
@@ -543,12 +547,65 @@ impl Connection {
             tx,
             stop,
             state,
+            backlog: RefCell::default(),
+            stalled: std::cell::Cell::new(None),
         }
     }
     fn send(&self, events: Vec<FastPathInputEvent>) -> Result<(), String> {
-        self.tx
-            .try_send(Command::Input(events))
-            .map_err(|_| "RDP input queue full or disconnected; input not sent".into())
+        // Pointer motion is superseded by the next position. While the link
+        // is slow, drop it to keep room for clicks, keys and control commands.
+        let motion = events.iter().all(
+            |e| matches!(e, FastPathInputEvent::MouseEvent(m) if m.flags == PointerFlags::MOVE),
+        );
+        if motion && (self.tx.capacity() < 32 || !self.backlog.borrow().is_empty()) {
+            return Ok(());
+        }
+        self.queue(Command::Input(events))
+    }
+    /// Queue a command in order. A full session queue (slow network, busy
+    /// decoder) defers it instead of failing; only a closed session fails.
+    fn queue(&self, c: Command) -> Result<(), String> {
+        self.flush();
+        let mut backlog = self.backlog.borrow_mut();
+        if backlog.is_empty() {
+            match self.tx.try_send(c) {
+                Ok(()) => return Ok(()),
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    return Err("RDP disconnected; input not sent".into());
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(c)) => backlog.push_back(c),
+            }
+        } else {
+            backlog.push_back(c);
+        }
+        if self.stalled.get().is_none() {
+            self.stalled.set(Some(std::time::Instant::now()));
+        }
+        if backlog.len() > 4096 {
+            return Err("RDP connection is not accepting input".into());
+        }
+        Ok(())
+    }
+    /// Move deferred commands on; true once nothing drained for 30 seconds.
+    fn flush(&self) -> bool {
+        let mut backlog = self.backlog.borrow_mut();
+        while let Some(c) = backlog.pop_front() {
+            match self.tx.try_send(c) {
+                Ok(()) => self.stalled.set(Some(std::time::Instant::now())),
+                Err(tokio::sync::mpsc::error::TrySendError::Full(c)) => {
+                    backlog.push_front(c);
+                    break;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => backlog.clear(),
+            }
+        }
+        if backlog.is_empty() {
+            self.stalled.set(None);
+            return false;
+        }
+        self.stalled
+            .get()
+            .is_some_and(|at| at.elapsed() > Duration::from_secs(30))
     }
     fn close(&self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -559,6 +616,47 @@ impl Drop for Connection {
         self.close();
     }
 }
+/// Keep idle NAT/firewall mappings alive and notice a dead path within about
+/// a minute and a half instead of the kernel's two-hour default.
+/// `None`: automatic GNOME sign-in can run. `Some(None)`: not a GNOME Remote
+/// Login endpoint. `Some(Some(reason))`: the endpoint lacks what it needs.
+fn auto_sign_in_missing(p: &crate::profiles::Profile) -> Option<Option<&'static str>> {
+    let p = &p.preferences;
+    if p.rdp_mode != "gnome-remote-login" {
+        Some(None)
+    } else if !p.gnome_auto_login {
+        Some(Some(
+            "Automatic GNOME sign-in is off for this machine · Edit → GNOME User Login → Sign in automatically",
+        ))
+    } else if p.gnome_username.is_empty() {
+        Some(Some(
+            "Automatic GNOME sign-in needs the Linux username · Edit → GNOME User Login",
+        ))
+    } else if p.gnome_secret_reference.is_empty() {
+        Some(Some(
+            "Automatic GNOME sign-in needs the saved Linux password · Edit → GNOME User Login → Set password",
+        ))
+    } else {
+        None
+    }
+}
+fn keepalive(tcp: &tokio::net::TcpStream) {
+    use std::os::fd::AsRawFd;
+    let fd = tcp.as_raw_fd();
+    let set = |level, name, value: libc::c_int| unsafe {
+        libc::setsockopt(
+            fd,
+            level,
+            name,
+            (&value as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    set(libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1);
+    set(libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, 30);
+    set(libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, 10);
+    set(libc::IPPROTO_TCP, libc::TCP_KEEPCNT, 6);
+}
 async fn run(
     mut p: Profile,
     password: String,
@@ -566,26 +664,28 @@ async fn run(
     halt: Arc<AtomicBool>,
     state: Arc<Mutex<State>>,
 ) -> Result<(), String> {
-    for attempt in 0..=3 {
+    // Network loss gets a patient, growing backoff (about 1.5 minutes in
+    // total). A session that stayed up earns a fresh budget, so brief drops
+    // hours apart never exhaust it. GNOME handovers are counted separately.
+    const RETRY_DELAYS_MS: [u64; 9] = [500, 1000, 2000, 4000, 8000, 15000, 15000, 20000, 30000];
+    let mut failures = 0usize;
+    let mut handovers = 0u32;
+    let mut first = true;
+    loop {
         {
             let mut st = state.lock().unwrap();
             if let Some(size) = st.desktop_size {
                 p.desktop_size = size;
             }
             st.generation += 1;
-            st.phase = if attempt == 0 {
-                "connecting"
-            } else {
-                "reconnecting"
-            }
-            .into();
+            st.phase = if first { "connecting" } else { "reconnecting" }.into();
             st.frame = None;
             st.frames = 0;
         }
         if halt.load(Ordering::Relaxed) {
             return Ok(());
         }
-        if attempt > 0 {
+        if !first {
             {
                 let mut st = state.lock().unwrap();
                 st.frame = None;
@@ -594,18 +694,30 @@ async fn run(
                 st.display_capability_messages = 0;
                 st.reactivating = true;
                 st.bridge.reset();
-                st.status = Some(format!(
-                    "Reconnecting · attempt {attempt}/3 · bounded backoff"
-                ));
+                st.status = Some(if failures > 0 {
+                    format!(
+                        "Reconnecting · attempt {failures}/{} · bounded backoff",
+                        RETRY_DELAYS_MS.len()
+                    )
+                } else {
+                    "Reconnecting · GNOME session handover".into()
+                });
             }
             while input.try_recv().is_ok() {}
-            for _ in 0..(5 * (1 << (attempt - 1))) {
+            let delay = if failures > 0 {
+                RETRY_DELAYS_MS[failures - 1]
+            } else {
+                500
+            };
+            for _ in 0..delay / 100 {
                 if halt.load(Ordering::Relaxed) {
                     return Ok(());
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
+        first = false;
+        let began = std::time::Instant::now();
         let result = run_session(
             p.next_attempt(),
             password.clone(),
@@ -615,10 +727,12 @@ async fn run(
         )
         .await;
         if let Some(plan) = state.lock().unwrap().handover.take() {
-            if attempt == 3 {
+            handovers += 1;
+            if handovers > 4 {
                 return Err("GNOME handover limit reached".into());
             }
             p.handover = Some(plan);
+            failures = 0;
             continue;
         }
         let retry = result.as_ref().err().is_some_and(|e| {
@@ -634,11 +748,15 @@ async fn run(
                     | "RDP reactivation timed out"
             )
         });
-        if !p.reconnect || !retry || attempt == 3 {
+        let stable = state.lock().unwrap().frames > 0 && began.elapsed() > Duration::from_secs(30);
+        if stable {
+            failures = 0;
+        }
+        if !p.reconnect || !retry || failures == RETRY_DELAYS_MS.len() {
             return result;
         }
+        failures += 1;
     }
-    unreachable!()
 }
 fn encode_resize(
     active: &mut ironrdp::session::ActiveStage,
@@ -781,6 +899,7 @@ async fn run_session(
         // Interactive RDP and CredSSP records must not wait for TCP packet coalescing.
         tcp.set_nodelay(true)
             .map_err(|_| "RDP socket configuration failed".to_string())?;
+        keepalive(&tcp);
         let addr = tcp
             .local_addr()
             .map_err(|_| "RDP socket address unavailable".to_string())?;
@@ -1035,13 +1154,13 @@ async fn run_session(
                     if halt.load(Ordering::Acquire) || epoch.load(Ordering::Acquire)!=expected || state.lock().unwrap().generation!=generation || state.lock().unwrap().reactivating { completed=false;break; }
                     let events:Vec<_>=chunk.iter().flat_map(|u|[FastPathInputEvent::UnicodeKeyboardEvent(KeyboardFlags::empty(),*u),FastPathInputEvent::UnicodeKeyboardEvent(KeyboardFlags::RELEASE,*u)]).collect();
                     let outputs=active.process_fastpath_input(&mut image,&events).map_err(|_|"Assisted input encoding failed".to_string())?;
-                    for output in outputs { if let ActiveStageOutput::ResponseFrame(bytes)=output { tokio::time::timeout(Duration::from_secs(2),writer.write_all(&bytes)).await.map_err(|_|"Assisted input write timeout")?.map_err(|_|"Assisted input write failed")?; } }
+                    for output in outputs { if let ActiveStageOutput::ResponseFrame(bytes)=output { tokio::time::timeout(Duration::from_secs(10),writer.write_all(&bytes)).await.map_err(|_|"Assisted input write timeout")?.map_err(|_|"Assisted input write failed")?; } }
                 }
                 units.0.fill(0);
                 if submit && completed && !halt.load(Ordering::Acquire) && epoch.load(Ordering::Acquire)==expected && state.lock().unwrap().generation==generation && !state.lock().unwrap().reactivating {
                     let events=[FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(),0x1c),FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE,0x1c)];
                     let outputs=active.process_fastpath_input(&mut image,&events).map_err(|_|"GNOME submit encoding failed".to_string())?;
-                    for output in outputs {if let ActiveStageOutput::ResponseFrame(bytes)=output {tokio::time::timeout(Duration::from_secs(2),writer.write_all(&bytes)).await.map_err(|_|"GNOME submit write timeout")?.map_err(|_|"GNOME submit write failed")?;}}
+                    for output in outputs {if let ActiveStageOutput::ResponseFrame(bytes)=output {tokio::time::timeout(Duration::from_secs(10),writer.write_all(&bytes)).await.map_err(|_|"GNOME submit write timeout")?.map_err(|_|"GNOME submit write failed")?;}}
                 }
                 vec![]
             },
@@ -1072,7 +1191,7 @@ async fn run_session(
         for output in outputs {
             match output {
                 ActiveStageOutput::ResponseFrame(bytes) => {
-                    tokio::time::timeout(Duration::from_secs(2), writer.write_all(&bytes))
+                    tokio::time::timeout(Duration::from_secs(15), writer.write_all(&bytes))
                         .await
                         .map_err(|_| "RDP response write timeout".to_string())?
                         .map_err(|_| "RDP response write failed".to_string())?
@@ -1150,7 +1269,7 @@ async fn run_session(
                         }
                         Ok::<_, String>(())
                     };
-                    tokio::select! {r=tokio::time::timeout(Duration::from_secs(10),reactivation)=>r.map_err(|_|"RDP reactivation timed out")??,_=async{while !halt.load(Ordering::Relaxed){tokio::time::sleep(Duration::from_millis(50)).await;}}=>return Ok(())};
+                    tokio::select! {r=tokio::time::timeout(Duration::from_secs(20),reactivation)=>r.map_err(|_|"RDP reactivation timed out")??,_=async{while !halt.load(Ordering::Relaxed){tokio::time::sleep(Duration::from_millis(50)).await;}}=>return Ok(())};
                     if let connector::connection_activation::ConnectionActivationState::Finalized{desktop_size,share_id,enable_server_pointer,pointer_software_rendering}=sequence.connection_activation_state(){
                         if desktop_size.width==0||desktop_size.height==0||desktop_size.width>4096||desktop_size.height>4096{return Err("Reactivated framebuffer exceeds limits".into());}
                         active.set_share_id(share_id);active.set_enable_server_pointer(enable_server_pointer);
@@ -1275,6 +1394,12 @@ struct AutoGdm {
     fetching: bool,
     submitted_handovers: u32,
     password_queued: bool,
+    /// Shown on the covered canvas while a guard holds the sign-in back.
+    waiting: Option<&'static str>,
+    /// Shown over the remote screen after a stop, until the user acts.
+    notice: Option<String>,
+    /// Retry stays offered while the greeter of this handover is current.
+    stopped_at: Option<u32>,
 }
 impl Default for AutoGdm {
     fn default() -> Self {
@@ -1291,6 +1416,9 @@ impl Default for AutoGdm {
             fetching: false,
             submitted_handovers: 0,
             password_queued: false,
+            waiting: None,
+            notice: None,
+            stopped_at: None,
         }
     }
 }
@@ -1898,6 +2026,27 @@ impl RdpView {
                     cr.move_to(24.0, height as f64 / 2.0 + 28.0);
                     let _ = cr
                         .show_text("Remote input is paused. Cancel or press Escape to take over.");
+                    if let Some(waiting) = v.auto_gdm.borrow().waiting {
+                        cr.set_source_rgb(1.0, 0.82, 0.4);
+                        cr.move_to(24.0, height as f64 / 2.0 + 52.0);
+                        let _ = cr.show_text(waiting);
+                    }
+                } else if let Some(notice) = v.auto_gdm.borrow().notice.as_deref() {
+                    // Why sign-in did not run stays on the remote screen itself,
+                    // not only in the status line, until the user acts.
+                    cr.set_font_size(14.0);
+                    let text = notice.chars().take(160).collect::<String>();
+                    let w = cr
+                        .text_extents(&text)
+                        .map(|e| e.width())
+                        .unwrap_or(400.0)
+                        .min(width as f64 - 32.0);
+                    cr.set_source_rgba(0.45, 0.25, 0.0, 0.92);
+                    cr.rectangle(8.0, 8.0, w + 24.0, 32.0);
+                    let _ = cr.fill();
+                    cr.set_source_rgb(1.0, 1.0, 1.0);
+                    cr.move_to(20.0, 29.0);
+                    let _ = cr.show_text(&text);
                 }
             }
         });
@@ -1908,8 +2057,12 @@ impl RdpView {
                 if v.auto_gdm.borrow().armed {
                     if k == gdk::Key::Escape {
                         v.auto_gdm_stop("Automatic sign-in cancelled; manual login available");
+                        v.auto_gdm.borrow_mut().notice.take();
                     }
                     return glib::Propagation::Stop;
+                }
+                if v.auto_gdm.borrow_mut().notice.take().is_some() {
+                    v.area.queue_draw();
                 }
                 if k == gdk::Key::v && modifiers.contains(gdk::ModifierType::CONTROL_MASK) {
                     v.paste();
@@ -1945,8 +2098,12 @@ impl RdpView {
         click.connect_pressed(move |g, _, x, y| {
             if let Some(v) = w.upgrade() {
                 if v.auto_gdm.borrow().armed {
+                    // Input stays paused, but the click gives this screen the
+                    // focus that a waiting sign-in needs.
+                    v.focus();
                     return;
                 }
+                v.auto_gdm.borrow_mut().notice.take();
                 v.focus();
                 v.pointer(x, y, g.current_button(), false);
             }
@@ -2023,7 +2180,13 @@ impl RdpView {
         let weak = Rc::downgrade(&v);
         cancel_auto.connect_clicked(move |_| {
             if let Some(v) = weak.upgrade() {
-                v.auto_gdm_stop("Automatic sign-in cancelled; manual login available");
+                if v.auto_gdm.borrow().armed {
+                    v.auto_gdm_stop("Automatic sign-in cancelled; manual login available");
+                    v.auto_gdm.borrow_mut().notice.take();
+                } else {
+                    v.retry_auto_gdm();
+                }
+                v.focus();
             }
         });
         let w = Rc::downgrade(&v);
@@ -2032,10 +2195,17 @@ impl RdpView {
                 return glib::ControlFlow::Break;
             };
             v.pending_connect_tick();
+            v.flush_commands();
             v.update();
             v.auto_gdm_tick();
             v.primary_tick();
-            cancel_auto.set_visible(v.auto_gdm.borrow().armed);
+            let (armed, retry) = (v.auto_gdm.borrow().armed, v.auto_gdm_retry_available());
+            cancel_auto.set_visible(armed || retry);
+            cancel_auto.set_label(if armed {
+                "Cancel automatic sign-in"
+            } else {
+                "Retry automatic sign-in"
+            });
             v.canvas();
             if v.preferences_due
                 .get()
@@ -2646,12 +2816,12 @@ impl RdpView {
         *self.bridge.borrow_mut() = connection.state.lock().unwrap().bridge.clone();
         *self.connection.borrow_mut() = Some(connection);
         let mut automatic = AutoGdm::default();
-        automatic.armed = self.profile_metadata.borrow().as_ref().is_some_and(|p| {
-            p.preferences.gnome_auto_login
-                && p.preferences.rdp_mode == "gnome-remote-login"
-                && !p.preferences.gnome_username.is_empty()
-                && !p.preferences.gnome_secret_reference.is_empty()
-        });
+        if let Some(p) = self.profile_metadata.borrow().as_ref() {
+            match auto_sign_in_missing(p) {
+                None => automatic.armed = true,
+                Some(missing) => automatic.notice = missing.map(str::to_owned),
+            }
+        }
         *self.auto_gdm.borrow_mut() = automatic;
         if activate {
             self.focus();
@@ -2816,9 +2986,18 @@ impl RdpView {
     }
     fn command(&self, c: Command) {
         if let Some(conn) = self.connection.borrow().as_ref() {
-            if conn.tx.try_send(c).is_err() {
+            if let Err(e) = conn.queue(c) {
+                self.status.set_text(&e);
+            }
+        }
+    }
+    /// Deliver deferred commands; a connection that accepts nothing for 30
+    /// seconds is closed so Reconnect can start a fresh one.
+    fn flush_commands(&self) {
+        if let Some(conn) = self.connection.borrow().as_ref() {
+            if conn.flush() {
                 self.status
-                    .set_text("CLIPRDR queue full; transfer not sent");
+                    .set_text("RDP connection stopped responding for 30 seconds; reconnect");
                 conn.close();
             }
         }
@@ -3727,13 +3906,83 @@ impl RdpView {
                     && s.authentication_error.is_none()
             })
     }
-    fn auto_gdm_stop(&self, reason: &str) {
+    /// After a stop, the same greeter (no later handover) may be retried.
+    fn auto_gdm_retry_available(&self) -> bool {
+        let a = self.auto_gdm.borrow();
+        !a.armed
+            && a.stopped_at.is_some()
+            && a.stopped_at
+                == self.connection.borrow().as_ref().and_then(|c| {
+                    let st = c.state.lock().unwrap();
+                    (st.phase == "connected").then_some(st.handovers)
+                })
+            && self
+                .profile_metadata
+                .borrow()
+                .as_ref()
+                .is_some_and(|p| auto_sign_in_missing(p).is_none())
+    }
+    fn retry_auto_gdm(&self) {
+        if !self.auto_gdm_retry_available() {
+            return;
+        }
+        self.assist_epoch.fetch_add(1, Ordering::AcqRel);
         let mut a = self.auto_gdm.borrow_mut();
+        let image = a.image.take();
+        *a = AutoGdm::default();
+        a.armed = true;
+        a.image = image;
+        drop(a);
+        self.status.set_text("Automatic sign-in · retrying");
+        self.area.queue_draw();
+    }
+    /// Which guard holds automatic sign-in back, in words for the cover.
+    fn assist_wait_reason(&self, p: &crate::profiles::Profile) -> &'static str {
+        let window_active = self
+            .root
+            .root()
+            .and_downcast::<gtk::Window>()
+            .is_some_and(|w| w.is_active());
+        if !self.selected.borrow().as_ref().is_some_and(|f| f()) || !self.root.is_mapped() {
+            "Waiting: select this tab"
+        } else if !window_active {
+            "Waiting: bring this RUWAC window to the front"
+        } else if !self.area.has_focus() || self.broker.borrow().active() != Some(self.id.as_str())
+        {
+            "Waiting: click here to continue"
+        } else if !self.held.borrow().is_empty() || !self.buttons.borrow().is_empty() {
+            "Waiting: release held keys and mouse buttons"
+        } else if !crate::profiles::assist_profile_current(p)
+            || self.entries[0].text() != p.server
+            || self.entries[1].text() != p.username
+            || self.entries[2].text() != p.secret_reference
+            || self.entries[3].text() != p.preferences.trust
+        {
+            "Waiting: this machine's saved settings changed · reconnect"
+        } else {
+            "Waiting for the remote screen"
+        }
+    }
+    fn auto_gdm_stop(&self, reason: &str) {
+        let handovers = self
+            .connection
+            .borrow()
+            .as_ref()
+            .map(|c| c.state.lock().unwrap().handovers);
+        let mut a = self.auto_gdm.borrow_mut();
+        let was_armed = a.armed;
         a.sequence.stop();
         a.armed = false;
         a.pending = None;
-        a.image = None;
         a.fetching = false;
+        a.waiting = None;
+        if was_armed {
+            a.notice = Some(reason.to_owned());
+            a.stopped_at = handovers.filter(|h| *h > 0);
+        }
+        if a.stopped_at.is_none() {
+            a.image = None;
+        }
         self.assist_epoch.fetch_add(1, Ordering::AcqRel);
         self.status.set_text(reason);
         self.area.queue_draw();
@@ -3852,8 +4101,34 @@ impl RdpView {
                 self.auto_gdm_stop(
                     "Automatic sign-in stopped: selected tab, profile or focus changed",
                 );
+                return;
+            }
+            // Nothing has been sent yet. A selected tab in the active window
+            // takes keyboard focus itself (opening from the sidebar leaves it
+            // elsewhere), unless the user is typing into another field.
+            let window = self.root.root().and_downcast::<gtk::Window>();
+            let editing = window
+                .as_ref()
+                .and_then(|w| gtk::prelude::GtkWindowExt::focus(w))
+                .is_some_and(|f| f.is::<gtk::Text>() || f.is::<gtk::TextView>());
+            if !self.area.has_focus()
+                && !editing
+                && self.selected.borrow().as_ref().is_some_and(|f| f())
+                && window.is_some_and(|w| w.is_active())
+            {
+                self.focus();
+            }
+            let reason = self.assist_wait_reason(&p);
+            let mut a = self.auto_gdm.borrow_mut();
+            if a.waiting != Some(reason) {
+                a.waiting = Some(reason);
+                drop(a);
+                self.area.queue_draw();
             }
             return;
+        }
+        if self.auto_gdm.borrow_mut().waiting.take().is_some() {
+            self.area.queue_draw();
         }
         let changed = self
             .auto_gdm
@@ -4234,7 +4509,7 @@ impl RdpView {
             .pending
             .borrow()
             .as_ref()
-            .is_some_and(|p| p.3.elapsed() > Duration::from_secs(5))
+            .is_some_and(|p| p.3.elapsed() > Duration::from_secs(30))
         {
             self.close();
             self.status.set_text(
@@ -4294,7 +4569,10 @@ impl RdpView {
             }
             {
                 let mut a = self.auto_gdm.borrow_mut();
-                if a.armed && !a.fetching && a.sequence.step != crate::gdm::Step::Submitted {
+                // A stopped greeter keeps its last frame so Retry can scan it.
+                if (a.armed && !a.fetching && a.sequence.step != crate::gdm::Step::Submitted)
+                    || (!a.armed && a.stopped_at.is_some())
+                {
                     a.image = Some((f.width, f.height, f.generation, f.pixels.clone()));
                 }
             }

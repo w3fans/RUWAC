@@ -204,6 +204,7 @@ pub fn start_with_store(store: Option<Store>) -> std::io::Result<Handle> {
                             | "pane.capture"
                             | "pane.wait"
                             | "buffer.get"
+                            | "pane.selection"
                             | "client.render"
                     ) {
                         s.revision += 1;
@@ -1159,6 +1160,44 @@ impl State {
                     .ok_or_else(|| Error::new("STALE_ID", "session does not exist"))?;
                 Ok(json!({"text":s.buffer}))
             }
+            // OSC 52 PRIMARY from a program (e.g. a nested RUWAC client's mouse
+            // selection). The desktop fetches/answers only behind a user gesture.
+            "pane.selection" => {
+                let p = self.pane(v)?;
+                let serial = v["serial"]
+                    .as_u64()
+                    .ok_or_else(|| Error::new("INVALID_PARAMS", "serial must be an integer"))?;
+                let text = p
+                    .term
+                    .selection_offer(serial)
+                    .ok_or_else(|| Error::new("STALE_ID", "selection offer replaced"))?;
+                Ok(json!({"text":text}))
+            }
+            "pane.selectionReply" => {
+                let id = target(v, "pane", "pane")?;
+                let serial = v["serial"]
+                    .as_u64()
+                    .ok_or_else(|| Error::new("INVALID_PARAMS", "serial must be an integer"))?;
+                let t = text(v, "text")?;
+                if t.len() > ruwac_term::MAX_SELECTION || t.contains('\0') {
+                    return Err(Error::new(
+                        "LIMIT",
+                        "selection exceeds 128 KiB or contains NUL",
+                    ));
+                }
+                let p = self
+                    .panes
+                    .get_mut(&id)
+                    .ok_or_else(|| Error::new("STALE_ID", "pane does not exist"))?;
+                let reply = p
+                    .term
+                    .selection_reply(serial, &t)
+                    .ok_or_else(|| Error::new("STALE_ID", "selection request replaced"))?;
+                p.live_pty()?
+                    .send(reply.into_bytes())
+                    .map_err(|e| Error::new("BACKPRESSURE", e))?;
+                Ok(json!({"queued":true}))
+            }
             "buffer.paste" => {
                 let p = self.pane(v)?;
                 let w = &self.windows[&p.window];
@@ -1229,7 +1268,7 @@ impl State {
                         &mut rects,
                     );
                 }
-                let panes=rects.iter().filter_map(|(id,r)|self.panes.get(id).map(|p|json!({"id":p.id,"grid":p.term.snapshot(),"ended":p.ended,"restored":p.pty.is_none(),"exit_code":p.exit_code.or_else(||p.pty.as_ref().and_then(Pty::exit_code)),"rect":{"x":r.x,"y":r.y,"rows":r.rows,"cols":r.cols}}))).collect::<Vec<_>>();
+                let panes=rects.iter().filter_map(|(id,r)|self.panes.get(id).map(|p|json!({"id":p.id,"grid":p.term.snapshot(),"selection_offer":p.term.selection_serials().0,"selection_request":p.term.selection_serials().1,"ended":p.ended,"restored":p.pty.is_none(),"exit_code":p.exit_code.or_else(||p.pty.as_ref().and_then(Pty::exit_code)),"rect":{"x":r.x,"y":r.y,"rows":r.rows,"cols":r.cols}}))).collect::<Vec<_>>();
                 Ok(
                     json!({"revision":self.revision,"session":s.id,"session_name":s.name,"window":w.id,"window_index":s.windows.iter().position(|id|id==&w.id),"windows":s.windows.iter().filter_map(|id|self.windows.get(id)).enumerate().map(|(index,w)|json!({"id":w.id,"index":index,"name":w.name})).collect::<Vec<_>>(),"name":w.name,"rows":s.rows,"cols":s.cols,"active_pane":active,"layout":w.layout.json(),"zoom":zoom,"panes":panes}),
                 )
@@ -1313,7 +1352,7 @@ impl State {
     }
 }
 pub fn schema() -> Value {
-    json!({"protocol":0,"framing":"u32 big-endian byte length + UTF-8 JSON","max_frame_bytes":ruwac_protocol::MAX_FRAME,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"methods":["job.list","job.query","agent.probe","health","version","capabilities","schema","describe","session.create","session.list","session.attach","session.detach","window.create","window.list","window.rename","window.select","window.cycle","window.previous","pane.create","pane.layout","pane.history","pane.history.freeze","pane.history.release","pane.close","pane.list","pane.select","pane.attachImage","pane.sendText","pane.sendKey","pane.capture","pane.wait","buffer.set","buffer.get","buffer.paste","client.resize","client.render","client.input","client.paste","events.subscribe","daemon.checkpoint","daemon.stop"],"targets":{"session":"session_ + 32 hex","window":"window_ + 32 hex","pane":"pane_ + 32 hex"},"request":{"version":0,"id":"JSON request correlation value","method":"method name","params":"object","idempotency_key":"optional 1..128 byte daemon-lifetime key"}})
+    json!({"protocol":0,"framing":"u32 big-endian byte length + UTF-8 JSON","max_frame_bytes":ruwac_protocol::MAX_FRAME,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"methods":["job.list","job.query","agent.probe","health","version","capabilities","schema","describe","session.create","session.list","session.attach","session.detach","window.create","window.list","window.rename","window.select","window.cycle","window.previous","pane.create","pane.layout","pane.history","pane.history.freeze","pane.history.release","pane.close","pane.list","pane.select","pane.attachImage","pane.sendText","pane.sendKey","pane.capture","pane.wait","pane.selection","pane.selectionReply","buffer.set","buffer.get","buffer.paste","client.resize","client.render","client.input","client.paste","events.subscribe","daemon.checkpoint","daemon.stop"],"targets":{"session":"session_ + 32 hex","window":"window_ + 32 hex","pane":"pane_ + 32 hex"},"request":{"version":0,"id":"JSON request correlation value","method":"method name","params":"object","idempotency_key":"optional 1..128 byte daemon-lifetime key"}})
 }
 
 fn primary_buffer(v: &Value) -> std::result::Result<bool, Error> {

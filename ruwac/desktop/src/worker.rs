@@ -737,6 +737,7 @@ impl Worker {
                                     || reply.0 == "pane.create"
                                     || reply.0 == "pane.capture"
                                     || reply.0 == "buffer.get"
+                                    || reply.0 == "pane.selection"
                                     || reply.0 == "paste"
                                     || reply.0 == "window.list"
                                 {

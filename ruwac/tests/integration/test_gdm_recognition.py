@@ -110,6 +110,47 @@ else:
         self.focus_boxes(1)
         self.assertEqual(self.observe(self.unbranded_ocr('Email')), 'unknown')
 
+    def no_list_ocr(self, entry_label):
+        """No Fedora logo and no user list: only field crops read entry_label."""
+        tool = self.root / 'no-list-ocr'
+        tool.write_text(f"""#!/usr/bin/python3
+from pathlib import Path
+import sys
+print('left\\ttop\\twidth\\theight\\tconf\\ttext')
+if Path(sys.argv[1]).name != 'layout.png':
+    print('30\\t30\\t150\\t30\\t99\\t{entry_label}')
+""")
+        tool.chmod(0o700)
+        return tool
+
+    def test_unbranded_username_page_accepts_only_the_login_name_field(self):
+        # GDM's "Not listed?" page (or a greeter without a user list): the
+        # non-secret login name may be typed; a password needs the sequence.
+        self.focus_boxes(1)
+        self.assertEqual(self.observe(self.no_list_ocr('Username')), 'username')
+        self.assertEqual(self.observe(self.no_list_ocr('Password')), 'unknown')
+        self.assertEqual(self.observe(self.no_list_ocr('Email')), 'unknown')
+        self.assertEqual(self.observe(self.no_list_ocr('Password'), trusted=True), 'password')
+
+    def test_unbranded_username_page_with_two_fields_is_unknown(self):
+        self.focus_boxes(2)
+        self.assertEqual(self.observe(self.no_list_ocr('Username')), 'unknown')
+
+    def test_large_framebuffer_is_cropped_at_full_resolution(self):
+        # A HiDPI window gives GDM a large scale-1 framebuffer; the centred
+        # form keeps its size and the rectangle maps back to the frame.
+        image = Image.new('RGB', (3400, 2000), '#222222')
+        ImageDraw.Draw(image).rectangle((1550, 1000, 1850, 1040), outline=(150, 180, 205))
+        image.save(self.image)
+        env = dict(os.environ, RUWAC_GDM_OCR_TOOL=str(self.no_list_ocr('Username')))
+        result = subprocess.run(['python3', str(HELPER), str(self.image)],
+                                env=env, capture_output=True, text=True, timeout=7)
+        observation = json.loads(result.stdout)
+        self.assertEqual(observation['kind'], 'username')
+        x, y, r, b = observation['rect']
+        self.assertTrue(1540 <= x <= 1560 and 995 <= y <= 1005 and 1840 <= r <= 1860 and 1035 <= b <= 1045,
+                        observation)
+
     def test_two_focused_password_fields_are_ambiguous(self):
         self.focus_boxes(2)
         self.assertEqual(self.run_helper(self.fake_ocr()), ('ambiguous', 0))

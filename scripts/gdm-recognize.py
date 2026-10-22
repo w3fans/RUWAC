@@ -58,7 +58,14 @@ def users_target(all_words):
 
 def recognize(path,trusted=False):
     image=Image.open(path).convert('RGB');w,h=image.size
-    if not(200<=w<=4096 and 200<=h<=4096)or w*h>4*1024*1024:raise ValueError('Unsupported recognition size')
+    if not(200<=w<=4096 and 200<=h<=4096):raise ValueError('Unsupported recognition size')
+    # Large framebuffers (HiDPI windows; the greeter itself renders at scale 1)
+    # are analysed at full resolution in a centred crop, where GDM draws its
+    # forms; rectangles are moved back to framebuffer coordinates.
+    origin=(0,0)
+    if w*h>4*1024*1024:
+        cw=min(w,2048);ch=min(h,4*1024*1024//cw);origin=((w-cw)//2,(h-ch)//2)
+        image=image.crop((origin[0],origin[1],origin[0]+cw,origin[1]+ch));w,h=image.size
     base=path.parent;all_words=words(image,base/'layout.png',11)
     branded=any(t.casefold()=='fedora'and c>=85 for t,c,*_ in all_words)
     if not branded:
@@ -72,13 +79,18 @@ def recognize(path,trusted=False):
             branded=any(t.casefold()=='fedora'and c>=85 for t,c,*_ in words(crop,base/'branding.png',7))
     # Without the Fedora logo, GDM's own user list ("Not listed?" exactly once
     # and no input field) still identifies the login screen; it only leads to
-    # a click. Fields are typed into only later in that same sign-in (trusted).
-    unbranded_users=False
+    # a click. Its "Not listed?" page (or a greeter without a user list) is a
+    # single focused field labelled Username; only the non-secret login name
+    # is typed there. Password fields are accepted only later in that same
+    # sign-in (trusted).
+    unbranded_users=unbranded_username=False
     if not branded and not trusted:
-        if len(users_target(all_words))!=1:return {'kind':'unknown'}
-        unbranded_users=True
-    entries=[]
-    for index,b in enumerate(focus_boxes(image)):
+        listed=len(users_target(all_words))
+        if listed>1:return {'kind':'unknown'}
+        unbranded_users=listed==1
+        unbranded_username=listed==0
+    entries=[];boxes=focus_boxes(image)
+    for index,b in enumerate(boxes):
         crop=image.crop((b[0]+10,b[1]+3,b[2]-20,b[3]-3))
         # Normalize the low-contrast placeholder without preserving OCR text in
         # the reply. Pillow preprocessing stays within the owned private folder.
@@ -89,13 +101,22 @@ def recognize(path,trusted=False):
         if len(labels)==1:entries.append({'kind':labels.pop(),'rect':list(b)})
     # The plain GDM user list has no input field; any focused field, labelled
     # or not, means this is not that screen.
-    if unbranded_users and focus_boxes(image):return {'kind':'unknown'}
-    if len(entries)==1:return entries[0]
+    if unbranded_users and boxes:return {'kind':'unknown'}
+    if unbranded_username:
+        if len(boxes)==1 and len(entries)==1 and entries[0]['kind']=='username':
+            return placed(entries[0],origin)
+        return {'kind':'unknown'}
+    if len(entries)==1:return placed(entries[0],origin)
     if entries:return {'kind':'ambiguous'}
     target=users_target(all_words)
     if len(target)==1:
-        q=target[0];return {'kind':'users','rect':[round(q[2]),round(q[3]),round(q[2]+q[4]),round(q[3]+q[5])]}
+        q=target[0];return placed({'kind':'users','rect':[round(q[2]),round(q[3]),round(q[2]+q[4]),round(q[3]+q[5])]},origin)
     return {'kind':'unknown'}
+
+def placed(observation,origin):
+    x,y,r,b=observation['rect']
+    observation['rect']=[x+origin[0],y+origin[1],r+origin[0],b+origin[1]]
+    return observation
 
 try:
     path=Path(sys.argv[1]);trusted=sys.argv[2:]==['--trusted-sequence']
