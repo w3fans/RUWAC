@@ -574,7 +574,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "ruwac-cli"
-version = "0.4.39"
+version = "0.4.40"
 dependencies = [
  "libc",
  "ruwac-clipboard",
@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "ruwac-clipboard"
-version = "0.4.39"
+version = "0.4.40"
 dependencies = [
  "libc",
  "png",
@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "ruwac-core"
-version = "0.4.39"
+version = "0.4.40"
 dependencies = [
  "libc",
  "ruwac-protocol",
@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "ruwac-daemon"
-version = "0.4.39"
+version = "0.4.40"
 dependencies = [
  "libc",
  "ruwac-core",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "ruwac-protocol"
-version = "0.4.39"
+version = "0.4.40"
 dependencies = [
  "serde",
  "serde_json",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "ruwac-pty"
-version = "0.4.39"
+version = "0.4.40"
 dependencies = [
  "libc",
  "portable-pty",
@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "ruwac-term"
-version = "0.4.39"
+version = "0.4.40"
 dependencies = [
  "alacritty_terminal",
  "ruwac-protocol",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "ruwac-tui"
-version = "0.4.39"
+version = "0.4.40"
 dependencies = [
  "libc",
  "ruwac-protocol",
@@ -839,9 +839,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",

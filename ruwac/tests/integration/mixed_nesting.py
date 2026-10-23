@@ -3,7 +3,7 @@
 import argparse,fcntl,hashlib,json,os,pty,select,shlex,shutil,signal,struct,subprocess,sys,tempfile,termios,threading,time,traceback
 from pathlib import Path
 from spike import Client,eventually
-p=argparse.ArgumentParser();p.add_argument('--binary',required=True);p.add_argument('--evidence',type=Path,required=True);a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--binary',required=True);p.add_argument('--evidence',type=Path,required=True);p.add_argument('-E','--legacy-retained-ended-history',action='store_true',help='Expect the verified 0.4.13 baseline to retain its final ended session');a=p.parse_args()
 binary=Path(a.binary).resolve();root=Path(tempfile.mkdtemp(prefix='mixed-nesting-',dir=a.evidence));root.chmod(0o700)
 missing=[name for name in ['screen','tmux']if not shutil.which(name)]
 if missing:
@@ -162,8 +162,29 @@ try:
  eventually(lambda:boundary.exists()and b'RUWAC_RECEIVER_READY'in ui.data,20)
  ui.send(b'/paste-on/');eventually(lambda:boundary.read_bytes()==b'/paste-on/');time.sleep(.4)
  ui.send(b'\x1b[200~BEFORE-PREFIX\x01dAFTER-PREFIX\x1b[201~')
- ended=eventually(lambda:next((p for p in rpc(layer['socket'],'pane.list',{'session':layer['session']['session']})if p['id']==layer['session']['pane']and p['ended']),None),10)
- assert boundary.read_bytes()==b'/paste-on/\x1b[200~BEFORE-PREFIX';assert ui.finish()==0
+ def boundary_ended():
+  session_id=layer['session']['session']
+  if not any(s['id']==session_id for s in rpc(layer['socket'],'session.list')):return 'retired'
+  try:panes=rpc(layer['socket'],'pane.list',{'session':session_id})
+  except AssertionError as error:
+   response=error.args[0]if error.args else None
+   if not isinstance(response,dict)or response.get('error',{}).get('code')!='STALE_ID':raise
+   # The attached client can retire the final ended window between these two
+   # RPCs. Confirm deletion rather than requiring a dead session to linger.
+   return 'retired'if not any(s['id']==session_id for s in rpc(layer['socket'],'session.list'))else None
+  return next((p for p in panes if p['id']==layer['session']['pane']and p['ended']),None)
+ ended=eventually(boundary_ended,10)
+ assert boundary.read_bytes()==b'/paste-on/\x1b[200~BEFORE-PREFIX'
+ # Do not send detach while the client is retiring its completed window.
+ assert ui.p.wait(timeout=10)==0;assert ui.finish()==0
+ if a.legacy_retained_ended_history:
+  # This known historical baseline closed its attached frontend but kept ended
+  # history. Current candidates must continue to retire the completed session.
+  assert run([str(binary),'--version']).strip()=='RUWAC 0.4.13'
+  assert any(s['id']==layer['session']['session']for s in rpc(layer['socket'],'session.list'))
+  assert any(p['id']==layer['session']['pane']and p['ended']for p in rpc(layer['socket'],'pane.list',{'session':layer['session']['session']}))
+ else:
+  eventually(lambda:not any(s['id']==layer['session']['session']for s in rpc(layer['socket'],'session.list')),10)
  results.append({'id':'GNU-SCREEN-PASTE-PREFIX-BOUNDARY','status':'LIMITATION','version':run(['screen','--version']).strip(),'actual_nested_Screen_detach':True,'RUWAC_outer_paste_remains_literal':True,'unescaped_Screen_prefix_in_paste_not_safe':True,'scope':'Observed upstream input interpretation; no broad arbitrary-control paste qualification'})
  print('GNU-SCREEN-PASTE-PREFIX-BOUNDARY LIMITATION',flush=True)
 

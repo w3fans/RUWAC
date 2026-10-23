@@ -162,6 +162,7 @@ fn authenticated_loopback_framebuffer_and_cliprdr() {
                 let _ = tokio::time::timeout(Duration::from_secs(3), server_task).await;
                 continue;
             }
+            let budget = Arc::default();
             let exercise = async {
                 let mut ready = false;
                 let mut frames = false;
@@ -178,14 +179,23 @@ fn authenticated_loopback_framebuffer_and_cliprdr() {
                     for e in bridge.drain() {
                         match e {
                             Event::Initialize => {
-                                tx.send(Command::Copy(Vec::new())).await.unwrap();
+                                tx.send(
+                                    QueueBudget::reserve(&budget, Command::Copy(Vec::new()))
+                                        .unwrap(),
+                                )
+                                .await
+                                .unwrap();
                             }
                             Event::Ready => ready = true,
                             Event::Offer {
                                 selected: Some((id, _)),
                                 ..
                             } => {
-                                tx.send(Command::Request(id)).await.unwrap();
+                                tx.send(
+                                    QueueBudget::reserve(&budget, Command::Request(id)).unwrap(),
+                                )
+                                .await
+                                .unwrap();
                             }
                             Event::Data(data) => {
                                 assert_eq!(
@@ -196,9 +206,16 @@ fn authenticated_loopback_framebuffer_and_cliprdr() {
                                 response = true;
                             }
                             Event::Request(_) => {
-                                tx.send(Command::Reply(Some(
-                                    crate::cliprdr::encode(Format::Text, text.as_bytes()).unwrap(),
-                                )))
+                                tx.send(
+                                    QueueBudget::reserve(
+                                        &budget,
+                                        Command::Reply(Some(
+                                            crate::cliprdr::encode(Format::Text, text.as_bytes())
+                                                .unwrap(),
+                                        )),
+                                    )
+                                    .unwrap(),
+                                )
                                 .await
                                 .unwrap();
                             }
@@ -247,9 +264,15 @@ fn authenticated_loopback_framebuffer_and_cliprdr() {
                         response = false;
                     }
                     if round == 10 && !reverse {
-                        tx.send(Command::Copy(crate::cliprdr::formats(true, false)))
-                            .await
-                            .unwrap();
+                        tx.send(
+                            QueueBudget::reserve(
+                                &budget,
+                                Command::Copy(crate::cliprdr::formats(true, false)),
+                            )
+                            .unwrap(),
+                        )
+                        .await
+                        .unwrap();
                         round += 1;
                     }
                     if task.is_finished() {

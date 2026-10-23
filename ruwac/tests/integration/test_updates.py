@@ -42,6 +42,22 @@ class Updates(unittest.TestCase):
         release.update(changes)
         return release
 
+    def test_short_install_and_mode_options_match_long_options_without_installing(self):
+        # Intercept exactly after argparse: validates real parser values without
+        # networking, installation or mutation of the production prefix.
+        class Parsed(Exception): pass
+        observed=[]
+        original=updates.argparse.ArgumentParser.parse_args
+        def capture(parser,*args,**kwargs):
+            result=original(parser,*args,**kwargs);observed.append(vars(result));raise Parsed()
+        with patch.object(updates.argparse.ArgumentParser,'parse_args',capture):
+            for argv in [
+                ['update','-i','-p','-H','-v','0.4.39','-P',str(self.root/'literal-prefix')],
+                ['update','--install','--prebuilt','--headless','--current','0.4.39','--prefix',str(self.root/'literal-prefix')],
+            ]:
+                with patch.object(sys,'argv',argv),self.assertRaises(Parsed): updates.main()
+        self.assertEqual(observed[0],observed[1]);self.assertTrue(observed[0]['install']);self.assertTrue(observed[0]['headless'])
+
     def test_numeric_order_not_lexical_and_no_downgrade(self):
         data = self.metadata(tag_name='v0.2.10', html_url='https://github.com/w3fans/RUWAC/releases/tag/v0.2.10')
         with patch.object(updates, 'api', side_effect=[data, {'object': {'type': 'commit', 'sha': COMMIT}}]):

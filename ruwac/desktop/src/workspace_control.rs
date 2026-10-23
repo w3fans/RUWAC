@@ -351,6 +351,23 @@ impl Control {
         {
             return Err(error("LIMIT", "Workspace view or tab limit exceeded"));
         }
+        let browser_views = bound
+            .values()
+            .filter(|l| matches!(l, workspace::Layout::Web { .. }))
+            .count();
+        let new_browsers = wanted
+            .iter()
+            .filter(|l| {
+                matches!(l, workspace::Layout::Web { .. })
+                    && l.view_id().is_none_or(|id| !bound.contains_key(id))
+            })
+            .count();
+        if browser_views + new_browsers > 8 {
+            return Err(error(
+                "LIMIT",
+                "Close a Web view before restoring more (limit 8)",
+            ));
+        }
         // Existing IDs must keep their semantic target; snapshots cannot retarget a live connection.
         for l in &wanted {
             if let Some(id) = l.view_id() {
@@ -368,6 +385,10 @@ impl Control {
                             workspace::Layout::Files { profile: a, .. },
                             workspace::Layout::Files { profile: b, .. },
                         ) => a.id == b.id,
+                        (
+                            workspace::Layout::Web { endpoint: a, .. },
+                            workspace::Layout::Web { endpoint: b, .. },
+                        ) => a == b,
                         _ => false,
                     };
                     if !same {

@@ -65,6 +65,38 @@
       "source": "https://raw.githubusercontent.com/Devolutions/IronRDP/e3dc0e70d04253d0f881e051c653fb8cb6403281/LICENSE-MIT",
       "file": "ruwac/notices/ironrdp-bulk-0.1.1/LICENSE-MIT",
       "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    },
+    {
+      "package": "javascriptcore6",
+      "version": "0.6.0",
+      "vcs_commit": "33ddd822d2665546ee9d69ae006b5ad7541ef8a1",
+      "source": "https://gitlab.gnome.org/World/Rust/webkit6-rs/-/raw/33ddd822d2665546ee9d69ae006b5ad7541ef8a1/LICENSE",
+      "file": "ruwac/notices/javascriptcore6-0.6.0/LICENSE-MIT",
+      "sha256": "44dad7b2e199b0d355adf4437df5c9bb18633d47804242f24dab5a633faba5f7"
+    },
+    {
+      "package": "javascriptcore6-sys",
+      "version": "0.6.0",
+      "vcs_commit": "33ddd822d2665546ee9d69ae006b5ad7541ef8a1",
+      "source": "https://gitlab.gnome.org/World/Rust/webkit6-rs/-/raw/33ddd822d2665546ee9d69ae006b5ad7541ef8a1/LICENSE",
+      "file": "ruwac/notices/javascriptcore6-sys-0.6.0/LICENSE-MIT",
+      "sha256": "44dad7b2e199b0d355adf4437df5c9bb18633d47804242f24dab5a633faba5f7"
+    },
+    {
+      "package": "webkit6",
+      "version": "0.6.1",
+      "vcs_commit": "16c6035a19f747322b1814b02ca482e12e23f5fd",
+      "source": "https://gitlab.gnome.org/World/Rust/webkit6-rs/-/raw/16c6035a19f747322b1814b02ca482e12e23f5fd/LICENSE",
+      "file": "ruwac/notices/webkit6-0.6.1/LICENSE-MIT",
+      "sha256": "44dad7b2e199b0d355adf4437df5c9bb18633d47804242f24dab5a633faba5f7"
+    },
+    {
+      "package": "webkit6-sys",
+      "version": "0.6.0",
+      "vcs_commit": "33ddd822d2665546ee9d69ae006b5ad7541ef8a1",
+      "source": "https://gitlab.gnome.org/World/Rust/webkit6-rs/-/raw/33ddd822d2665546ee9d69ae006b5ad7541ef8a1/LICENSE",
+      "file": "ruwac/notices/webkit6-sys-0.6.0/LICENSE-MIT",
+      "sha256": "44dad7b2e199b0d355adf4437df5c9bb18633d47804242f24dab5a633faba5f7"
     }
   ]
 }

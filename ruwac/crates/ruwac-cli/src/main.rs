@@ -1,5 +1,6 @@
 mod cleanup;
 mod doctor;
+mod flags;
 mod image;
 mod image_transfer;
 mod remote;
@@ -263,6 +264,7 @@ fn named_session_id(reply: &Value, name: &str) -> io::Result<Option<String>> {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut a: Vec<_> = std::env::args().skip(1).collect();
+    flags::normalize(&mut a);
     let mut socket = PathBuf::from(std::env::var("RUWAC_SOCKET").unwrap_or_else(|_| {
         format!(
             "{}/control.sock",
@@ -762,6 +764,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("--help" | "help") | None => {
             println!(
+                "Global short options: {}\nCommand short options: {}\nGUI short options: {}\nUse ruwac update -h for update short options (including -i install). Values after short options are literal; combined short options are not supported.",
+                flags::help(flags::GLOBAL),
+                flags::help(flags::CONTROL),
+                flags::help(flags::DESKTOP)
+            );
+            println!(
                 "Updates (Fedora 44): ruwac update --check | --install | --rollback | --auto-check on|off|status | --auto-install on|off|status | --testing-bundles on|off|status.\nTesting bundle delivery is opt-in for Fedora 44 x86_64; source builds require development dependencies; --headless retains a CLI-only installation. No running processes are restarted."
             );
             println!(
@@ -777,6 +785,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 mod named_session_tests {
     use super::*;
 
+    #[test]
+    fn short_options_create_identical_requests_and_keep_literal_text() {
+        let mut short = vec!["pane", "send-text", "-i", "pane_fixture", "-t", "-j", "-j"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        flags::normalize(&mut short);
+        let request = named_request(&short).unwrap();
+        assert_eq!(request.method, "pane.sendText");
+        assert_eq!(request.params["pane"], "pane_fixture");
+        assert_eq!(request.params["text"], "-j");
+        let mut attach = vec!["-r".into(), "-s".into(), "session_fixture".into()];
+        flags::normalize(&mut attach);
+        assert_eq!(attach[1], "--session");
+    }
     #[test]
     fn conventional_short_forms_map_to_existing_commands() {
         assert_eq!(alias("-v"), Some("--version"));

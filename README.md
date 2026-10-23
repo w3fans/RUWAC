@@ -473,3 +473,53 @@ older running clients keep their existing rendering until reattached.
 New terminals advertise `xterm-256color` and true colour, and clear a launcher-inherited `NO_COLOR` setting. New GUI and CLI login shells also do this when reusing an older engine. Existing shells retain their environment: run `unset NO_COLOR` and restart the affected application to restore its colours. To deliberately disable colours for one application, run `env NO_COLOR=1 application` or configure that application directly.
 
 Terminal status labels and window titles show the foreground command, refreshing quiet commands twice per second when the engine provides job metadata. Custom window names remain visible alongside the command; arguments are excluded. Exiting a shell removes its completed window when another live window remains. Exiting the last live window detaches the client and retains final history for explicit reattachment.
+
+## Short command options
+
+Every public long option on the CLI, desktop launcher and installed update tools
+has a short spelling. Short options are scoped to their command; option values
+remain literal. Existing Screen-style `-S`, `-r`, `-x`, `-ls` and `-wipe` commands
+retain their meanings. Combined short-option bundles are not supported.
+
+Examples: `ruwac update -i -p -H` installs the verified headless prebuilt update;
+`ruwac -H HOST pane send-text -i PANE_ID -t TEXT -j` addresses an explicit SSH
+endpoint; `ruwac gui -S SESSION_ID` opens a terminal tab. Use `ruwac -h`,
+`ruwac gui -h` and `ruwac update -h` for their full short/long option pairs.
+
+Desktop terminal shortcuts default to selection-aware Ctrl+C and clipboard
+Ctrl+V. With no terminal selection Ctrl+C still interrupts the application.
+Preferences can restore traditional Ctrl+C/V control bytes. Ctrl+Shift+C/V remain
+available, and protected image-only SSH paste keeps its original destination
+checks. Mouse selection publishes PRIMARY; separately opt in to also copy a
+terminal selection to CLIPBOARD. No desktop-wide PRIMARY mirroring is enabled.
+
+## Web Preview
+
+New Web Preview opens an ephemeral native WebKitGTK browser in the normal mixed
+workspace. It supports back/forward/reload, Ctrl+L, browser copy/paste, inspector,
+and the existing tab/split/move actions. Ctrl+click an HTTP/HTTPS terminal URL, or
+use its context menu, to open it. Terminal mouse-reporting programs retain their
+clicks; use Shift+Ctrl+click to deliberately override that routing.
+
+An SSH terminal's localhost link requires its original bound pane, process,
+saved endpoint and verified SSH master. The preview forwards only that explicit
+remote loopback port to a local loopback listener. It never substitutes the
+workstation's server, re-resolves the SSH alias or creates a fallback connection.
+Closing the preview cancels its own forward and preserves the terminal process.
+Other processes on the same workstation can access a loopback listener; this is
+not isolation from hostile local processes. Remote navigation stays on the
+approved origin/port. Relative WebSocket/HMR URLs use that same forward; absolute
+development-server URLs must use the approved origin. TLS verification stays on.
+
+At most eight browser views may exist. Remote previews restore disconnected;
+enter their original URL and explicitly choose a current verified SSH terminal
+to reconnect. Workspace files contain endpoint identities, not browser URLs,
+queries, fragments, cookies, tunnel ports or control sockets. Downloads and file
+uploads are disabled in Preview; use the external-browser action when needed.
+Headless RUWAC does not depend on WebKitGTK. Fedora desktop builds additionally
+need `webkitgtk6.0-devel`; installed desktops require `webkitgtk6.0`.
+
+Remote previews close active page networking when the source connection changes.
+A changed host/account/trust binding requires a fresh Web Preview, so an old
+ephemeral browser session is never reused for a different SSH identity. Reload
+and history navigation stay blocked while a remote preview is disconnected.

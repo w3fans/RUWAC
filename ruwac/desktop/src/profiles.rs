@@ -3035,6 +3035,11 @@ fn editor_seed(
         .default_height(620)
         .build();
     dialog.set_transient_for(parent.as_ref());
+    dialog.set_widget_name(if is_ssh_setup {
+        "ssh-login-setup"
+    } else {
+        "machine-connection-editor"
+    });
     dialog.add_button("Cancel", gtk::ResponseType::Cancel);
     dialog.add_button("Save", gtk::ResponseType::Accept);
     dialog.add_button("Save & Connect", gtk::ResponseType::Other(5));
@@ -3899,6 +3904,25 @@ fn editor_seed(
         agents.append(&edit_ssh);
     }
 
+    // A linked SSH editor edits transport/login only. Agent preferences are
+    // machine-wide, displayed once on its RDP/machine properties form.
+    let agent_options = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let linked_login = original.protocol == "SSH"
+        && store
+            .borrow()
+            .items
+            .iter()
+            .any(|p| p.machine_id == original.machine_id && p.protocol == "RDP");
+    agent_options.set_visible(!linked_login);
+    if linked_login {
+        dialog.set_title(Some("SSH login and key"));
+        let note = gtk::Label::new(Some(
+            "Agent commands and update settings are in this machine's main connection properties.",
+        ));
+        note.set_wrap(true);
+        agents.append(&note);
+    }
+    agents.append(&agent_options);
     let codex_command = gtk::Entry::new();
     codex_command.set_widget_name("machine-codex-command");
     codex_command.set_text(&original.preferences.codex_command);
@@ -3930,28 +3954,36 @@ fn editor_seed(
                 entry.set_text("");
             }
         });
-        agents.append(&enable);
+        agent_options.append(&enable);
     }
-    form_row(&agents, "Codex command (no passwords)", &codex_command);
-    form_row(&agents, "Claude command (no passwords)", &claude_command);
-    form_row(&agents, "Kimi command (no passwords)", &kimi_command);
+    form_row(
+        &agent_options,
+        "Codex command (no passwords)",
+        &codex_command,
+    );
+    form_row(
+        &agent_options,
+        "Claude command (no passwords)",
+        &claude_command,
+    );
+    form_row(&agent_options, "Kimi command (no passwords)", &kimi_command);
     let auto_install = gtk::CheckButton::with_label(
         "Automatically install missing Codex / Claude / Kimi on launch",
     );
     auto_install.set_widget_name("machine-agent-auto-install");
     auto_install.set_active(original.preferences.agent_install_missing);
-    agents.append(&auto_install);
+    agent_options.append(&auto_install);
     let ruwac_install = gtk::CheckButton::with_label(
         "Check and update RUWAC on agent connection (verified prebuilt package)",
     );
     ruwac_install.set_widget_name("machine-ruwac-auto-install");
     ruwac_install.set_active(original.preferences.ruwac_install_missing);
-    agents.append(&ruwac_install);
+    agent_options.append(&ruwac_install);
     let note = gtk::Label::new(Some(
         "Opt-in per-user official installers run in the SSH terminal only for a new agent process. Existing tools and agent logins are preserved. Sign in inside the agent when requested.",
     ));
     note.set_wrap(true);
-    agents.append(&note);
+    agent_options.append(&note);
     let backend = gtk::DropDown::from_strings(&[
         "RUWAC",
         "GNU Screen",
@@ -3965,7 +3997,7 @@ fn editor_seed(
             .position(|s| *s == original.preferences.agent_backend)
             .unwrap_or(0) as u32,
     );
-    form_row(&agents, "Remote session backend", &backend);
+    form_row(&agent_options, "Remote session backend", &backend);
     let shared =
         gtk::CheckButton::with_label("Share one remote RUWAC session (separate agent windows)");
     shared.set_widget_name("machine-agent-share-session");
@@ -3984,9 +4016,9 @@ fn editor_seed(
             entry.set_text("");
         }
     });
-    agents.append(&shared);
+    agent_options.append(&shared);
     form_row(
-        &agents,
+        &agent_options,
         "Shared session name (blank keeps one session per agent)",
         &agent_session,
     );
@@ -4005,7 +4037,7 @@ fn editor_seed(
     setup.connect_clicked(move |button| {
         shortcut_action(button, &s, &st, &cb, &launcher, &saved_id, 2)
     });
-    agents.append(&setup);
+    agent_options.append(&setup);
     let authorize = gtk::Button::with_label("Authorize SSH public key on machine…");
     authorize.set_widget_name("ssh-authorize-key");
     // The third login choice only starts the confirmed install action for the
@@ -4080,6 +4112,17 @@ fn editor_seed(
         if let Some(i)=s.items.iter().position(|x|x.id==p.id){for item in &mut s.items{if item.machine_id==p.machine_id{item.name=p.name.clone();item.group=p.group.clone();item.tags=p.tags.clone();}}s.items[i]=p;}else{if s.items.len()>=1000{info.set_text("Profile limit reached");return;}let new_machine=p.machine_id.clone();s.items.push(p);
             if response==gtk::ResponseType::Other(1){for endpoint in old.iter().filter(|x|x.machine_id==original.machine_id&&x.id!=original.id){if s.items.len()>=1000{s.items=old.clone();info.set_text("Profile limit reached");return;}let mut copy=endpoint.clone();copy.id=ruwac_protocol::id("endpoint");copy.secret_reference=copy.id.clone();if !copy.preferences.gnome_secret_reference.is_empty(){copy.preferences.gnome_secret_reference=format!("{}.gnome",copy.id);}copy.machine_id=new_machine.clone();copy.name.push_str(" (copy)");s.items.push(copy);}}
         }
+        if !linked_login { if let Some(saved)=s.items.iter().find(|x|x.id==saved_id).cloned() {
+            for sibling in s.items.iter_mut().filter(|x|x.machine_id==saved.machine_id) {
+                sibling.preferences.codex_command=saved.preferences.codex_command.clone();
+                sibling.preferences.claude_command=saved.preferences.claude_command.clone();
+                sibling.preferences.kimi_command=saved.preferences.kimi_command.clone();
+                sibling.preferences.agent_backend=saved.preferences.agent_backend.clone();
+                sibling.preferences.agent_session=saved.preferences.agent_session.clone();
+                sibling.preferences.agent_install_missing=saved.preferences.agent_install_missing;
+                sibling.preferences.ruwac_install_missing=saved.preferences.ruwac_install_missing;
+            }
+        }}
         if let Err(e)=s.save(){s.items=old;info.set_text(&e);return;}
         status.set_text("Machine metadata saved; existing tabs retain their connection settings");drop(s);
         // Release the editor's text-input focus before destroying its entries.
@@ -4488,6 +4531,7 @@ pub fn fixture_editor(root: &gtk::Box, q: &serde_json::Value) -> serde_json::Val
                     Some(
                         "Machine / connection properties"
                             | "Set up SSH terminal and agent shortcuts"
+                            | "SSH login and key"
                     )
                 ) {
                     fn bounds(
@@ -4579,7 +4623,15 @@ pub fn fixture_editor(root: &gtk::Box, q: &serde_json::Value) -> serde_json::Val
     let mut credential_status = None;
     for w in gtk::Window::list_toplevels() {
         if let Ok(d) = w.downcast::<gtk::Dialog>() {
-            if d.title().as_deref() != Some(title) {
+            let named_editor = d.widget_name()
+                == if q["ssh_setup"] == true {
+                    "ssh-login-setup"
+                } else {
+                    "machine-connection-editor"
+                };
+            if d.title().as_deref() != Some(title)
+                && !(title != "Network groups and inherited defaults" && named_editor)
+            {
                 continue;
             }
             if let Some(size) = q["window_size"].as_array() {

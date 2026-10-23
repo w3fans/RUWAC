@@ -45,9 +45,29 @@ struct InputReceipt {
     path: PathBuf,
     units: Vec<u16>,
     mouse: Vec<String>,
+    keys: Vec<serde_json::Value>,
 }
 impl RdpServerInputHandler for InputReceipt {
     fn keyboard(&mut self, event: KeyboardEvent) {
+        let key = match &event {
+            KeyboardEvent::Pressed { code, extended } => {
+                Some(json!({"code":code,"down":true,"extended":extended}))
+            }
+            KeyboardEvent::Released { code, extended } => {
+                Some(json!({"code":code,"down":false,"extended":extended}))
+            }
+            _ => None,
+        };
+        if let Some(key) = key {
+            if self.keys.len() == 4096 {
+                self.keys.remove(0);
+            }
+            self.keys.push(key);
+            let _ = fixture_stamp(
+                &self.path.with_extension("keys.json"),
+                json!({"events":self.keys}),
+            );
+        }
         if let KeyboardEvent::UnicodePressed(u) = event {
             self.units.push(u);
             let bytes: Vec<u8> = self.units.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -216,6 +236,7 @@ async fn run(dir: PathBuf) -> anyhow::Result<()> {
                 path: dir.join(format!("input-{port}.json")),
                 units: Vec::new(),
                 mouse: Vec::new(),
+                keys: Vec::new(),
             })
             .with_display_handler(Display::new(
                 (std::env::var("RUWAC_FIXTURE_FRAME_MARKERS").as_deref() == Ok("1"))
@@ -258,6 +279,7 @@ async fn run(dir: PathBuf) -> anyhow::Result<()> {
             let mut seq = 0;
             let mut offered = Vec::new();
             let mut offered_kind = Format::Text;
+            let mut offered_text: Option<Vec<u8>> = None;
             let mut requested = Format::Text;
             let mut received = 0;
             let mut request_count = 0u64;
@@ -280,7 +302,7 @@ async fn run(dir: PathBuf) -> anyhow::Result<()> {
                                         return Ok(());
                                     }
                                     offered_kind = match q["format"].as_str() {
-                                        Some("png") => Format::Png,
+                                        Some("png" | "both") => Format::Png,
                                         Some("dib") => Format::Dib,
                                         Some("dibv5") => Format::DibV5,
                                         _ => Format::Text,
@@ -303,16 +325,42 @@ async fn run(dir: PathBuf) -> anyhow::Result<()> {
                                         .read_to_end(&mut offered)
                                         .map_err(|_| "Cannot read fixture payload")?;
                                     cliprdr::encode(offered_kind, &offered)?;
+                                    offered_text = None;
+                                    if q["format"] == "both" {
+                                        let name = q["text_file"]
+                                            .as_str()
+                                            .ok_or("Text fixture required")?;
+                                        if name.contains('/') || name.contains("..") {
+                                            return Err("Text payload must be fixture-local".into());
+                                        }
+                                        let f = std::fs::OpenOptions::new()
+                                            .read(true)
+                                            .custom_flags(libc::O_NOFOLLOW)
+                                            .open(d.join(name))
+                                            .map_err(|_| "Cannot open text fixture")?;
+                                        let mut text = Vec::new();
+                                        f.take(1024 * 1024 + 1)
+                                            .read_to_end(&mut text)
+                                            .map_err(|_| "Cannot read text fixture")?;
+                                        cliprdr::encode(Format::Text, &text)?;
+                                        offered_text = Some(text);
+                                    }
+
                                     data_delay = Duration::from_millis(
                                         q["delay_ms"].as_u64().unwrap_or(0).min(1000),
                                     );
-                                    let formats = if offered_kind == Format::Png {
+                                    let mut formats = if offered_kind == Format::Png {
                                         vec![ironrdp_cliprdr::pdu::ClipboardFormat::new(cliprdr::PNG_ID).with_name(ironrdp_cliprdr::pdu::ClipboardFormatName::new_static("PNG"))]
                                     } else {
                                         vec![ironrdp_cliprdr::pdu::ClipboardFormat::new(
                                             offered_kind.id(),
                                         )]
                                     };
+                                    if offered_text.is_some() {
+                                        formats.push(ironrdp_cliprdr::pdu::ClipboardFormat::new(
+                                            Format::Text.id(),
+                                        ));
+                                    }
                                     sender
                                         .send(ServerEvent::Clipboard(
                                             ClipboardMessage::SendInitiateCopy(formats),
@@ -327,10 +375,15 @@ async fn run(dir: PathBuf) -> anyhow::Result<()> {
                 }
                 for e in bridge.drain() {
                     match e {
-                        Event::Request(_) => {
+                        Event::Request(id) => {
                             if delayed.is_none() {
                                 request_count += 1;
-                                let data = cliprdr::encode(offered_kind, &offered).ok();
+                                let data = if id == Format::Text.id() && offered_text.is_some() {
+                                    cliprdr::encode(Format::Text, offered_text.as_ref().unwrap())
+                                        .ok()
+                                } else {
+                                    cliprdr::encode(offered_kind, &offered).ok()
+                                };
                                 delayed = Some((tokio::time::Instant::now() + data_delay, data));
                                 let _ = std::fs::write(
                                     d.join(format!("server-{tab}-pending.json")),

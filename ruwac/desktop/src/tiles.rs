@@ -556,7 +556,11 @@ pub fn inspect(tabs: &adw::TabView, memory: &FocusMemory) -> serde_json::Value {
         if let Some(p) = w.downcast_ref::<gtk::Paned>() {
             serde_json::json!({"split":if p.orientation()==Orientation::Vertical{"vertical"}else{"horizontal"},"position":p.position(),"width":p.width(),"height":p.height(),"first":p.start_child().map(node),"second":p.end_child().map(node)})
         } else {
-            serde_json::json!({"id":w.widget_name().as_str(),"view":w.type_().name(),"mapped":w.is_mapped(),"width":w.width(),"height":w.height()})
+            let mut metadata = serde_json::json!({"id":w.widget_name().as_str(),"view":w.type_().name(),"mapped":w.is_mapped(),"width":w.width(),"height":w.height()});
+            if w.has_css_class("ruwac-web") {
+                metadata["kind"] = serde_json::json!("web");
+            }
+            metadata
         }
     }
     serde_json::json!({"focused_view":focused_id(tabs,memory),"selected_tab":tabs.selected_page().map(|p|p.child().widget_name().to_string()),"tabs":(0..tabs.n_pages()).map(|i|{let p=tabs.nth_page(i);serde_json::json!({"id":p.child().widget_name().as_str(),"title":p.title().as_str(),"layout":p.child().first_child().map(node)})}).collect::<Vec<_>>()})

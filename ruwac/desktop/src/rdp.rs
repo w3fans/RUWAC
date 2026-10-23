@@ -22,6 +22,7 @@ pub fn install_tab_menu(
     for (name, label) in [
         ("reconnect", "Reconnect"),
         ("retry-sign-in", "Retry automatic sign-in"),
+        ("recover-sign-in", "Recover GNOME login…"),
         ("dynamic", "Dynamic resolution"),
         ("fit", "Fit to window"),
         ("native", "Original size"),
@@ -40,6 +41,7 @@ pub fn install_tab_menu(
                     }
                     "disconnect" => view.close(),
                     "retry-sign-in" => view.retry_auto_gdm(),
+                    "recover-sign-in" => view.recover_sign_in(),
                     mode => view.set_display(mode, 1.0, 0, 0),
                 }
             }
@@ -398,7 +400,8 @@ impl Drop for SensitiveText {
 }
 enum Command {
     Assisted(SensitiveText, Arc<AtomicU64>, u64, u64, bool),
-    Input(Vec<FastPathInputEvent>),
+    Input(Vec<FastPathInputEvent>, Arc<AtomicU64>, u64, u64),
+    Release(Vec<FastPathInputEvent>),
     Resize(u16, u16, u32),
     Copy(Vec<ClipboardFormat>),
     Request(ClipboardFormatId),
@@ -508,15 +511,79 @@ struct State {
     authentication_error: Option<String>,
     protocol_error: Option<String>,
 }
+/// The permit covers channel and deferred entries, including payload bytes.
+/// Dropping/rejecting a command releases it without replaying rejected input.
+#[derive(Default)]
+struct QueueBudget {
+    count: usize,
+    bytes: usize,
+}
+struct QueuePermit {
+    budget: Arc<Mutex<QueueBudget>>,
+    bytes: usize,
+}
+impl Drop for QueuePermit {
+    fn drop(&mut self) {
+        let mut b = self.budget.lock().unwrap();
+        b.count -= 1;
+        b.bytes -= self.bytes;
+    }
+}
+struct QueuedCommand {
+    command: Command,
+    _permit: QueuePermit,
+    created: std::time::Instant,
+}
+impl Command {
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Input(e, ..) | Self::Release(e) => e.len().saturating_mul(32),
+            Self::Reply(Some(b)) => b.len(),
+            Self::Assisted(t, ..) => t.0.len(),
+            Self::Copy(f) => f.len().saturating_mul(1024),
+            _ => 64,
+        }
+    }
+    fn stale(&self, generation: u64) -> bool {
+        matches!(self, Self::Input(_, epoch, expected, transport) if epoch.load(Ordering::Acquire)!=*expected || *transport!=generation)
+    }
+}
+impl QueueBudget {
+    fn reserve(budget: &Arc<Mutex<Self>>, command: Command) -> Result<QueuedCommand, String> {
+        let bytes = command.bytes().saturating_add(128);
+        let input = matches!(command, Command::Input(..));
+        let mut b = budget.lock().unwrap();
+        let (count_cap, byte_cap) = if input {
+            (4064, 16 * 1024 * 1024)
+        } else {
+            (4096, 80 * 1024 * 1024)
+        };
+        if b.count >= count_cap || bytes > byte_cap - b.bytes.min(byte_cap) {
+            return Err("RDP queue is full; input was not queued".into());
+        }
+        b.count += 1;
+        b.bytes += bytes;
+        drop(b);
+        Ok(QueuedCommand {
+            command,
+            _permit: QueuePermit {
+                budget: budget.clone(),
+                bytes,
+            },
+            created: std::time::Instant::now(),
+        })
+    }
+}
 struct Connection {
     id: String,
-    tx: tokio::sync::mpsc::Sender<Command>,
+    tx: tokio::sync::mpsc::Sender<QueuedCommand>,
     stop: Arc<AtomicBool>,
     state: Arc<Mutex<State>>,
     /// Commands waiting while the session queue is briefly full (slow link),
     /// kept in order; and since when the backlog has not drained.
-    backlog: RefCell<std::collections::VecDeque<Command>>,
-    stalled: std::cell::Cell<Option<std::time::Instant>>,
+    backlog: RefCell<std::collections::VecDeque<QueuedCommand>>,
+    budget: Arc<Mutex<QueueBudget>>,
+    input_epoch: Arc<AtomicU64>,
 }
 impl Connection {
     fn start(p: Profile) -> Self {
@@ -571,24 +638,35 @@ impl Connection {
             stop,
             state,
             backlog: RefCell::default(),
-            stalled: std::cell::Cell::new(None),
+            budget: Arc::default(),
+            input_epoch: Arc::default(),
         }
     }
     fn send(&self, events: Vec<FastPathInputEvent>) -> Result<(), String> {
         // Pointer motion is superseded by the next position. While the link
         // is slow, drop it to keep room for clicks, keys and control commands.
         let motion = events.iter().all(
-            |e| matches!(e, FastPathInputEvent::MouseEvent(m) if m.flags == PointerFlags::MOVE),
+            |e| matches!(e, FastPathInputEvent::MouseEvent(m) if m.flags == PointerFlags::MOVE || m.flags.intersects(PointerFlags::VERTICAL_WHEEL | PointerFlags::HORIZONTAL_WHEEL)),
         );
         if motion && (self.tx.capacity() < 32 || !self.backlog.borrow().is_empty()) {
             return Ok(());
         }
-        self.queue(Command::Input(events))
+        let generation = self.state.lock().unwrap().generation;
+        self.queue(Command::Input(
+            events,
+            self.input_epoch.clone(),
+            self.input_epoch.load(Ordering::Acquire),
+            generation,
+        ))
     }
     /// Queue a command in order. A full session queue (slow network, busy
     /// decoder) defers it instead of failing; only a closed session fails.
     fn queue(&self, c: Command) -> Result<(), String> {
-        self.flush();
+        if self.flush() {
+            self.close();
+            return Err("RDP queued input expired; reconnect".into());
+        }
+        let c = QueueBudget::reserve(&self.budget, c)?;
         let mut backlog = self.backlog.borrow_mut();
         if backlog.is_empty() {
             match self.tx.try_send(c) {
@@ -601,20 +679,28 @@ impl Connection {
         } else {
             backlog.push_back(c);
         }
-        if self.stalled.get().is_none() {
-            self.stalled.set(Some(std::time::Instant::now()));
-        }
-        if backlog.len() > 4096 {
-            return Err("RDP connection is not accepting input".into());
-        }
         Ok(())
     }
-    /// Move deferred commands on; true once nothing drained for 30 seconds.
+    fn invalidate_input(&self) {
+        self.input_epoch.fetch_add(1, Ordering::AcqRel);
+        self.backlog
+            .borrow_mut()
+            .retain(|c| !matches!(c.command, Command::Input(..)));
+    }
+    /// Absolute oldest-command age; partial/trickle progress never renews it.
     fn flush(&self) -> bool {
+        let generation = self.state.lock().unwrap().generation;
         let mut backlog = self.backlog.borrow_mut();
         while let Some(c) = backlog.pop_front() {
+            if c.command.stale(generation) {
+                continue;
+            }
+            if c.created.elapsed() > Duration::from_secs(30) {
+                backlog.push_front(c);
+                return true;
+            }
             match self.tx.try_send(c) {
-                Ok(()) => self.stalled.set(Some(std::time::Instant::now())),
+                Ok(()) => (),
                 Err(tokio::sync::mpsc::error::TrySendError::Full(c)) => {
                     backlog.push_front(c);
                     break;
@@ -622,13 +708,9 @@ impl Connection {
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => backlog.clear(),
             }
         }
-        if backlog.is_empty() {
-            self.stalled.set(None);
-            return false;
-        }
-        self.stalled
-            .get()
-            .is_some_and(|at| at.elapsed() > Duration::from_secs(30))
+        backlog
+            .front()
+            .is_some_and(|c| c.created.elapsed() > Duration::from_secs(30))
     }
     fn close(&self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -683,7 +765,7 @@ fn keepalive(tcp: &tokio::net::TcpStream) {
 async fn run(
     mut p: Profile,
     password: String,
-    mut input: tokio::sync::mpsc::Receiver<Command>,
+    mut input: tokio::sync::mpsc::Receiver<QueuedCommand>,
     halt: Arc<AtomicBool>,
     state: Arc<Mutex<State>>,
 ) -> Result<(), String> {
@@ -942,7 +1024,7 @@ async fn inspect_certificate(p: &Profile, previous: &Trust) -> Result<Review, St
 async fn run_session(
     p: Profile,
     password: String,
-    input: &mut tokio::sync::mpsc::Receiver<Command>,
+    input: &mut tokio::sync::mpsc::Receiver<QueuedCommand>,
     halt: Arc<AtomicBool>,
     state: Arc<Mutex<State>>,
     setup_limit: Duration,
@@ -1172,7 +1254,10 @@ async fn run_session(
             let _ = tokio::time::timeout(Duration::from_millis(250), async {
                 for _ in 0..128 {
                     match input.try_recv() {
-                        Ok(Command::Input(events)) => {
+                        Ok(QueuedCommand {
+                            command: Command::Release(events),
+                            ..
+                        }) => {
                             if let Ok(outputs) = active.process_fastpath_input(&mut image, &events)
                             {
                                 for output in outputs {
@@ -1198,7 +1283,11 @@ async fn run_session(
                     {let mut st=state.lock().unwrap();st.handovers+=1;st.handover=Some(Arc::new(plan));}return Ok(());
                 }
             }if Some(ctx.channel_id)==clip_channel{fragments.check(ctx.user_data)?;}if Some(ctx.channel_id)==dvc_channel{display_fragments.check(ctx.user_data)?;}}}active.process(&mut image,action,&bytes).map_err(|e|crate::gfx::decoder_location(&e))?},
-         command=input.recv()=>{let Some(command)=command else{return Ok(());};match command {
+         command=input.recv()=>{let Some(queued)=command else{return Ok(());};
+            if queued.created.elapsed()>Duration::from_secs(30) { return Err("RDP queued command expired".into()); }
+            if queued.command.stale(state.lock().unwrap().generation) { continue; }
+            let QueuedCommand { command, _permit, .. }=queued;
+            match command {
             Command::Resize(w,h,scale)=>{
                 let ready=active.get_dvc::<DisplayControlAdapter>().and_then(|d|d.channel_processor_downcast_ref::<DisplayControlAdapter>()).is_some_and(|d|d.0.ready());
                 if image.width()==w&&image.height()==h{state.lock().unwrap().status=Some(format!("Connected · remote {w}×{h}"));vec![]}else if ready && state.lock().unwrap().display_cap.is_some_and(|max|w as u64*h as u64<=max) {match encode_resize(&mut active,w,h,scale){Some(Ok(bytes))=>{{let mut st=state.lock().unwrap();st.display_request=Some((w,h));st.status=Some(format!("Display Control request {w}×{h}; awaiting framebuffer"));}vec![ActiveStageOutput::ResponseFrame(bytes)]},_=>{state.lock().unwrap().status=Some("Display Control rejected; local fit remains available".into());vec![]}}}else{state.lock().unwrap().status=Some("Display Control unsupported or not ready · local fit fallback".into());vec![]}
@@ -1220,7 +1309,7 @@ async fn run_session(
                 }
                 vec![]
             },
-            Command::Input(events)=>active.process_fastpath_input(&mut image,&events).map_err(|_|"RDP input encoding failed".to_string())?,
+            Command::Input(events,..) | Command::Release(events)=>active.process_fastpath_input(&mut image,&events).map_err(|_|"RDP input encoding failed".to_string())?,
             command=>{let clip=active.get_svc_processor_mut::<CliprdrClient>().ok_or("CLIPRDR not negotiated")?;
             let messages=match command{Command::Copy(f)=>clip.initiate_copy(&f),Command::Request(f)=>clip.initiate_paste(f),Command::Reply(data)=>clip.submit_format_data(match data{Some(b)=>FormatDataResponse::new_data(b),None=>FormatDataResponse::new_error()}),_=>unreachable!()}.map_err(|_|"CLIPRDR command failed".to_string())?;
             let bytes=active.process_svc_processor_messages(messages).map_err(|_|"CLIPRDR encoding failed".to_string())?;vec![ActiveStageOutput::ResponseFrame(bytes)]}
@@ -1491,7 +1580,10 @@ impl Default for AutoGdm {
 }
 impl AutoGdm {
     fn retry_on_greeter(&self, handovers: u32, verified_live: bool) -> bool {
-        !self.armed && self.stopped_at.is_some() && handovers > 0 && verified_live
+        !self.armed
+            && self.stopped_at.is_some()
+            && verified_live
+            && self.stopped_at.is_some_and(|at| handovers >= at)
     }
     fn reconnects_to_greeter(&self, transport: &str, generation: u64, handovers: u32) -> bool {
         !self.armed
@@ -1520,6 +1612,30 @@ struct PrimaryClick {
     epoch: u64,
     geometry: (f64, f64, f64, f64),
     source: gdk::ContentProvider,
+}
+#[derive(Clone, PartialEq, Eq)]
+struct ClipboardRequest {
+    id: u64,
+    kind: Format,
+    epoch: u64,
+    generation: u64,
+    created: std::time::Instant,
+    transport: String,
+    serial: u64,
+    transport_generation: u64,
+    provider: Option<gdk::ContentProvider>,
+}
+/// Wire FormatListResponse has no ID. Only one locally stamped offer may
+/// await it; newer offers wait until that response has been consumed.
+struct LocalOffer {
+    formats: Vec<ClipboardFormat>,
+    epoch: u64,
+    serial: u64,
+    source: Option<gdk::ContentProvider>,
+    transport: String,
+    generation: u64,
+    intent: bool,
+    created: std::time::Instant,
 }
 pub struct RdpView {
     pub root: gtk::Box,
@@ -1570,10 +1686,14 @@ pub struct RdpView {
     received_generation: Cell<u64>,
     offers_seen: Cell<u64>,
     remote: Cell<Option<(ClipboardFormatId, Format, u64, u64)>>,
-    pending: RefCell<Option<(Format, u64, u64, std::time::Instant)>>,
+    pending: RefCell<Option<ClipboardRequest>>,
+    request_serial: Cell<u64>,
+    remote_formats: RefCell<Vec<(ClipboardFormatId, Format)>>,
+    lazy_reply: RefCell<Option<crate::remote_content::LazyReply>>,
     replying: Cell<bool>,
     decoding: Cell<bool>,
-    pending_paste: Cell<bool>,
+    offers: RefCell<crate::clip_offers::Offers<LocalOffer>>,
+    consumed_keys: RefCell<std::collections::HashSet<u32>>,
     provider: RefCell<Option<gdk::ContentProvider>>,
     entries: [gtk::Entry; 4],
     assist_button: gtk::Button,
@@ -1794,9 +1914,16 @@ impl RdpView {
             offers_seen: Cell::new(0),
             remote: Cell::new(None),
             pending: RefCell::new(None),
+            request_serial: Cell::new(0),
+            remote_formats: RefCell::new(Vec::new()),
+            lazy_reply: RefCell::new(None),
             replying: Cell::new(false),
             decoding: Cell::new(false),
-            pending_paste: Cell::new(false),
+            offers: RefCell::new(crate::clip_offers::Offers {
+                inflight: None,
+                waiting: None,
+            }),
+            consumed_keys: RefCell::new(Default::default()),
             provider: RefCell::new(None),
             entries: [host.clone(), user.clone(), secret.clone(), ca.clone()],
             assist_button: assist.clone(),
@@ -2046,6 +2173,15 @@ impl RdpView {
                 }
             });
         }
+        let recover = gtk::Button::with_label("Recover GNOME login…");
+        recover.set_widget_name("rdp-recover-sign-in");
+        tools.insert(&recover, -1);
+        let w = Rc::downgrade(&v);
+        recover.connect_clicked(move |_| {
+            if let Some(v) = w.upgrade() {
+                v.recover_sign_in();
+            }
+        });
         let w = Rc::downgrade(&v);
         v.area.display().clipboard().connect_changed(move |_| {
             let Some(v) = w.upgrade() else {
@@ -2148,7 +2284,15 @@ impl RdpView {
                 if v.auto_gdm.borrow_mut().notice.take().is_some() {
                     v.area.queue_draw();
                 }
-                if k == gdk::Key::v && modifiers.contains(gdk::ModifierType::CONTROL_MASK) {
+                if k == gdk::Key::v
+                    && modifiers.contains(gdk::ModifierType::CONTROL_MASK)
+                    && !modifiers.intersects(
+                        gdk::ModifierType::ALT_MASK
+                            | gdk::ModifierType::SHIFT_MASK
+                            | gdk::ModifierType::SUPER_MASK,
+                    )
+                {
+                    v.consumed_keys.borrow_mut().insert(code);
                     v.paste();
                 } else {
                     v.key(k, code, false);
@@ -2159,6 +2303,9 @@ impl RdpView {
         let w = Rc::downgrade(&v);
         key.connect_key_released(move |_, k, code, _| {
             if let Some(v) = w.upgrade() {
+                if v.consumed_keys.borrow_mut().remove(&code) {
+                    return;
+                }
                 if v.auto_gdm.borrow().armed
                     || (k == gdk::Key::Escape && !v.held.borrow().contains(&(0x01, false)))
                 {
@@ -3107,6 +3254,9 @@ impl RdpView {
             e.set_text(value);
         }
     }
+    pub fn pause_keyboard(&self) {
+        self.release_keys();
+    }
     pub fn inactive(&self) {
         self.primary_click.borrow_mut().take();
         if !self.auto_gdm.borrow().armed {
@@ -3125,6 +3275,34 @@ impl RdpView {
     /// Deliver deferred commands; a connection that accepts nothing for 30
     /// seconds is closed so Reconnect can start a fresh one.
     fn flush_commands(&self) {
+        if self
+            .pending
+            .borrow()
+            .as_ref()
+            .is_some_and(|r| r.created.elapsed() > Duration::from_secs(10))
+        {
+            // DataResponse also has no request ID: reset the transport rather
+            // than allowing its late reply to satisfy a later request.
+            self.lazy_reply.borrow_mut().take();
+            if let Some(c) = self.connection.borrow().as_ref() {
+                c.close();
+            }
+        }
+        self.flush_offer();
+        if self
+            .offers
+            .borrow()
+            .inflight
+            .as_ref()
+            .is_some_and(|o| o.created.elapsed() > Duration::from_secs(10))
+        {
+            self.offers.borrow_mut().waiting.take();
+            if let Some(conn) = self.connection.borrow().as_ref() {
+                conn.close();
+            }
+            self.status
+                .set_text("Remote clipboard response timed out; reconnect to reset the channel");
+        }
         if let Some(conn) = self.connection.borrow().as_ref() {
             if conn.flush() {
                 self.status
@@ -3293,6 +3471,9 @@ impl RdpView {
             }
     }
     fn advertise(&self, manual: bool) {
+        self.advertise_intent(manual, false);
+    }
+    fn advertise_intent(&self, manual: bool, intent: bool) {
         if !self.allowed(false, manual) {
             return;
         }
@@ -3319,8 +3500,73 @@ impl RdpView {
             f.contain_mime_type("text/plain;charset=utf-8") || f.contain_mime_type("text/plain"),
             f.contain_mime_type("image/png"),
         );
-        self.advertised.set(self.broker.borrow().epoch());
-        self.command(Command::Copy(formats));
+        if formats.is_empty() {
+            return;
+        }
+        self.enqueue_offer(formats, intent);
+    }
+    fn offer_valid(&self, offer: &LocalOffer) -> bool {
+        offer.serial == self.serial.get()
+            && offer.epoch == self.broker.borrow().epoch()
+            && offer.source == self.area.display().clipboard().content()
+            && offer.created.elapsed() < Duration::from_secs(10)
+            && self.allowed(false, true)
+            && self.connection.borrow().as_ref().is_some_and(|c| {
+                let state = c.state.lock().unwrap();
+                c.id == offer.transport
+                    && state.generation == offer.generation
+                    && !state.reactivating
+                    && !c.stop.load(Ordering::Acquire)
+                    && matches!(state.phase.as_str(), "connected" | "display_change")
+            })
+    }
+    fn enqueue_offer(&self, formats: Vec<ClipboardFormat>, intent: bool) {
+        let Some((transport, generation)) = self
+            .connection
+            .borrow()
+            .as_ref()
+            .map(|c| (c.id.clone(), c.state.lock().unwrap().generation))
+        else {
+            return;
+        };
+        self.offers.borrow_mut().submit(LocalOffer {
+            formats,
+            epoch: self.broker.borrow().epoch(),
+            serial: self.serial.get(),
+            source: self.area.display().clipboard().content(),
+            transport,
+            generation,
+            intent,
+            created: std::time::Instant::now(),
+        });
+        self.flush_offer();
+    }
+    fn flush_offer(&self) {
+        if self.offers.borrow().inflight.is_some() {
+            return;
+        }
+        let Some(mut offer) = self.offers.borrow_mut().ready() else {
+            return;
+        };
+        // Initialization carries no input intent and must also consume its ACK.
+        if !offer.formats.is_empty() && !self.offer_valid(&offer) {
+            return;
+        }
+        let Some(conn) = self
+            .connection
+            .borrow()
+            .as_ref()
+            .map(|c| c.queue(Command::Copy(std::mem::take(&mut offer.formats))))
+        else {
+            return;
+        };
+        match conn {
+            Ok(()) => {
+                self.advertised.set(offer.epoch);
+                self.offers.borrow_mut().sent(offer);
+            }
+            Err(e) => self.status.set_text(&e),
+        }
     }
     fn paste(&self) {
         if self.auto_gdm.borrow().armed {
@@ -3328,12 +3574,51 @@ impl RdpView {
         }
         if self.allowed(false, true) {
             self.release_keys();
-            self.pending_paste.set(true);
-            self.advertise(true);
+            self.advertise_intent(true, true);
         } else {
             self.status
                 .set_text("Clipboard policy prevents local paste");
         }
+    }
+    // Serving another MIME from an already-owned offer is not a new clipboard
+    // promotion. Consumers in other windows may read it after focus changes.
+    fn owns_remote_provider(&self, provider: &gdk::ContentProvider) -> bool {
+        self.broker.borrow().desktop_enabled()
+            && matches!(
+                self.policy.get(),
+                ClipPolicy::Manual | ClipPolicy::RemoteToLocal | ClipPolicy::Bidirectional
+            )
+            && self.provider.borrow().as_ref() == Some(provider)
+            && self.area.display().clipboard().content().as_ref() == Some(provider)
+    }
+    fn clipboard_request(
+        &self,
+        kind: Format,
+        epoch: u64,
+        generation: u64,
+    ) -> Option<ClipboardRequest> {
+        let binding = self.connection.borrow();
+        let c = binding.as_ref()?;
+        let state = c.state.lock().unwrap();
+        if c.stop.load(Ordering::Acquire)
+            || state.reactivating
+            || !matches!(state.phase.as_str(), "connected" | "display_change")
+        {
+            return None;
+        }
+        let id = self.request_serial.get().checked_add(1)?;
+        self.request_serial.set(id);
+        Some(ClipboardRequest {
+            id,
+            kind,
+            epoch,
+            generation,
+            created: std::time::Instant::now(),
+            transport: c.id.clone(),
+            serial: self.serial.get(),
+            transport_generation: state.generation,
+            provider: None,
+        })
     }
     fn receive(&self, manual: bool) {
         if !self.allowed(true, manual) || self.pending.borrow().is_some() {
@@ -3351,7 +3636,10 @@ impl RdpView {
         if !manual && offered_epoch != epoch {
             return;
         }
-        *self.pending.borrow_mut() = Some((kind, epoch, generation, std::time::Instant::now()));
+        let Some(request) = self.clipboard_request(kind, epoch, generation) else {
+            return;
+        };
+        *self.pending.borrow_mut() = Some(request);
         self.command(Command::Request(id));
     }
     fn clip_event(self: &Rc<Self>, e: Event) {
@@ -3370,6 +3658,7 @@ impl RdpView {
                     generation,
                     epoch,
                     selected,
+                    ..
                 } => {
                     serde_json::json!({"generation":generation,"epoch":epoch,"kind":selected.map(|(_,kind)|format!("{kind:?}"))})
                 }
@@ -3385,10 +3674,14 @@ impl RdpView {
 
         match e {
             Event::Reset => {
+                self.offers.borrow_mut().acknowledge();
+                self.offers.borrow_mut().waiting.take();
                 self.serial.set(self.serial.get().saturating_add(1));
                 let active = self.broker.borrow().active() == Some(self.id.as_str());
                 self.broker.borrow_mut().disconnect(&self.id);
                 self.pending.borrow_mut().take();
+                self.lazy_reply.borrow_mut().take();
+                self.remote_formats.borrow_mut().clear();
                 self.remote.set(None);
                 self.received_generation.set(0);
                 self.advertised.set(0);
@@ -3403,10 +3696,15 @@ impl RdpView {
                 }
                 self.area.queue_draw();
             }
-            Event::Initialize => self.command(Command::Copy(Vec::new())),
+            Event::Initialize => self.enqueue_offer(Vec::new(), false),
             Event::Ready => self.advertise(false),
             Event::Accepted(ok) => {
-                if self.pending_paste.replace(false) && ok && self.allowed(false, true) {
+                let offer = self.offers.borrow_mut().acknowledge();
+                if offer
+                    .as_ref()
+                    .is_some_and(|o| o.intent && self.offer_valid(o))
+                    && ok
+                {
                     self.send(vec![
                         FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(), 0x1d),
                         FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(), 0x2f),
@@ -3423,7 +3721,9 @@ impl RdpView {
                 generation,
                 epoch,
                 selected,
+                formats,
             } => {
+                *self.remote_formats.borrow_mut() = formats;
                 self.offers_seen
                     .set(self.offers_seen.get().saturating_add(1));
                 self.remote
@@ -3515,12 +3815,14 @@ impl RdpView {
                 });
             }
             Event::Data(data) => {
-                let Some((kind, epoch, generation, _)) = *self.pending.borrow() else {
+                let Some(request) = self.pending.borrow().clone() else {
                     return;
                 };
+                let (kind, epoch, generation) = (request.kind, request.epoch, request.generation);
                 if self.decoding.replace(true) {
                     return;
                 }
+                let serial = request.serial;
                 let (tx, rx) = std::sync::mpsc::sync_channel(1);
                 std::thread::spawn(move || {
                     let _ = tx.send(data.and_then(|b| crate::cliprdr::decode(kind, &b)));
@@ -3529,18 +3831,35 @@ impl RdpView {
                 glib::timeout_add_local(Duration::from_millis(10), move || match rx.try_recv() {
                     Ok(r) => {
                         if let Some(v) = w.upgrade() {
-                            if v.pending
-                                .borrow()
-                                .as_ref()
-                                .is_some_and(|p| p.1 == epoch && p.2 == generation)
-                            {
+                            let current = v.pending.borrow().as_ref() == Some(&request);
+                            let transport_current = v.serial.get() == request.serial
+                                && v.connection.borrow().as_ref().is_some_and(|c| {
+                                    let state = c.state.lock().unwrap();
+                                    c.id == request.transport
+                                        && state.generation == request.transport_generation
+                                        && !c.stop.load(Ordering::Acquire)
+                                        && !state.reactivating
+                                });
+                            if current {
                                 v.pending.borrow_mut().take();
                                 v.decoding.set(false);
                             }
-                            if v.allowed(true, true)
-                                && v.broker.borrow().epoch() == epoch
+                            let delivery_allowed = if let Some(provider) = request.provider.as_ref()
+                            {
+                                v.owns_remote_provider(provider)
+                                    && v.received_generation.get() == generation
+                            } else {
+                                v.allowed(true, true) && v.broker.borrow().epoch() == epoch
+                            };
+                            if current
+                                && transport_current
+                                && delivery_allowed
                                 && v.remote.get().is_some_and(|o| o.2 == generation)
                             {
+                                if let Some(reply) = v.lazy_reply.borrow_mut().take() {
+                                    let _ = reply.send(r.map(glib::Bytes::from_owned));
+                                    return glib::ControlFlow::Break;
+                                }
                                 match r {
                                     Ok(b) => {
                                         let mime = if kind == Format::Text {
@@ -3548,28 +3867,73 @@ impl RdpView {
                                         } else {
                                             kind.mime()
                                         };
+                                        let mimes = v
+                                            .remote_formats
+                                            .borrow()
+                                            .iter()
+                                            .map(|(_, k)| {
+                                                if *k == Format::Text {
+                                                    "text/plain;charset=utf-8"
+                                                } else {
+                                                    "image/png"
+                                                }
+                                            })
+                                            .collect::<Vec<_>>();
                                         let clip = v.area.display().clipboard();
                                         let current = v.provider.borrow().as_ref()
                                             .filter(|p| clip.content().as_ref() == Some(p))
                                             .and_then(|p| p.clone().downcast::<crate::remote_content::RemoteContent>().ok())
-                                            .filter(|p| p.mime() == Some(mime));
+                                            .filter(|p| p.mime() == Some(mime) && p.supports_formats(&mimes));
                                         let bytes = glib::Bytes::from_owned(b);
                                         let reused = current.is_some();
-                                        let provider: gdk::ContentProvider = if let Some(p) =
-                                            current
-                                        {
-                                            p.replace_bytes(bytes);
-                                            v.broker.borrow_mut().local_copy();
-                                            v.bridge.borrow().epoch.store(
-                                                v.broker.borrow().epoch(),
-                                                Ordering::Release,
-                                            );
-                                            p.upcast()
-                                        } else {
-                                            crate::remote_content::RemoteContent::new(mime, bytes)
+                                        let provider: gdk::ContentProvider =
+                                            if let Some(p) = current {
+                                                p.replace_bytes(bytes.clone());
+                                                v.broker.borrow_mut().local_copy();
+                                                v.bridge.borrow().epoch.store(
+                                                    v.broker.borrow().epoch(),
+                                                    Ordering::Release,
+                                                );
+                                                p.upcast()
+                                            } else {
+                                                crate::remote_content::RemoteContent::new(
+                                                    mime,
+                                                    bytes.clone(),
+                                                )
                                                 .upcast()
-                                        };
-                                        *v.provider.borrow_mut() = Some(provider.clone());
+                                            };
+                                        if let Ok(remote) = provider
+                                            .clone()
+                                            .downcast::<crate::remote_content::RemoteContent>(
+                                        ) {
+                                            let mimes = v
+                                                .remote_formats
+                                                .borrow()
+                                                .iter()
+                                                .map(|(_, k)| {
+                                                    if *k == Format::Text {
+                                                        "text/plain;charset=utf-8"
+                                                    } else {
+                                                        "image/png"
+                                                    }
+                                                })
+                                                .collect::<Vec<_>>();
+                                            let weak = Rc::downgrade(&v);
+                                            let content = remote.downgrade();
+                                            remote.offer(&mimes,mime,bytes.clone(),Rc::new(move |requested,reply| {
+                                                let Some(v)=weak.upgrade() else {return;};
+                                                let Some((id,kind))=v.remote_formats.borrow().iter().find(|(_,k)| k.mime()==requested || (*k==Format::Text && requested=="text/plain;charset=utf-8")).copied() else {return;};
+                                                let Some(provider)=content.upgrade().map(|p|p.upcast::<gdk::ContentProvider>()) else{return;};
+                                                if v.serial.get()!=serial || v.received_generation.get()!=generation || !v.owns_remote_provider(&provider)
+                                                    || v.pending.borrow().is_some() {return;}
+                                                let Some(mut request)=v.clipboard_request(kind,v.broker.borrow().epoch(),generation) else{return;};
+                                                request.provider=Some(provider);
+                                                *v.lazy_reply.borrow_mut()=Some(reply);
+                                                *v.pending.borrow_mut()=Some(request);
+                                                v.command(Command::Request(id));
+                                            }));
+                                        }
+                                        let previous = v.provider.replace(Some(provider.clone()));
                                         if reused
                                             || v.area
                                                 .display()
@@ -3581,10 +3945,18 @@ impl RdpView {
                                             v.status.set_text(
                                                 "Remote clipboard received through CLIPRDR",
                                             );
+                                        } else {
+                                            v.provider.replace(previous);
+                                            v.status.set_text(
+                                                "Desktop refused the remote clipboard offer",
+                                            );
                                         }
                                     }
                                     Err(e) => v.status.set_text(&e),
                                 }
+                            }
+                            if current {
+                                v.lazy_reply.borrow_mut().take();
                             }
                             if v.remote.get().is_some_and(|o| o.2 != generation) {
                                 // An offer received during this read replaced its
@@ -3703,7 +4075,9 @@ impl RdpView {
             }
         }) {
             if release {
-                self.held.borrow_mut().remove(&(scan, extended));
+                if !self.held.borrow_mut().remove(&(scan, extended)) {
+                    return;
+                }
             } else {
                 self.held.borrow_mut().insert((scan, extended));
             }
@@ -4110,6 +4484,51 @@ impl RdpView {
             .as_ref()
             .is_some_and(|p| auto_sign_in_missing(p).is_none())
     }
+    fn recover_sign_in(self: &Rc<Self>) {
+        let dialog = gtk::Dialog::builder()
+            .title("Recover GNOME login")
+            .modal(true)
+            .build();
+        if let Some(window) = self.root.root().and_downcast::<gtk::Window>() {
+            dialog.set_transient_for(Some(&window));
+        }
+        let message = gtk::Label::new(Some(
+            "If GNOME returned to its login screen, retry the saved sign-in or reconnect this connection. Manual login cancels automation and releases the keyboard. A rejected password must be corrected in Machines → GNOME User Login. Existing remote applications are preserved.",
+        ));
+        message.set_wrap(true);
+        message.set_max_width_chars(64);
+        message.set_margin_top(16);
+        message.set_margin_bottom(16);
+        message.set_margin_start(16);
+        message.set_margin_end(16);
+        dialog.content_area().append(&message);
+        let retry = dialog.add_button("Retry saved sign-in", gtk::ResponseType::Other(1));
+        retry.set_sensitive(self.auto_gdm_retry_available());
+        dialog.add_button("Reconnect", gtk::ResponseType::Other(2));
+        dialog.add_button("Manual login", gtk::ResponseType::Other(3));
+        dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+        let weak = Rc::downgrade(self);
+        dialog.connect_response(move |d, r| {
+            d.close();
+            if let Some(v) = weak.upgrade() {
+                match r {
+                    gtk::ResponseType::Other(1) => v.retry_auto_gdm(),
+                    gtk::ResponseType::Other(2) => {
+                        if let Err(e) = v.automation_reconnect() {
+                            v.status.set_text(&e);
+                        }
+                    }
+                    gtk::ResponseType::Other(3) => {
+                        v.auto_gdm_stop("Manual GNOME login selected");
+                        v.auto_gdm.borrow_mut().notice.take();
+                        v.focus();
+                    }
+                    _ => (),
+                }
+            }
+        });
+        dialog.present();
+    }
     fn retry_auto_gdm(&self) {
         if !self.auto_gdm_retry_available() {
             return;
@@ -4155,7 +4574,7 @@ impl RdpView {
         a.waiting = None;
         if was_armed {
             a.notice = Some(reason.to_owned());
-            a.stopped_at = handovers.filter(|h| *h > 0);
+            a.stopped_at = handovers;
         }
         if a.stopped_at.is_none() {
             a.image = None;
@@ -4430,7 +4849,7 @@ impl RdpView {
                             number_of_wheel_rotation_units: 0,
                         }),
                     ];
-                    self.command(Command::Input(events));
+                    self.send(events);
                     self.status
                         .set_text("Automatic sign-in · selecting saved Linux account");
                 }
@@ -4600,7 +5019,7 @@ impl RdpView {
             glib::timeout_add_local(Duration::from_millis(25),move||{
                 let Some(v)=weak.upgrade()else{return glib::ControlFlow::Break;};
                 if v.assist_epoch.load(Ordering::Acquire)!=epoch || !v.assist_ready(&p,&transport,generation,true){v.status.set_text("Sign-in cancelled: focus, profile, tab or connection changed");return glib::ControlFlow::Break;}
-                match rx.try_recv(){Ok(Ok(text))=>{if text.0.is_empty()||text.0.len()>4096||text.0.chars().any(char::is_control){v.status.set_text("Sign-in cancelled: unsupported credential text");}else if let Some(c)=v.connection.borrow().as_ref(){if c.tx.try_send(Command::Assisted(text,v.assist_epoch.clone(),epoch,generation,false)).is_err(){v.status.set_text("Sign-in input not queued");}else{v.status.set_text("Confirmed field input queued; submit at GDM yourself. Login success is not verified.");}}glib::ControlFlow::Break},Ok(Err(e))=>{v.status.set_text(&e);glib::ControlFlow::Break},Err(std::sync::mpsc::TryRecvError::Empty) if std::time::Instant::now()<deadline=>glib::ControlFlow::Continue,_=>{v.status.set_text("Sign-in credential lookup unavailable");glib::ControlFlow::Break}}
+                match rx.try_recv(){Ok(Ok(text))=>{if text.0.is_empty()||text.0.len()>4096||text.0.chars().any(char::is_control){v.status.set_text("Sign-in cancelled: unsupported credential text");}else if let Some(c)=v.connection.borrow().as_ref(){if c.queue(Command::Assisted(text,v.assist_epoch.clone(),epoch,generation,false)).is_err(){v.status.set_text("Sign-in input not queued");}else{v.status.set_text("Confirmed field input queued; submit at GDM yourself. Login success is not verified.");}}glib::ControlFlow::Break},Ok(Err(e))=>{v.status.set_text(&e);glib::ControlFlow::Break},Err(std::sync::mpsc::TryRecvError::Empty) if std::time::Instant::now()<deadline=>glib::ControlFlow::Continue,_=>{v.status.set_text("Sign-in credential lookup unavailable");glib::ControlFlow::Break}}
             });
             });
         });
@@ -4611,6 +5030,9 @@ impl RdpView {
         self.activate_clipboard();
     }
     fn release_keys(&self) {
+        if let Some(c) = self.connection.borrow().as_ref() {
+            c.invalidate_input();
+        }
         self.pending_super.borrow_mut().clear();
         self.release_buttons();
         let keys: Vec<_> = self
@@ -4630,7 +5052,7 @@ impl RdpView {
             })
             .collect();
         if !keys.is_empty() {
-            self.send(keys);
+            self.command(Command::Release(keys));
         }
     }
     fn release_buttons(&self) {
@@ -4655,7 +5077,7 @@ impl RdpView {
             })
             .collect();
         if !events.is_empty() {
-            self.send(events);
+            self.command(Command::Release(events));
         }
     }
     pub fn close(&self) {
@@ -4675,12 +5097,15 @@ impl RdpView {
         }
         self.bridge.borrow().epoch.store(0, Ordering::Release);
         self.pending.borrow_mut().take();
+        self.lazy_reply.borrow_mut().take();
+        self.remote_formats.borrow_mut().clear();
         self.remote.set(None);
         self.received_generation.set(0);
         self.advertised.set(0);
         self.replying.set(false);
         self.decoding.set(false);
-        self.pending_paste.set(false);
+        self.offers.borrow_mut().acknowledge();
+        self.offers.borrow_mut().waiting.take();
         self.surface.borrow_mut().take();
         self.size.set((0, 0));
         self.area.queue_draw();
@@ -4718,7 +5143,7 @@ impl RdpView {
             .pending
             .borrow()
             .as_ref()
-            .is_some_and(|p| p.3.elapsed() > Duration::from_secs(30))
+            .is_some_and(|p| p.created.elapsed() > Duration::from_secs(30))
         {
             self.close();
             self.status.set_text(
@@ -5280,3 +5705,47 @@ mod resize_stability_tests {
 #[cfg(test)]
 #[path = "rdp_protocol_tests.rs"]
 mod protocol_conformance;
+
+#[cfg(test)]
+mod queue_safety_tests {
+    use super::*;
+    #[test]
+    fn hard_count_bound_rejects_before_insert_and_reserves_control_capacity() {
+        let budget = Arc::default();
+        let epoch = Arc::new(AtomicU64::new(1));
+        let mut commands = Vec::new();
+        for _ in 0..4064 {
+            commands.push(
+                QueueBudget::reserve(&budget, Command::Input(vec![], epoch.clone(), 1, 0)).unwrap(),
+            );
+        }
+        assert!(
+            QueueBudget::reserve(&budget, Command::Input(vec![], epoch.clone(), 1, 0)).is_err()
+        );
+        assert_eq!(budget.lock().unwrap().count, 4064);
+        commands.push(QueueBudget::reserve(&budget, Command::Reply(None)).unwrap());
+        assert_eq!(budget.lock().unwrap().count, 4065);
+        drop(commands);
+        assert_eq!(budget.lock().unwrap().count, 0);
+        assert_eq!(budget.lock().unwrap().bytes, 0);
+    }
+    #[test]
+    fn bytes_bound_rejects_without_changing_accounting() {
+        let budget = Arc::new(Mutex::new(QueueBudget {
+            count: 1,
+            bytes: 80 * 1024 * 1024 - 100,
+        }));
+        assert!(QueueBudget::reserve(&budget, Command::Reply(None)).is_err());
+        assert_eq!(budget.lock().unwrap().bytes, 80 * 1024 * 1024 - 100);
+    }
+    #[test]
+    fn foreground_and_transport_generations_cancel_queued_input_but_not_releases() {
+        let epoch = Arc::new(AtomicU64::new(3));
+        let command = Command::Input(vec![], epoch.clone(), 3, 10);
+        assert!(!command.stale(10));
+        assert!(command.stale(11));
+        epoch.fetch_add(1, Ordering::AcqRel);
+        assert!(command.stale(10));
+        assert!(!Command::Release(vec![]).stale(11));
+    }
+}

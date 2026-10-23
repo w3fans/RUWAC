@@ -3,7 +3,7 @@
 import argparse,hashlib,json,subprocess,tomllib
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
-BANNED=('gtk','gdk','glib','gio','libadwaita','ironrdp','ssh2','cairo','pango','rusqlite','libsqlite3')
+BANNED=('gtk','gdk','glib','gio','libadwaita','ironrdp','ssh2','cairo','pango','rusqlite','libsqlite3','webkit','javascriptcore','soup3')
 def inspect(name,manifest):
  lock=tomllib.loads(manifest.with_name('Cargo.lock').read_text());locked={(p['name'],p['version'],p.get('source')):p for p in lock['package']}
  metadata=json.loads(subprocess.check_output(['cargo','metadata','--locked','--format-version','1','--manifest-path',str(manifest)],text=True))

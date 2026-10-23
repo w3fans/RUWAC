@@ -20,6 +20,10 @@ pub struct Settings {
     pub term_size_pt: u8,
     #[serde(default = "default_height")]
     pub line_height: f32,
+    #[serde(default = "default_terminal_shortcuts")]
+    pub terminal_shortcuts: String,
+    #[serde(default)]
+    pub copy_selection_to_clipboard: bool,
     #[serde(default = "default_labels")]
     pub bar_labels: bool,
     /// Standard (GNOME Terminal) colours for the 16 ANSI colours instead of
@@ -37,6 +41,9 @@ pub struct Settings {
     width: u16,
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     collapsed_groups: std::collections::BTreeSet<String>,
+}
+fn default_terminal_shortcuts() -> String {
+    "desktop".into()
 }
 fn default_scheme() -> String {
     "graphite".into()
@@ -76,6 +83,7 @@ impl Settings {
             && FONTS.contains(&self.term_font.as_str())
             && (9..=18).contains(&self.term_size_pt)
             && LINE_HEIGHTS.contains(&self.line_height)
+            && ["desktop", "traditional"].contains(&self.terminal_shortcuts.as_str())
             && (200..=420).contains(&self.width)
             && self.collapsed_groups.len() <= 1000
             && !self
@@ -92,6 +100,8 @@ impl Default for Settings {
             term_font: default_font(),
             term_size_pt: default_size(),
             line_height: default_height(),
+            terminal_shortcuts: default_terminal_shortcuts(),
+            copy_selection_to_clipboard: false,
             bar_labels: true,
             vivid_colors: default_vivid(),
             actions_collapsed: false,

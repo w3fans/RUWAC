@@ -4,6 +4,46 @@ Public results summarize qualification without publishing host identities, accou
 network topology, credential references or operational troubleshooting. Detailed
 receipts and original reports are archived privately outside Git.
 
+Prior published baseline (2026-10-23): v0.4.39, commit
+`8e792df38731a1b6c11a9896f965ca33de4023b2`, completed all 16 required frozen
+local gate categories, retained 72 runtime/artifact groups, and verified all nine
+published assets and their install/runtime qualification. This is scoped operational
+qualification, including generated/authenticated loopback input. Physical cross-host
+selection paste, real clipboard-manager persistence and the reported external GNOME
+login remain unconfirmed. The advisory job reported three vulnerabilities on that
+release; see the dependency security ledger. Its source and installed artifacts are
+available on the [v0.4.39 release page](https://github.com/w3fans/RUWAC/releases/tag/v0.4.39).
+
+The terminal/clipboard/Web Preview development candidate has changed beyond that
+release. Historical evidence below does not qualify it: a new complete frozen run
+and the additional interaction/browser checks are required before publication.
+The current gate adds `terminal-desktop-ergonomics`, `rdp-clipboard-ordering`
+and `web-preview` to the historical requirements. These require executed
+keyboard/inline-scroll, clipboard event-order/backpressure, and native browser
+plus original-SSH preview evidence. Current preflight includes 194 desktop
+unit/transport tests, native terminal key/scroll checks, and real WebKit/OpenSSH
+HTTP/WebSocket lifecycle checks. A complete source/binary-frozen run remains
+mandatory; passing preflight or older GNOME reconnection checks cannot substitute
+for that run. The release adapter refuses publication without all nineteen gates.
+
+Native terminal preflight also reproduces and fixes dropped wheel events in a
+full-screen mouse-reporting PTY application: wheel up/down, click-only mouse mode
+and a right-hand mixed split require exact widget-local coordinates. The failing
+baseline received pointer motion but no wheel input. The corrected eight-check
+terminal suite passes; this is generated application input, not an authenticated
+provider conversation or physical touchpad acceptance.
+
+The Web fixtures use an owned Mutter compositor, native GDK keyboard/pointer
+callbacks, real WebKit pages and generated OpenSSH identities. Two generated SSH
+servers on one fixture host advertise the same loopback port through a test-only
+process-local port translation. This proves connection/origin isolation, not a
+separate-machine or physical-input result. Checks cover browser/terminal
+clipboard and Ctrl+L isolation, mixed splits, ephemeral storage, explicit
+restoration, changed-profile cancellation and stale-forward refusal. Closing a
+preview preserves its original SSH PTY. Physical clipboard-manager persistence,
+external HTTPS development servers and the complete physical-input matrix remain
+separate qualification limits.
+
 Stabilization reconciliation (2026-10-20): this table retains historical evidence
 through v0.4.31; historical PASS rows do not qualify the changed candidate.
 Changed candidates require a complete final source/binary-frozen stabilization

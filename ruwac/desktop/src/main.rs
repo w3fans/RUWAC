@@ -2,6 +2,7 @@ mod about;
 mod agent_launch;
 mod askpass;
 mod chrome;
+mod clip_offers;
 mod clipboard;
 mod cliprdr;
 mod compact;
@@ -10,6 +11,8 @@ mod detached;
 mod files;
 mod files_resume;
 mod files_rsync;
+#[path = "../../crates/ruwac-cli/src/flags.rs"]
+mod flags;
 mod gdm;
 mod gfx;
 mod gui_events;
@@ -47,11 +50,14 @@ mod ssh_probe;
 mod ssh_transport;
 mod staging;
 mod system_shortcuts;
+mod terminal_history;
 mod terminal_primary;
 mod terminal_style;
 mod tiles;
 mod updates;
 mod view;
+mod web;
+mod web_route;
 mod window_state;
 mod worker;
 mod workspace;
@@ -69,6 +75,9 @@ use std::{
 };
 use view::View;
 fn main() {
+    if let Some(status) = ssh_transport::run_forward_worker_if_requested() {
+        std::process::exit(status);
+    }
     if let Some(status) = askpass::run_if_requested() {
         std::process::exit(status);
     }
@@ -89,7 +98,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut window_id = String::new();
     let mut show_machines = false;
     let mut theme = adw::ColorScheme::PreferDark;
-    let args: Vec<_> = std::env::args().skip(1).collect();
+    let mut args: Vec<_> = std::env::args().skip(1).collect();
+    flags::options(&mut args, flags::DESKTOP);
     if args.first().is_some_and(|a| {
         matches!(
             a.as_str(),
@@ -187,6 +197,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             "--help" => {
+                println!("Short options: {}", flags::help(flags::DESKTOP));
                 println!(
                     "ruwac-desktop --socket PRIVATE_SOCKET [--session SESSION]... [--staging-dir PRIVATE_DIRECTORY]\nOptional --new-instance opens a separate desktop process while preserving existing windows. --window-id window_HEX uses an independent saved workspace; the New window button supplies it.\nOptional --allow-workspace-control authorizes workspace lifecycle and focus operations; --allow-rdp-control separately authorizes RDP lifecycle control.\nAlt+1…9/0 selects workspace tabs; AltGr tap toggles Map keys. Alt+M machines; Alt+A agents; --theme dark|light|system (default dark).\nCtrl+Alt+A GUI controls; Ctrl+A goes to applications; Ctrl+Shift+C/V desktop selection; Shift+drag overrides application mouse.\nMachines overlays the workspace and hides after selection; pin and width controls are in Preferences. Optional --show-machines opens it at startup.\nOptional independent GTK client; daemon owns PTYs. Attach PNG to Codex targets the selected local Codex draft; no automatic submission."
                 );
@@ -323,6 +334,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
   let b=broker.clone();gtk::prelude::WidgetExt::display(&window).clipboard().connect_changed(move|_|b.borrow_mut().local_copy());
   let b=broker.clone();gtk::prelude::WidgetExt::display(&window).primary_clipboard().connect_changed(move|_|{let pending=b.borrow().last_transfer.as_ref().is_some_and(|t|t.scope==ruwac_clipboard::ClipScope::Primary&&t.state==ruwac_clipboard::TransferState::Streaming);if pending{b.borrow_mut().local_copy();}});
   let rdp_views:Rc<RefCell<Vec<Rc<rdp::RdpView>>>>=Rc::new(RefCell::new(Vec::new()));
+  web::configure(&all);
   let file_views:Rc<RefCell<Vec<(gtk::Box,profiles::Profile)>>> = Rc::new(RefCell::new(Vec::new()));
   let placeholders:Rc<RefCell<Vec<(gtk::Widget,workspace::Layout)>>> = Rc::new(RefCell::new(Vec::new()));
   let (terminal_focus,rdp_focus,focus_tabs,focus_state)=(all.clone(),rdp_views.clone(),tabs.clone(),focus_memory.clone());let focus_view:tiles::FocusView=Rc::new(move|root|{
@@ -336,6 +348,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
       let deadline=Instant::now()+Duration::from_secs(1);glib::timeout_add_local(Duration::from_millis(16),move||{let Some(root)=root.upgrade().filter(|r|t.selected_page().is_some_and(|p|tiles::contains(&p.child(),r)))else{return glib::ControlFlow::Break;};if !root.is_mapped(){return if Instant::now()<deadline{glib::ControlFlow::Continue}else{glib::ControlFlow::Break};}tiles::remember(&t,&m,&root);if let Some(v)=terminal.borrow().iter().find(|v|v.root.upcast_ref::<gtk::Widget>()==&root){v.focus();}else if let Some(v)=remote.borrow().iter().find(|v|v.root.upcast_ref::<gtk::Widget>()==&root){v.focus();}else if !root.child_focus(gtk::DirectionType::TabForward){root.grab_focus();}glib::ControlFlow::Break});
     }
   });
+  let web_button=gtk::Button::from_icon_name("web-browser-symbolic");web_button.set_tooltip_text(Some("New Web Preview"));web_button.set_widget_name("new-web-preview");chrome.actions.append(&web_button);let web_tabs=tabs.clone();web_button.connect_clicked(move|button|{if let Err(e)=web::open(&web_tabs,None,None){button.set_tooltip_text(Some(&e));}});
   let rdp_button=gtk::Button::with_label("New RDP tab");chrome.actions.append(&rdp_button);let rv=rdp_views.clone();let t=tabs.clone();let b=broker.clone();rdp_button.connect_clicked(move|_|{let v=rdp::RdpView::new(b.clone());let weak_tabs=t.downgrade();let root=v.root.downgrade();v.bind_selection(Rc::new(move||weak_tabs.upgrade().zip(root.upgrade()).is_some_and(|(t,r)|t.selected_page().is_some_and(|p|tiles::contains(&p.child(),&r)))));let p=tiles::append(&t,&v.root);p.set_title("RDP · embedded IronRDP");rv.borrow_mut().push(v.clone());t.set_selected_page(&p);v.focus();});
   let rv=rdp_views.clone();let b=broker.clone();let (memory,focus)=(focus_memory.clone(),focus_view.clone());tabs.connect_selected_page_notify(move|t|{if let Some(page)=t.selected_page(){for v in rv.borrow().iter(){if !tiles::contains(&page.child(),&v.root){v.inactive();}}b.borrow_mut().focus(None);tiles::focus_selected(t,&memory,&focus);}});
   let rv=rdp_views.clone();tabs.connect_close_page(move|_,page|{let mut views=rv.borrow_mut();for v in views.iter(){if tiles::contains(&page.child(),&v.root){v.close();}}views.retain(|v|!tiles::contains(&page.child(),&v.root));glib::Propagation::Proceed});
@@ -373,6 +386,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
   let (vv,rv,fv,ph,t,b)=(all.clone(),rdp_views.clone(),file_views.clone(),placeholders.clone(),tabs.clone(),broker.clone());
   let (close_focus,close_memory)=(focus_view.clone(),focus_memory.clone());
   let close_view:tiles::CloseView=Rc::new(move|root|{
+    web::close_tree(root);
     {let mut views=vv.borrow_mut();for v in views.iter().filter(|v|v.root.upcast_ref::<gtk::Widget>()==root){v.close();}views.retain(|v|v.root.upcast_ref::<gtk::Widget>()!=root);}
     {let mut views=rv.borrow_mut();for v in views.iter().filter(|v|v.root.upcast_ref::<gtk::Widget>()==root){v.close();}views.retain(|v|v.root.upcast_ref::<gtk::Widget>()!=root);}
     fv.borrow_mut().retain(|(v,_)|v.upcast_ref::<gtk::Widget>()!=root);ph.borrow_mut().retain(|(v,_)|v!=root);
@@ -380,10 +394,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     tiles::focus_selected(&t,&close_memory,&close_focus);
   });
   let connection_actions=rdp::install_tab_menu(&window,&tabs,rdp_views.clone(),all.clone());
-  let(fv,ph)=(file_views.clone(),placeholders.clone());let close_auxiliary:tiles::CloseView=Rc::new(move|root|{fv.borrow_mut().retain(|(v,_)|!tiles::contains(root,v));ph.borrow_mut().retain(|(v,_)|!tiles::contains(root,v));});let detached_windows=detached::Windows::new(app,all.clone(),rdp_views.clone(),broker.clone(),socket.clone(),close_auxiliary);detached_windows.bind(&window,&tabs,focus_memory.clone());
+  let(fv,ph)=(file_views.clone(),placeholders.clone());let close_auxiliary:tiles::CloseView=Rc::new(move|root|{web::close_tree(root);fv.borrow_mut().retain(|(v,_)|!tiles::contains(root,v));ph.borrow_mut().retain(|(v,_)|!tiles::contains(root,v));});let detached_windows=detached::Windows::new(app,all.clone(),rdp_views.clone(),broker.clone(),socket.clone(),close_auxiliary);detached_windows.bind(&window,&tabs,focus_memory.clone());
   let layout_controls=tiles::controls(&tabs,close_view.clone(),focus_view.clone(),focus_memory.clone());
   let (focus_tabs,focus_state)=(tabs.clone(),focus_memory.clone());
-  let(rv,vv,b,last,h,actions)=(rdp_views.clone(),all.clone(),broker.clone(),last_focus.clone(),header.clone(),tools.clone());window.connect_focus_widget_notify(move|w|{let focus=gtk::prelude::GtkWindowExt::focus(w);if let Some(f)=&focus{tiles::remember(&focus_tabs,&focus_state,f);}if !w.is_active(){b.borrow_mut().focus(None);for r in rv.borrow().iter().filter(|r|r.root.root().as_ref()==Some(w.upcast_ref())){r.inactive();}return;}let mut owner=false;for r in rv.borrow().iter(){if focus.as_ref().is_some_and(|f|r.owns_focus(f)){r.activate_clipboard();*last.borrow_mut()=b.borrow().active().map(str::to_owned);owner=true;}else{r.inactive();}}if !owner{if let Some(v)=vv.borrow().iter().find(|v|focus.as_ref().is_some_and(|f|tiles::contains(&v.root,f))){*last.borrow_mut()=Some(v.session.clone());if b.borrow().active()!=Some(v.session.as_str()){b.borrow_mut().focus(Some(&v.session));}}else{if !focus.as_ref().is_some_and(|f|(tiles::contains(&h,f)||tiles::contains(&actions,f))){*last.borrow_mut()=None;}if b.borrow().active().is_some(){b.borrow_mut().focus(None);}}}});
+  let(rv,vv,b,last,h,actions)=(rdp_views.clone(),all.clone(),broker.clone(),last_focus.clone(),header.clone(),tools.clone());window.connect_focus_widget_notify(move|w|{let focus=gtk::prelude::GtkWindowExt::focus(w);if let Some(f)=&focus{tiles::remember(&focus_tabs,&focus_state,f);}if !w.is_active(){b.borrow_mut().focus(None);for r in rv.borrow().iter().filter(|r|r.root.root().as_ref()==Some(w.upcast_ref())){r.inactive();}return;}if focus.as_ref().is_some_and(|f|tiles::contains(&h,f)||tiles::contains(&actions,f)){for r in rv.borrow().iter(){r.pause_keyboard();}return;}let mut owner=false;for r in rv.borrow().iter(){if focus.as_ref().is_some_and(|f|r.owns_focus(f)){r.activate_clipboard();*last.borrow_mut()=b.borrow().active().map(str::to_owned);owner=true;}else{r.inactive();}}if !owner{if let Some(v)=vv.borrow().iter().find(|v|focus.as_ref().is_some_and(|f|tiles::contains(&v.root,f))){*last.borrow_mut()=Some(v.session.clone());if b.borrow().active()!=Some(v.session.as_str()){b.borrow_mut().focus(Some(&v.session));}}else{if !focus.as_ref().is_some_and(|f|(tiles::contains(&h,f)||tiles::contains(&actions,f))){*last.borrow_mut()=None;}if b.borrow().active().is_some(){b.borrow_mut().focus(None);}}}});
 
   let (vv,rv,b,last)=(all.clone(),rdp_views.clone(),broker.clone(),last_focus.clone());window.connect_is_active_notify(move|w|{
     let focus=gtk::prelude::GtkWindowExt::focus(w);b.borrow_mut().focus(None);
@@ -432,6 +446,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         if let Some((current,_,lease))=restore_profile(&profile.id).filter(|(p,_,_)|p.protocol=="SSH"){let root=files::panel(current.clone());files::directory(&root,Some(directory));lease.bind(&root);file_views.borrow_mut().push((root.clone(),current));root.upcast()}
         else{let label=gtk::Label::new(Some("This file profile was removed. Reopen an authorized SSH profile from Machines."));label.set_wrap(true);label.set_focusable(true);let root:gtk::Widget=label.upcast();placeholders.borrow_mut().push((root.clone(),layout.clone()));root}
       },
+      workspace::Layout::Web{endpoint,..}=>web::restore(endpoint.clone()),
       workspace::Layout::Split{..}=>unreachable!(),
     });
   create};
@@ -439,7 +454,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     tiles::restore(&tabs,&restored_tabs,&focus_memory,|layout|create_saved_view(layout));
     if let Some(index)=restored_selected{let offset=tabs.n_pages()-restored_tabs.len()as i32;let i=offset+index as i32;if i>=0&&i<tabs.n_pages(){tabs.set_selected_page(&tabs.nth_page(i));}}
   }
-  let(fv,ph)=(file_views.clone(),placeholders.clone());tabs.connect_close_page(move|_,p|{fv.borrow_mut().retain(|(v,_)|!tiles::contains(&p.child(),v));ph.borrow_mut().retain(|(v,_)|!tiles::contains(&p.child(),v));glib::Propagation::Proceed});
+  let(fv,ph)=(file_views.clone(),placeholders.clone());tabs.connect_close_page(move|_,p|{web::close_tree(&p.child());fv.borrow_mut().retain(|(v,_)|!tiles::contains(&p.child(),v));ph.borrow_mut().retain(|(v,_)|!tiles::contains(&p.child(),v));glib::Propagation::Proceed});
   remote_paste::configure(stage.clone(),image_profile.clone());
   let paste_views=all.clone();window.connect_is_active_notify(move|w|{if !w.is_active(){for v in paste_views.borrow().iter(){v.cancel_image_paste();}}});
   let machine_shell=Rc::new(sidebar_shell::Shell::new(&sidebar,&tabs,&choices,show_machines));workspace_overlay.set_child(Some(&machine_shell.view));chrome.actions.append(&machine_shell.button);tabs.set_hexpand(true);let (t,m,f)=(tabs.clone(),focus_memory.clone(),focus_view.clone());machine_shell.view.connect_show_sidebar_notify(move|v|{if !v.shows_sidebar(){tiles::focus_selected(&t,&m,&f);let(v,t,m,f)=(v.downgrade(),t.clone(),m.clone(),f.clone());glib::timeout_add_local_once(Duration::from_millis(250),move||{if v.upgrade().is_some_and(|v|!v.shows_sidebar()&&v.root().and_downcast::<gtk::Window>().is_some_and(|w|w.is_active())){tiles::focus_selected(&t,&m,&f);}});}});
@@ -477,6 +492,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
       if let Some(v)=open.iter().find(|v|v.root.upcast_ref::<gtk::Widget>()==root){return Some(workspace::Layout::Terminal{view_id:root.widget_name().to_string(),session:v.session.clone()});}
       if let Some(v)=rv.borrow().iter().find(|v|v.root.upcast_ref::<gtk::Widget>()==root){return Some(workspace::Layout::Rdp{view_id:root.widget_name().to_string(),profile:v.configuration()});}
       if let Some((view,profile))=fv.borrow().iter().find(|(v,_)|v.upcast_ref::<gtk::Widget>()==root){return Some(workspace::Layout::Files{view_id:root.widget_name().to_string(),profile:profile.clone(),directory:files::directory(view,None)});}
+      if let Some(layout)=web::describe(root){return Some(layout);}
       ph.borrow().iter().find(|(w,_)|w==root).map(|(_,l)|l.clone())
     };
     let mut layouts=Vec::new();for (window_tabs,memory) in windows{layouts.extend(tiles::snapshot(&window_tabs,&describe,&memory)?);}
@@ -543,7 +559,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
        "clipboard.primary.offer"=>api_windows.active_window().ok_or_else(||ruwac_protocol::Error::new("PRIMARY_REFUSED","Focus the remote RUWAC window before pasting a local selection")).and_then(|window|terminal_primary::receive(&window,&req.params,rdp_broker.borrow().desktop_enabled())),
        "host.list"|"host.query"=>host_inventory().and_then(|rows|host_api::exchange(&req.method,&req.params,rows)),
        "workspace.events.subscribe"|"workspace.events.poll"|"workspace.events.unsubscribe"=>event_hub.exchange(&req.method,&req.params,task.actor_uid,Instant::now()),
-       "workspace.list" if empty=>{let mut state=api_windows.inspect();let input_focus=api_windows.active_window().and_then(|w|gtk::prelude::GtkWindowExt::focus(&w));state["input_focus_view"]=json!(api_windows.tabs().iter().flat_map(|(t,_)|tiles::views(t)).collect::<Vec<_>>().iter().find(|root|input_focus.as_ref().is_some_and(|f|tiles::contains(*root,f))).map(|r|r.widget_name().to_string()));state["window_active"]=json!(api_windows.active_window().is_some());state["workspace_id"]=json!(workspace_id);state["gui_instance"]=json!(gui_id);state["windows"]=json!(api_windows.tabs().iter().map(|(t,m)|tiles::inspect(t,m)).collect::<Vec<_>>());state["views"]=json!(api_windows.tabs().iter().flat_map(|(t,_)|tiles::views(t)).collect::<Vec<_>>().iter().map(|root|{let session=terminal.borrow().iter().find(|v|v.root.upcast_ref::<gtk::Widget>()==root).map(|v|v.session.clone());let kind=if session.is_some(){"terminal"}else if remote.borrow().iter().any(|v|v.root.upcast_ref::<gtk::Widget>()==root){"rdp"}else if files.borrow().iter().any(|(w,_)|w.upcast_ref::<gtk::Widget>()==root){"files"}else{"ended"};json!({"id":root.widget_name().as_str(),"tab":api_windows.page(root).map(|p|p.child().widget_name().to_string()),"kind":kind,"session":session})}).collect::<Vec<_>>());Ok(state)},
+       "workspace.list" if empty=>{let mut state=api_windows.inspect();let input_focus=api_windows.active_window().and_then(|w|gtk::prelude::GtkWindowExt::focus(&w));state["input_focus_view"]=json!(api_windows.tabs().iter().flat_map(|(t,_)|tiles::views(t)).collect::<Vec<_>>().iter().find(|root|input_focus.as_ref().is_some_and(|f|tiles::contains(*root,f))).map(|r|r.widget_name().to_string()));state["window_active"]=json!(api_windows.active_window().is_some());state["workspace_id"]=json!(workspace_id);state["gui_instance"]=json!(gui_id);state["windows"]=json!(api_windows.tabs().iter().map(|(t,m)|tiles::inspect(t,m)).collect::<Vec<_>>());state["views"]=json!(api_windows.tabs().iter().flat_map(|(t,_)|tiles::views(t)).collect::<Vec<_>>().iter().map(|root|{let session=terminal.borrow().iter().find(|v|v.root.upcast_ref::<gtk::Widget>()==root).map(|v|v.session.clone());let kind=if session.is_some(){"terminal"}else if remote.borrow().iter().any(|v|v.root.upcast_ref::<gtk::Widget>()==root){"rdp"}else if files.borrow().iter().any(|(w,_)|w.upcast_ref::<gtk::Widget>()==root){"files"}else if web::describe(root).is_some(){"web"}else{"ended"};json!({"id":root.widget_name().as_str(),"tab":api_windows.page(root).map(|p|p.child().widget_name().to_string()),"kind":kind,"session":session})}).collect::<Vec<_>>());Ok(state)},
        "rdp.list" if empty=>Ok(json!({"views":remote.borrow().iter().filter(|v|api_windows.page(&v.root).is_some()).map(|v|{let mut value=v.metadata();value["tab"]=json!(api_windows.page(&v.root).map(|p|p.child().widget_name().to_string()));value}).collect::<Vec<_>>()})),
        "rdp.list"=>Err(ruwac_protocol::Error::new("INVALID_REQUEST","RDP list takes an empty parameter object")),
        "rdp.query"|"rdp.reconnect"|"rdp.disconnect" if !explicit=>Err(ruwac_protocol::Error::new("INVALID_TARGET","An explicit RDP view ID is required")),
@@ -581,6 +597,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
   glib::timeout_add_local(Duration::from_millis(16),move||{
    tick.set(tick.get()+1);let now=Instant::now();max_gap.set(max_gap.get().max(now.duration_since(last.replace(now)).as_millis()));for v in vv.borrow().iter(){v.update();}
    if let Some(dir)=fixture.as_ref(){let request=dir.join("gui-request.json");if let Ok(bytes)=std::fs::read(&request){if let Ok(q)=serde_json::from_slice::<Value>(&bytes){let seq=q["seq"].as_u64().unwrap_or(0);if seq>sequence.get(){sequence.set(seq);let index=q["view"].as_u64().unwrap_or(0)as usize;let view=vv.borrow().get(index).cloned();let reply_dir=dir.clone();let reply=move|result:Value|{let path=reply_dir.join("gui-response.json");let temp=reply_dir.join("gui-response.tmp");let _=std::fs::write(&temp,json!({"seq":seq,"result":result}).to_string());let _=std::fs::rename(temp,path);};if view.is_none(){match q["action"].as_str().unwrap_or(""){
+    "web-preview"=>reply(web::fixture(&tabs,&q)),
     "tab-status"=>reply(json!({"tabs":(0..tabs.n_pages()).map(|i|{let p=tabs.nth_page(i);let icon=p.indicator_icon().and_downcast::<gtk::gio::BytesIcon>();json!({"title":p.title().as_str(),"colour_icon":icon.is_some(),"svg":icon.map(|i|String::from_utf8_lossy(i.bytes().as_ref()).to_string())})}).collect::<Vec<_>>()})),
     "compact-controls"=>reply(compact::fixture(window.upcast_ref(),&q)),
     "chrome"=>reply(chrome.fixture(&window,&machine_shell.view,&q)),
@@ -646,6 +663,7 @@ v.set_display(q["mode"].as_str().unwrap_or("fit"),q["zoom"].as_f64().unwrap_or(1
     "divider-drag"=>{reply(v.fixture_root_drag());},
     "reconnect"=>{reply(v.fixture_reconnect());},
     "search"=>{v.search.set_text(q["text"].as_str().unwrap_or(""));reply(json!({"queued":true}));},
+    "history-viewport"=>reply(v.fixture_history_viewport()),
     "history-buffer"=>{reply(json!({"clicked":v.fixture_history_buffer(q["buffer"]=="primary")}));},
     "copy-state"=>{let b=v.copy.buffer();let text=v.selected();use sha2::{Digest,Sha256};let digest=format!("{:x}",Sha256::digest(b.text(&b.start_iter(),&b.end_iter(),true).as_bytes()));reply(json!({"origin":v.copy.compute_point(&window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"size":[v.copy.width(),v.copy.height()],"selection":text,"visible":v.copy.is_mapped(),"search":v.search.text().as_str(),"contains_ready":b.text(&b.start_iter(),&b.end_iter(),true).contains("RUWAC"),"text_sha256":digest,"chars":b.char_count(),"cursor":b.iter_at_mark(&b.get_insert()).offset()}));},
     "key"=>{if let Some(key)=q["key"].as_str().and_then(gdk::Key::from_name){let mods=gdk::ModifierType::from_bits_truncate(q["mods"].as_u64().unwrap_or(0)as u32);v.key(key,mods);}reply(json!({"handler":"synthetic GTK callback"}));},
@@ -662,6 +680,7 @@ v.set_display(q["mode"].as_str().unwrap_or("fit"),q["zoom"].as_f64().unwrap_or(1
     "grid-copy"=>{v.select_grid_fixture();v.copy_clipboard(false);reply(json!({"offered":true}));},
     "cancel"=>{v.broker.borrow_mut().local_copy();reply(json!({"epoch":v.broker.borrow().epoch()}));},
     "snapshot"=>{if let Some(clock)=window.frame_clock(){let paint=gtk::WidgetPaintable::new(Some(&window));let window=window.clone();let dir=dir.clone();let slot=Rc::new(RefCell::new(None));let owned=slot.clone();let attempts=Rc::new(Cell::new(0u8));window.queue_draw();let id=clock.connect_after_paint(move|clock|{attempts.set(attempts.get()+1);let snap=gtk::Snapshot::new();paint.snapshot(&snap,window.width()as f64,window.height()as f64);let node=snap.to_node();let renderer=window.renderer();let mut saved=false;if let(Some(node),Some(renderer))=(&node,&renderer){let texture=renderer.render_texture(node,None);saved=texture.save_to_png(dir.join("native-rust.png")).is_ok();}if saved||attempts.get()>=5{if let Some(id)=owned.borrow_mut().take(){clock.disconnect(id);}reply(json!({"image":"native-rust.png","saved":saved,"mapped":window.is_mapped(),"width":window.width(),"height":window.height(),"node":node.is_some(),"renderer":renderer.is_some(),"after_paint":true}));}else{window.queue_draw();}});*slot.borrow_mut()=Some(id);}else{reply(json!({"saved":false,"error":"Frame clock unavailable"}));}},
+    "web-preview"=>reply(web::fixture(&tabs,&q)),
     "tab-status"=>reply(json!({"tabs":(0..tabs.n_pages()).map(|i|{let p=tabs.nth_page(i);let icon=p.indicator_icon().and_downcast::<gtk::gio::BytesIcon>();json!({"title":p.title().as_str(),"colour_icon":icon.is_some(),"svg":icon.map(|i|String::from_utf8_lossy(i.bytes().as_ref()).to_string())})}).collect::<Vec<_>>()})),
     "compact-controls"=>reply(compact::fixture(window.upcast_ref(),&q)),
     "chrome"=>reply(chrome.fixture(&window,&machine_shell.view,&q)),

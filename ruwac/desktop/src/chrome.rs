@@ -199,6 +199,8 @@ impl Chrome {
             saved.term_font = p.term_font.clone();
             saved.term_size_pt = p.term_size_pt;
             saved.line_height = p.line_height;
+            saved.terminal_shortcuts = p.terminal_shortcuts.clone();
+            saved.copy_selection_to_clipboard = p.copy_selection_to_clipboard;
             saved.bar_labels = p.bar_labels;
             saved.vivid_colors = p.vivid_colors;
             saved.actions_collapsed = p.actions_collapsed;
@@ -463,6 +465,42 @@ impl Chrome {
                 c.update(|p| p.vivid_colors = s.is_active());
             }
         });
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.append(&gtk::Label::new(Some(
+            "Desktop terminal shortcuts (Ctrl+C/V)",
+        )));
+        let desktop = gtk::Switch::new();
+        desktop.set_active(self.prefs.borrow().terminal_shortcuts == "desktop");
+        desktop.set_tooltip_text(Some("Copy selected text with Ctrl+C; without selection interrupt. Ctrl+V pastes. Off retains traditional terminal control keys."));
+        row.append(&desktop);
+        body.append(&row);
+        let weak = Rc::downgrade(self);
+        desktop.connect_active_notify(move |s| {
+            if let Some(c) = weak.upgrade() {
+                c.update(|p| {
+                    p.terminal_shortcuts = if s.is_active() {
+                        "desktop"
+                    } else {
+                        "traditional"
+                    }
+                    .into()
+                });
+            }
+        });
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.append(&gtk::Label::new(Some(
+            "Also copy terminal selections to CLIPBOARD",
+        )));
+        let copy = gtk::Switch::new();
+        copy.set_active(self.prefs.borrow().copy_selection_to_clipboard);
+        row.append(&copy);
+        body.append(&row);
+        let weak = Rc::downgrade(self);
+        copy.connect_active_notify(move |s| {
+            if let Some(c) = weak.upgrade() {
+                c.update(|p| p.copy_selection_to_clipboard = s.is_active());
+            }
+        });
         body.append(&self.status);
     }
     pub fn fixture(
@@ -501,6 +539,8 @@ impl Chrome {
             "size",
             "labels",
             "line_height",
+            "terminal_shortcuts",
+            "copy_selection_to_clipboard",
         ]
         .iter()
         .any(|k| !q[k].is_null())
@@ -527,6 +567,15 @@ impl Chrome {
                 if let Some(v) = q["size"].as_u64().filter(|v| (9..=18).contains(v)) {
                     p.term_size_pt = v as u8;
                 }
+                if let Some(v) = q["terminal_shortcuts"]
+                    .as_str()
+                    .filter(|s| ["desktop", "traditional"].contains(s))
+                {
+                    p.terminal_shortcuts = v.into();
+                }
+                if let Some(v) = q["copy_selection_to_clipboard"].as_bool() {
+                    p.copy_selection_to_clipboard = v;
+                }
                 if let Some(v) = q["labels"].as_bool() {
                     p.bar_labels = v;
                 }
@@ -545,7 +594,7 @@ impl Chrome {
                 tree.borrow_mut().push(serde_json::json!({"type":w.type_().name(),"name":w.widget_name().as_str(),"height":w.height(),"width":w.width(),"css":w.css_classes().iter().map(|s|s.to_string()).collect::<Vec<_>>()}));
             }
         });
-        serde_json::json!({"header_tree":tree.into_inner(),"header_height":self.header.height(),"tab_bar_width":self.bar.width(),"actions_revealed":self.reveal.reveals_child(),"docked":p.controls_docked,"dock_height":self.dock.height(),"scheme":p.scheme,"term_font":p.term_font,"term_size_pt":p.term_size_pt,"content_height":content.as_ref().height(),"maximized":window.is_maximized(),"fullscreen":window.is_fullscreen(),"window_height":window.height(),"window_width":window.width(),"terminal_background":schemes::current().colors[8],"open":self.pop.is_visible()})
+        serde_json::json!({"header_tree":tree.into_inner(),"header_height":self.header.height(),"tab_bar_width":self.bar.width(),"actions_revealed":self.reveal.reveals_child(),"docked":p.controls_docked,"dock_height":self.dock.height(),"scheme":p.scheme,"term_font":p.term_font,"term_size_pt":p.term_size_pt,"terminal_shortcuts":p.terminal_shortcuts,"copy_selection_to_clipboard":p.copy_selection_to_clipboard,"content_height":content.as_ref().height(),"maximized":window.is_maximized(),"fullscreen":window.is_fullscreen(),"window_height":window.height(),"window_width":window.width(),"terminal_background":schemes::current().colors[8],"open":self.pop.is_visible()})
     }
 }
 pub fn controls_shortcut(key: gdk::Key, mods: gdk::ModifierType) -> bool {

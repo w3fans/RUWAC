@@ -525,7 +525,7 @@ def assemble(root, output, require_private=False):
         (destination / 'README.txt').write_text('''RUWAC Fedora 44 x86_64 testing candidate
 
 Install runtime prerequisites:
-  sudo dnf install gh gtk4 libadwaita openssl-libs libssh2 sqlite-libs python3 python3-pillow tesseract tesseract-langpack-eng
+  sudo dnf install gh gtk4 libadwaita webkitgtk6.0 openssl-libs libssh2 sqlite-libs python3 python3-pillow tesseract tesseract-langpack-eng
 Inside this extracted directory:
   python3 install-user.py --build-root . --desktop
   "$HOME/.local/bin/ruwac-desktop"

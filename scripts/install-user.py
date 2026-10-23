@@ -2,7 +2,7 @@
 """Reversible per-user installation of built RUWAC artifacts; never allocates a version."""
 import argparse, fcntl, hashlib, json, os, platform, re, shutil, stat, subprocess, tempfile, tomllib
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('--build-root',type=Path,required=True);p.add_argument('--desktop',action='store_true');p.add_argument('--prefix',type=Path);p.add_argument('--target-dir',type=Path,help='Cargo target directory for source builds (default: BUILD_ROOT/target)');a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('-b', '--build-root',type=Path,required=True);p.add_argument('-d', '--desktop',action='store_true');p.add_argument('-p', '--prefix',type=Path);p.add_argument('-t', '--target-dir',type=Path,help='Cargo target directory for source builds (default: BUILD_ROOT/target)');a=p.parse_args()
 root=a.build_root.resolve();prefix=(a.prefix or Path.home()/'.local').absolute()
 version=tomllib.loads((root/'ruwac/Cargo.toml').read_text())['workspace']['package']['version']
 if not re.fullmatch(r'(0|[1-9][0-9]*)\.[0-9]\.([0-9]|[1-9][0-9])',version):raise SystemExit('Invalid controller-assigned numeric version')

@@ -578,9 +578,33 @@ try:
   assert mutter_input,'Owned Mutter input fixture required'
   focus('gui');command('gui','chrome',open=False);command('gui','rdp-switch',rdp=0)
   before=command('gui','rdp-inspect',rdp=0);assert before['gnome_auto']['guards']['canvas_focus']
+  text='Multi-format remote clipboard ž 🦀';(root/'multi-text.txt').write_text(text)
+  png=Image.new('RGBA',(12,9),(30,80,150,255));png.save(root/'multi-image.png');pixels=digest(png.tobytes())
+  previous=command('gui','rdp-inspect',rdp=0)['received_generation'];command('server-0',format='both',file='multi-image.png',text_file='multi-text.txt')
+  spike.eventually(lambda:command('gui','rdp-inspect',rdp=0)['received_generation']>previous,10)
+  focus('peer');formats=command('peer','inspect')['formats'];assert 'image/png'in formats and 'text/plain;charset=utf-8'in formats,formats
+  assert command('peer','read-png')['pixel_sha256']==pixels
+  answer=command('peer','read-text',timeout=15);assert answer.get('sha256')==digest(text.encode()),answer
+  focus('gui');command('gui','rdp-switch',rdp=0)
+
   def chord(key):
    for k in [65507,65513,key]:mutter_input('NotifyKeyboardKeysym',GLib.Variant('(ub)',(k,True)))
    for k in [key,65513,65507]:mutter_input('NotifyKeyboardKeysym',GLib.Variant('(ub)',(k,False)))
+  def keys():
+   try:return json.loads((root/f"input-{ready['ports'][0]}.keys.json").read_text())['events']
+   except (OSError,ValueError):return []
+  def native_chord(mods,key):
+   for k in mods+[key]:mutter_input('NotifyKeyboardKeysym',GLib.Variant('(ub)',(k,True)));time.sleep(.04)
+   for k in [key]+list(reversed(mods)):mutter_input('NotifyKeyboardKeysym',GLib.Variant('(ub)',(k,False)));time.sleep(.04)
+  baseline=len(keys())
+  native_chord([65507],118)
+  time.sleep(.3)
+  events=keys()[baseline:];v=[k['down']for k in events if k['code']==47]
+  assert v in [[],[True,False]],events
+  for modifiers in [[65507,65513],[65507,65505]]:
+   baseline=len(keys());native_chord(modifiers,118)
+   spike.eventually(lambda:len([k for k in keys()[baseline:]if k['code']==47])>=2)
+   assert [k['down']for k in keys()[baseline:]if k['code']==47]==[True,False],keys()[baseline:]
   chord(65360)
   spike.eventually(lambda:not command('gui','rdp-inspect',rdp=0)['gnome_auto']['guards']['canvas_focus'])
   local=command('gui','chrome')
@@ -590,7 +614,7 @@ try:
   spike.eventually(lambda:command('gui','chrome')['window_height']==local['window_height'],8)
   assert command('gui','rdp-inspect',rdp=0)['transport_id']==before['transport_id']
   command('gui','rdp-switch',rdp=0)
-  return {'real_GDK_key_events':True,'Ctrl_Alt_Home_releases_remote_focus':True,'Ctrl_Alt_Enter_fullscreen_and_restore':True,'transport_preserved':True,'physical_keyboard':False}
+  return {'real_GDK_key_events':True,'paste_key_down_up_balanced':True,'simultaneous_text_PNG_lazy_read_from_independent_GTK_peer':True,'Ctrl_Alt_V_and_Ctrl_Shift_V_forwarded':True,'Ctrl_Alt_Home_releases_remote_focus':True,'Ctrl_Alt_Enter_fullscreen_and_restore':True,'transport_preserved':True,'physical_keyboard':False}
  if mutter_input:case('RDP-NATIVE-HOST-SHORTCUTS',host_shortcuts)
 
  def pointer_drag():

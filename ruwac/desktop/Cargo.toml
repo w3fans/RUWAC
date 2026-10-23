@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "ruwac-desktop"
-version = "0.4.39"
+version = "0.4.40"
 edition = "2024"
 publish = false
 authors = ["Denis Zvegelj"]
@@ -18,7 +18,7 @@ libc = "=0.2.189"
 sha2 = "=0.10.9"
 ironrdp = { version = "=0.17.0", features = ["connector", "session", "graphics", "pdu", "cliprdr", "dvc", "displaycontrol", "svc"] }
 ironrdp-tokio = { version = "=0.10.0", features = ["reqwest-native-tls"] }
-tokio = { version = "=1.53.1", features = ["rt", "net", "io-util", "time", "sync", "macros"] }
+tokio = { version = "=1.53.3", features = ["rt", "net", "io-util", "time", "sync", "macros"] }
 native-tls = "=0.2.18"
 tokio-native-tls = "=0.3.1"
 x509-cert = "=0.2.5"
@@ -31,6 +31,9 @@ serde = { version = "=1.0.228", features = ["derive"] }
 futures-util = "=0.3.34"
 ssh2 = "=0.9.6"
 rusqlite = { version = "=0.39.0", default-features = false }
+webkit6 = "=0.6.1"
+url = "=2.5.8"
+unicode-width = "=0.2.2"
 [dev-dependencies]
 ironrdp-server = { version = "=0.13.0", default-features = false, features = ["helper"] }
 async-trait = "0.1"

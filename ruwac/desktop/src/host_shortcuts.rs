@@ -61,6 +61,9 @@ pub fn popup(view: &std::rc::Rc<crate::view::View>, x: f64, y: f64) {
         pop.set_parent(area);
         pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
         let body = view.clipboard_menu();
+        if let Some(links) = view.link_menu(x, y) {
+            body.append(&links);
+        }
         body.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         body.append(&menus(false));
         pop.set_child(Some(&scroll(&body)));

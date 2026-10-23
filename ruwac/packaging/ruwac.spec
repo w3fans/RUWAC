@@ -27,6 +27,7 @@ Summary: Native GTK remote workspace and RDP client
 License: %{ruwac_desktop_license}
 Requires: ruwac = %{version}-%{release}
 Requires: gtk4
+Requires: webkitgtk6.0
 Requires: libadwaita
 Requires: openssl-libs
 Requires: libssh2

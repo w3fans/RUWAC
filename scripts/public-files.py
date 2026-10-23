@@ -53,6 +53,7 @@ def files(root):
   elif r.parts[0]=='ruwac' and r.parts[1]=='gui' and r.suffix=='.py':out.append(r)
   elif r.parts[0]=='architecture' and len(r.parts)==2 and r.name in ARCH_FILES:out.append(r)
   elif r.as_posix() in GITHUB_FILES:out.append(r)
+  elif r.as_posix()=='ruwac/tests/fixtures/web_loopback.c':out.append(r)
   elif r.parts[0]=='scripts' and len(r.parts)==2 and r.name in SCRIPT_FILES:out.append(r)
   elif r.parts[0]=='ruwac' and ((r.name in {'Cargo.toml','Cargo.lock'} and len(r.parts)<=4) or (r.suffix=='.rs' and 'src' in r.parts) or (r.suffix=='.py' and r.parts[1]=='tests')):out.append(r)
  return sorted(out)

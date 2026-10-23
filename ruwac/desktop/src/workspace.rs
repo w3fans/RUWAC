@@ -58,6 +58,12 @@ pub enum Layout {
         profile: crate::profiles::Profile,
         directory: String,
     },
+    Web {
+        #[serde(default)]
+        view_id: String,
+        /// Route identity only; no URL, cookie, token, control path or ephemeral port.
+        endpoint: Option<String>,
+    },
     Split {
         vertical: bool,
         ratio: f64,
@@ -70,7 +76,8 @@ impl Layout {
         match self {
             Self::Terminal { view_id, .. }
             | Self::Rdp { view_id, .. }
-            | Self::Files { view_id, .. } => Some(view_id),
+            | Self::Files { view_id, .. }
+            | Self::Web { view_id, .. } => Some(view_id),
             Self::Split { .. } => None,
         }
     }
@@ -78,7 +85,8 @@ impl Layout {
         match self {
             Self::Terminal { view_id, .. }
             | Self::Rdp { view_id, .. }
-            | Self::Files { view_id, .. } => *view_id = ruwac_protocol::id("view"),
+            | Self::Files { view_id, .. }
+            | Self::Web { view_id, .. } => *view_id = ruwac_protocol::id("view"),
             Self::Split { first, second, .. } => {
                 first.assign_ids();
                 second.assign_ids();
@@ -118,6 +126,11 @@ pub(super) fn validate(w: &Workspace) -> io::Result<()> {
                 if p.protocol != "SSH" || p.id.is_empty() {
                     return Err(io::Error::other("Files view needs an SSH profile identity"));
                 }
+            }
+            Layout::Web {
+                endpoint: Some(id), ..
+            } if !ruwac_protocol::valid_id(id, "endpoint") => {
+                return Err(io::Error::other("Invalid Web endpoint identity"));
             }
             Layout::Split {
                 ratio,
@@ -202,6 +215,16 @@ pub(super) fn validate(w: &Workspace) -> io::Result<()> {
         }
     }
     let mut count = 0;
+    fn web_count(l: &Layout) -> usize {
+        match l {
+            Layout::Web { .. } => 1,
+            Layout::Split { first, second, .. } => web_count(first) + web_count(second),
+            _ => 0,
+        }
+    }
+    if w.tabs.iter().map(|t| web_count(&t.layout)).sum::<usize>() > 8 {
+        return Err(io::Error::other("Workspace exceeds eight Web views"));
+    }
     let mut ids = std::collections::HashSet::new();
     for tab in &w.tabs {
         if tab.title.len() > 1024 || tab.title.chars().any(char::is_control) {

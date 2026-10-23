@@ -407,7 +407,7 @@ pub enum Command {
         allowed: Arc<AtomicBool>,
         done: SyncSender<Result<(), String>>,
     },
-    History(String, bool),
+    History(String, bool, u64),
     AttachImage {
         pane: String,
         path: std::path::PathBuf,
@@ -421,7 +421,7 @@ impl Command {
         match self {
             Self::Rpc(_, v) => v.to_string().len(),
             Self::Paste(_, s) | Self::GuardedPaste { text: s, .. } => s.len(),
-            Self::History(s, _) => s.len(),
+            Self::History(s, _, _) => s.len(),
             Self::AttachImage { pane, path, .. } => pane.len() + path.as_os_str().len(),
             Self::Close => 0,
         }
@@ -620,7 +620,7 @@ impl Worker {
                                     .map(|v| ("image-attach".into(), v))
                                     .map_err(io::Error::other)
                             }
-                            Command::History(pane, primary) => {
+                            Command::History(pane, primary, generation) => {
                                 let mut text = String::new();
                                 let mut offset = 0;
                                 let mut total = 0;
@@ -693,7 +693,17 @@ impl Worker {
                                         result = release.map(|_| ());
                                     }
                                 }
-                                result.map(|()|("pane.history".into(),json!({"pane":pane,"text":text,"total_lines":total,"truncated":truncated,"buffer":if primary {"primary"}else{"active"}})))
+                                Ok((
+                                    "pane.history".into(),
+                                    match result {
+                                        Ok(()) => {
+                                            json!({"pane":pane,"generation":generation,"text":text,"total_lines":total,"truncated":truncated,"buffer":if primary {"primary"}else{"active"}})
+                                        }
+                                        Err(error) => {
+                                            json!({"pane":pane,"generation":generation,"error":error.to_string()})
+                                        }
+                                    },
+                                ))
                             }
                             Command::GuardedPaste {
                                 pane,

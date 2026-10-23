@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+## v0.4.40 — 2026-10-23 — Stable source release
+
+- Forward wheel events to full-screen mouse applications such as Codex even when
+  Wayland supplies no event position; use widget-local pointer coordinates in tabs
+  and splits.
+
+- Add command-scoped short forms for CLI, desktop and installed updater options,
+  including `ruwac update -i -p -H`; preserve literal option values and existing
+  Screen-style commands.
+- Add desktop/traditional terminal shortcut preferences, selection-aware Ctrl+C,
+  protected text/image Ctrl+V, optional terminal copy-on-select to CLIPBOARD,
+  inline canonical mouse-wheel history with wrapped-command/Unicode reflow and
+  bounded, generation-checked history request/handler lifetimes.
+- Serialize CLIPRDR offers and acknowledgments, bind asynchronous data delivery
+  to its exact pending request/transport, balance intercepted paste keys and
+  bound input queues before insertion with stale-input cancellation.
+- Retain simultaneous remote image/text formats with lazy format reads and
+  preserve clipboard ownership while keyboard focus moves within the toolbar.
+  Other applications can read both formats from an existing owned offer after
+  focus moves away, without allowing a new background clipboard promotion.
+- Present linked SSH login settings separately from shared machine agent options;
+  save agent settings consistently across the machine's connection profiles.
+- Add explicit GNOME login recovery choices: retry saved sign-in, reconnect the
+  saved profile, or cancel automation and use manual login.
+- Add native ephemeral Web Preview tabs/splits, conservative terminal URL actions,
+  original-master-only SSH loopback forwarding and disconnected workspace restore.
+  Close page networking on SSH identity loss, block stale-forward navigation,
+  and refuse browser-session reuse for changed connection identities. Browser
+  downloads/uploads remain disabled; the headless engine needs no WebKit.
+- Patch rustls-webpki, ctutils and Tokio; keep the unresolved RSA advisory visible and
+  refresh the acceptance delta. Distribution requires all nineteen frozen gates;
+  physical/external-host qualification remains separate.
+
 ## v0.4.39 — 2026-10-23 — Stable source release
 
 - Check the selected remote RUWAC CLI version on every agent connection, including

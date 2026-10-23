@@ -95,7 +95,7 @@ jobs:
           printf 'CFLAGS=-ffile-prefix-map=%s=/usr/src/ruwac -ffile-prefix-map=%s=/usr/src/build-home\n' "$GITHUB_WORKSPACE" "$HOME" >> "$GITHUB_ENV"
           printf 'CXXFLAGS=-ffile-prefix-map=%s=/usr/src/ruwac -ffile-prefix-map=%s=/usr/src/build-home\n' "$GITHUB_WORKSPACE" "$HOME" >> "$GITHUB_ENV"
       - name: Install Fedora build and scanner dependencies
-        run: dnf install -y acl git cargo rust gcc gcc-c++ cmake perl openssl openssl-devel pkgconf-pkg-config gtk4-devel libadwaita-devel libssh2-devel sqlite-devel python3 curl tar gzip gh rpm-build desktop-file-utils
+        run: dnf install -y acl git cargo rust gcc gcc-c++ cmake perl openssl openssl-devel pkgconf-pkg-config gtk4-devel libadwaita-devel webkitgtk6.0-devel libssh2-devel sqlite-devel python3 curl tar gzip gh rpm-build desktop-file-utils
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           persist-credentials: false

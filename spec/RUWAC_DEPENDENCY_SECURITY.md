@@ -1,5 +1,27 @@
 # RUWAC dependency security assessment
 
+Current remediation candidate (2026-10-23): the desktop lockfile resolves
+`rustls-webpki 0.103.16` and `ctutils 0.4.4`; both workspaces pin Tokio 1.53.3.
+The Tokio patch also removes the unsoundness warning RUSTSEC-2026-0386 found
+in the first fresh candidate scan. These are compatible patch updates
+for [RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382) and
+[the ctutils fix](https://github.com/RustCrypto/utils/pull/1569). The last published
+v0.4.39 still contained the affected versions. The locked Fedora normal dependency tree and the all-target normal tree contain
+no path to rustls-webpki: this candidate's rustls provider is in the development
+server graph. This does not establish a production outer-TLS certificate flaw;
+RUWAC's RDP connection uses native-tls/OpenSSL. The fresh unsuppressed cargo-audit 0.22.2 scan reports no headless
+vulnerabilities and only RUSTSEC-2023-0071 for the desktop; both patchable
+findings and the Tokio unsoundness warning are absent. The maintenance warnings for atomic-polyfill and
+rustls-pemfile remain visible. Fresh full-build/native evidence is still
+required for this changed candidate; it is not a
+claim that v0.4.39's advisory job passed. The new WebKitGTK GUI uses the Fedora
+system browser libraries and adds no browser dependency to the headless workspace.
+
+RSA remains an unresolved production dependency; no advisory suppression,
+unreviewed cryptographic fork or forced incompatible SSPI upgrade is introduced.
+The older assessment below is retained as dated history.
+
+
 Assessed 2026-10-12. This is a source and dependency-path assessment, not a cryptographic timing audit or stable-distribution clearance.
 
 The locked desktop graph contains `rsa 0.10.0-rc.18`, flagged by [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html). The advisory describes timing disclosure of RSA private keys when an attacker can observe private-key operations. Its patched-version list is empty. The headless lockfile has no reported vulnerabilities in the inspected advisory snapshot and contains no RSA, IronRDP or GTK dependency.
