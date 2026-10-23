@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## v0.4.39 — 2026-10-23 — Stable source release
+
+- Check the selected remote RUWAC CLI version on every agent connection, including
+  reattachment. Automatic RUWAC installation now checks verified releases even when
+  RUWAC already exists, updates the per-user installation, and preserves running
+  engines and sessions. Report an older selected CLI and its executable path; an
+  unavailable updater allows attachment with an existing valid CLI.
+- Keep the actual tab popup menu current when switching between terminal and
+  RDP tabs. Expose automatic sign-in retry there, including after a stopped
+  attempt reaches a later verified GNOME greeter.
+- Preserve a tab’s explicit “Trust once” certificate approval when refreshing
+  options for the same verified endpoint.
+- Load saved selection and sign-in options when reconnecting an unchanged
+  endpoint. Preserve manually edited fields, and require reopening a saved
+  machine if its host, user, credential reference or certificate trust changed.
+- Keep native selection paste working within its source RDP desktop without
+  requiring the cross-desktop receiver. On connections with mouse-selection
+  sharing enabled, refuse outside selections when selection paste is disabled
+  instead of forwarding a click that pastes unrelated remote text.
+- Recheck a small, low-confidence GDM “Not listed?” button in a local crop while
+  retaining the original confidence, field and ordered-password guards.
+
 ## v0.4.38 — 2026-10-22 — Stable source release
 
 - Keep deliberate terminal and RDP mouse selections pasteable between tabs. Middle-click pastes an application-owned selection directly into terminal tabs, including nested RUWAC sessions on preserved older engines that cannot exchange desktop selections through OSC 52. Ctrl+C/V stays separate, and other applications retain normal mouse routing when the selection comes from outside RUWAC.

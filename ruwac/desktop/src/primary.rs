@@ -291,6 +291,12 @@ impl Bridge {
         crate::terminal_primary::remember_remote(&provider, &text, &self.selection_origin);
         Ok(Some(size))
     }
+    /// This desktop already owns its native selection. A middle-click within
+    /// the same connection needs no cross-desktop publication or receiver.
+    pub fn selection_from_this_desktop(&self, clipboard: &gtk::gdk::Clipboard) -> bool {
+        crate::terminal_primary::selected(clipboard).is_some()
+            && !crate::terminal_primary::selected_elsewhere(clipboard, &self.selection_origin)
+    }
     fn take_incoming(&self) -> Option<(String, bool)> {
         self.incoming
             .lock()

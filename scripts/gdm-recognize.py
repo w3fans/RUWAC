@@ -45,8 +45,8 @@ def focus_boxes(image):
                 if not any(abs(box[0]-old[0])<8 and abs(box[1]-old[1])<8 for old in boxes):boxes.append(box)
     return boxes
 
-def users_target(all_words):
-    tokens=[q for q in all_words if q[1]>=70]
+def users_target(all_words, minimum=70):
+    tokens=[q for q in all_words if q[1]>=minimum]
     target=[]
     for i,q in enumerate(tokens):
         norm=''.join(c for c in q[0].casefold()if c.isalpha())
@@ -67,6 +67,22 @@ def recognize(path,trusted=False):
         cw=min(w,2048);ch=min(h,4*1024*1024//cw);origin=((w-cw)//2,(h-ch)//2)
         image=image.crop((origin[0],origin[1],origin[0]+cw,origin[1]+ch));w,h=image.size
     base=path.parent;all_words=words(image,base/'layout.png',11)
+    target=users_target(all_words)
+    if not target:
+        # A small button can have poor confidence in a sparse, large layout.
+        # Low-confidence words locate a crop only: a second independent OCR
+        # pass must still recognize exactly one complete "Not listed?" link
+        # at the original threshold. Field and sequence guards remain below.
+        candidates=users_target(all_words,minimum=35)
+        if len(candidates)==1:
+            _,_,x,y,tw,th=candidates[0]
+            left,top=max(0,int(x)-8),max(0,int(y)-6)
+            crop=image.crop((left,top,min(w,int(x+tw)+8),min(h,int(y+th)+6)))
+            recovered=users_target(words(crop,base/'user-link.png',7))
+            if len(recovered)==1:
+                t,c,x,y,tw,th=recovered[0]
+                if 0<=x<x+tw<=crop.width and 0<=y<y+th<=crop.height:
+                    target=[(t,c,x+left,y+top,tw,th)]
     branded=any(t.casefold()=='fedora'and c>=85 for t,c,*_ in all_words)
     if not branded:
         candidates=[q for q in all_words if q[0].casefold()=='fedora'and q[1]>=60]
@@ -85,7 +101,7 @@ def recognize(path,trusted=False):
     # sign-in (trusted).
     unbranded_users=unbranded_username=False
     if not branded and not trusted:
-        listed=len(users_target(all_words))
+        listed=len(target)
         if listed>1:return {'kind':'unknown'}
         unbranded_users=listed==1
         unbranded_username=listed==0
@@ -108,7 +124,6 @@ def recognize(path,trusted=False):
         return {'kind':'unknown'}
     if len(entries)==1:return placed(entries[0],origin)
     if entries:return {'kind':'ambiguous'}
-    target=users_target(all_words)
     if len(target)==1:
         q=target[0];return placed({'kind':'users','rect':[round(q[2]),round(q[3]),round(q[2]+q[4]),round(q[3]+q[5])]},origin)
     return {'kind':'unknown'}

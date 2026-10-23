@@ -19,7 +19,7 @@ fn agent_command(agent: u32) -> Result<(&'static str, &'static str), String> {
 /// (which verifies the signed prebuilt package) come from the system's signed
 /// repositories via sudo/dnf, which may ask for the password in the terminal;
 /// then the verified prebuilt per-user install runs unchanged.
-fn install_ruwac_command() -> String {
+fn install_ruwac_command(binary: &str) -> String {
     let deps = "missing=''; command -v python3 >/dev/null 2>&1 || missing=\"$missing python3\"; \
                 command -v gh >/dev/null 2>&1 || missing=\"$missing gh\"; \
                 if [ -n \"$missing\" ]; then \
@@ -29,8 +29,18 @@ fn install_ruwac_command() -> String {
                   else echo \"Install$missing with your package manager, then retry.\"; exit 1; fi; \
                 fi";
     format!(
-        "{deps}; python3 -c {} --bootstrap --headless --prebuilt",
-        quote(include_str!("../../../scripts/update-user.py"))
+        "{deps}; python3 -c {} --remote-cli {} --bootstrap --headless --prebuilt",
+        quote(include_str!("../../../scripts/update-user.py")),
+        quote(binary)
+    )
+}
+
+fn update_then_launch(update: &str, launch: &str) -> String {
+    // An unavailable release service must not prevent attaching with the
+    // installed CLI. Run installation in a subshell: dependency failures may
+    // exit it. The launcher still validates/requires the selected executable.
+    format!(
+        "( {update} ) || echo 'RUWAC update check/install failed; trying the installed CLI. Review the update diagnostic above.'; {launch}"
     )
 }
 
@@ -115,7 +125,7 @@ pub(crate) fn argv(
         return Ok(command);
     }
     if agent == 2 {
-        return ssh_command(profile, install_ruwac_command());
+        return ssh_command(profile, install_ruwac_command(binary));
     }
     let (name, default) = agent_command(agent)?;
     let configured = if agent == 0 {
@@ -173,22 +183,19 @@ pub(crate) fn argv(
         _ => return Err("Unknown remote session backend".into()),
     }
     let script = format!(
-        "python3 -c {} {} {} {} {} {}",
+        "python3 -c {} {} {} {} {} {} {}",
         quote(include_str!("../../../scripts/remote-agent.py")),
         quote(binary),
         quote(socket),
         quote(name),
         quote(command),
-        quote(&profile.preferences.agent_session)
+        quote(&profile.preferences.agent_session),
+        quote(env!("CARGO_PKG_VERSION"))
     );
-    // Optional: install the RUWAC CLI first (prebuilt, per user) when missing.
+    // Always check verified releases when automatic installation is enabled.
+    // Existence alone does not establish that the installed CLI is current.
     let script = if profile.preferences.ruwac_install_missing {
-        format!(
-            "{{ command -v {} >/dev/null 2>&1 || test -x \"$HOME/.local/bin/ruwac\" || {{ echo 'Installing RUWAC…'; {}; }}; }} && {}",
-            quote(binary),
-            install_ruwac_command(),
-            script
-        )
+        update_then_launch(&install_ruwac_command(binary), &script)
     } else {
         script
     };
@@ -222,7 +229,7 @@ pub fn launch(
             )
         } else {
             format!(
-                "Install/update the headless CLI for {} at {} using its saved SSH account. The existing verified source installer runs in a terminal, needs Python 3 and Rust build tools, and preserves sessions. No agent installation or login is performed.",
+                "Install/update RUWAC for {} at {} using its saved SSH account and a verified prebuilt package. Python 3 and GitHub CLI dependencies may require sudo. Running sessions are preserved. No agent installation or login is performed.",
                 profile.name, profile.server
             )
         };
@@ -431,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_ruwac_is_installed_first_only_when_enabled() {
+    fn remote_version_is_checked_and_updates_only_when_enabled() {
         let mut profile: profiles::Profile = serde_json::from_value(json!({"id":"endpoint_demo","machine_id":"machine_demo","name":"Demo","group":"Test","protocol":"SSH","server":"127.0.0.1:2222","username":"generated-user","secret_reference":"GENERATED-SECRET-REF","favorite":false,"last_used":0,"tags":[]})).unwrap();
         let plain = argv(&profile, 0, "ruwac", "").unwrap();
         assert!(!plain.last().unwrap().contains("--prebuilt"));
@@ -440,6 +447,8 @@ mod tests {
         let command = install.last().unwrap();
         assert!(command.contains("--bootstrap --headless --prebuilt"));
         assert!(command.contains("command -v"));
+        assert!(!command.contains("|| test -x"));
+        assert!(plain.last().unwrap().contains(env!("CARGO_PKG_VERSION")));
     }
     #[test]
     fn defaults_open_resume_pickers_without_a_prompt() {
@@ -457,7 +466,7 @@ mod tests {
         let receipt = root.join("receipt.json");
         // A disposable remote CLI process verifies the real shell/Python
         // boundary. It never starts Codex, Claude or an owner daemon.
-        fs::write(&binary,format!("#!/usr/bin/python3\nimport json,sys\nfrom pathlib import Path\na=sys.argv\nif 'session.list' in a:\n print(json.dumps({{'result':[]}}))\nif 'session.create' in a:\n Path({:?}).write_text(a[a.index('--params')+1])\n print(json.dumps({{'result':{{'session':'session_generated'}}}}))\n",receipt.to_str().unwrap())).unwrap();
+        fs::write(&binary,format!("#!/usr/bin/python3\nimport json,sys\nfrom pathlib import Path\na=sys.argv\nif '--version' in a:print('RUWAC 0.0.1')\nif 'session.list' in a:\n print(json.dumps({{'result':[]}}))\nif 'session.create' in a:\n Path({:?}).write_text(a[a.index('--params')+1])\n print(json.dumps({{'result':{{'session':'session_generated'}}}}))\n",receipt.to_str().unwrap())).unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
         let p = profiles::Profile {
             id: "endpoint_generated".into(),
@@ -496,7 +505,30 @@ mod tests {
             assert_eq!(params["argv"][0], "bash");
             assert_eq!(params["argv"][1], "-lic");
             assert_eq!(params["name"], if agent == 0 { "codex" } else { "claude" });
-            assert!(String::from_utf8_lossy(&output.stdout).contains("Closing this view detaches"));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains("Remote RUWAC 0.0.1:"));
+            assert!(stdout.contains("Remote CLI is older than this GUI"));
+            assert!(stdout.contains("Closing this view detaches"));
+            // Exercise the real shell/launcher boundary after an updater exits
+            // its subshell. No network, real agent or owner daemon is used.
+            let unavailable = update_then_launch("exit 1", args.last().unwrap());
+            let resumed = Command::new("bash")
+                .args(["-c", &unavailable])
+                .output()
+                .unwrap();
+            assert!(resumed.status.success());
+            assert!(
+                String::from_utf8_lossy(&resumed.stdout)
+                    .contains("RUWAC update check/install failed")
+            );
+            let absent_args =
+                argv(&p, agent, root.join("absent-cli").to_str().unwrap(), "").unwrap();
+            let absent = update_then_launch("exit 1", absent_args.last().unwrap());
+            let prior = fs::read(&receipt).unwrap();
+            let refused = Command::new("bash").args(["-c", &absent]).output().unwrap();
+            assert!(!refused.status.success());
+            assert!(String::from_utf8_lossy(&refused.stderr).contains("Install the RUWAC CLI"));
+            assert_eq!(fs::read(&receipt).unwrap(), prior);
         }
         let mut custom = p.clone();
         custom.preferences.codex_command = "printf '%s' 'generated command with spaces'".into();

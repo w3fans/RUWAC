@@ -22,10 +22,11 @@ class LaunchError(Exception):
 
 
 def main():
-    if len(sys.argv) not in (5, 6):
+    if len(sys.argv) not in (5, 6, 7):
         raise LaunchError('Invalid remote agent request')
     binary, socket, name, command = sys.argv[1:5]
-    shared = sys.argv[5] if len(sys.argv) == 6 else ''
+    shared = sys.argv[5] if len(sys.argv) >= 6 else ''
+    expected = sys.argv[6] if len(sys.argv) == 7 else None
     if shared and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', shared):
         raise LaunchError('Use a short session name containing letters, digits, dots, underscores or hyphens')
     session_name = shared or name
@@ -38,6 +39,21 @@ def main():
             exe = candidate
     if not exe:
         raise LaunchError('Install the RUWAC CLI on this machine before launching a persistent agent.')
+    # Check the executable actually selected on every connection, including
+    # reattachment. Installing a new CLI never replaces a running engine.
+    check = subprocess.run([exe, '--version'], capture_output=True, text=True, timeout=5)
+    match = re.fullmatch(r'RUWAC ([0-9]+\.[0-9]+\.[0-9]+)\s*', check.stdout)
+    if check.returncode or not match:
+        raise LaunchError('The selected remote RUWAC executable did not report a valid version')
+    current = match[1]
+    print(f'Remote RUWAC {current}: {exe}', flush=True)
+    if expected is not None:
+        if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', expected):
+            raise LaunchError('Invalid expected RUWAC version')
+        if tuple(map(int, current.split('.'))) < tuple(map(int, expected.split('.'))):
+            print('Remote CLI is older than this GUI. Enable automatic RUWAC installation '
+                  'or use Install / update remote RUWAC CLI in Machines. '
+                  'An existing session keeps its running engine until explicitly restarted.', flush=True)
     # Use precisely the CLI default, including an explicit remote environment override.
     if not socket:
         runtime = os.environ.get('XDG_RUNTIME_DIR')

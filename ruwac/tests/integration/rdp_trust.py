@@ -76,7 +76,12 @@ try:
   record('TRUST-FOREGROUND-AUTO-PROMPT-BACKGROUND-DEFERRED',no_automatic_approval=True)
  baseline=store.read_bytes();command('rdp-trust',rdp=index(profile),operation='review');command('rdp-trust',rdp=index(profile),response='cancel');assert store.read_bytes()==baseline and frames(profile)['decoded_updates']==0
  record('TRUST-DEFAULT-REJECT-CANCEL',real_TLS_inspection=True,zero_authenticated_frames_before_approval=True)
+ # Approval must survive an options-only refresh of this exact saved endpoint.
+ # Port1 refuses the unrelated generated SSH route; no external account is used.
+ subprocess.run([a.gui,'--receive-primary',profile,'fixture','wayland-77','1'],env=env,check=True,stdout=subprocess.DEVNULL)
+ subprocess.run([a.gui,'--paste-primary',profile],env=env,check=True,stdout=subprocess.DEVNULL)
  command('rdp-trust',rdp=index(profile),operation='review');command('rdp-trust',rdp=index(profile),response='once');v=connected(profile)
+ assert command('rdp-inspect',rdp=index(profile))['selection_settings']=={'enabled':True,'paste':True}
  assert metadata()['items'][0]['preferences']['trust']=='';assert command('rdp-trust',rdp=index(profile))['tab_pin'];record('TRUST-ONCE-AUTHENTICATED',decoded_updates=v['decoded_updates'],profile_trust_unchanged=True)
  restart();r=pending(profile);assert not r['saved_pin']and not r['tab_pin'];assert frames(profile)['decoded_updates']==0
  checkpoints=list((root/'config/RUWAC').glob('workspace*.json'));assert checkpoints and all(token not in path.read_text()for path in checkpoints)

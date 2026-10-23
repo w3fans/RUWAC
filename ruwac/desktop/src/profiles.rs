@@ -3942,7 +3942,7 @@ fn editor_seed(
     auto_install.set_active(original.preferences.agent_install_missing);
     agents.append(&auto_install);
     let ruwac_install = gtk::CheckButton::with_label(
-        "Install RUWAC automatically when missing (verified prebuilt package)",
+        "Check and update RUWAC on agent connection (verified prebuilt package)",
     );
     ruwac_install.set_widget_name("machine-ruwac-auto-install");
     ruwac_install.set_active(original.preferences.ruwac_install_missing);
@@ -4518,7 +4518,36 @@ pub fn fixture_editor(root: &gtk::Box, q: &serde_json::Value) -> serde_json::Val
                     }
                     let mut rows = Vec::new();
                     bounds(d.upcast_ref(), d.content_area().upcast_ref(), &mut rows);
-                    dialogs.push(json!({"width":d.content_area().width(),"height":d.content_area().height(),"fields":rows}));
+                    // Inspect only these non-secret booleans, including when
+                    // their Advanced section is collapsed. The fixture can
+                    // wait for the editor's actual snapshot after a writer.
+                    fn selection_options(
+                        w: &gtk::Widget,
+                        values: &mut serde_json::Map<String, serde_json::Value>,
+                    ) {
+                        if matches!(w.widget_name().as_str(), "primary-sync" | "primary-paste") {
+                            if let Some(button) = w.downcast_ref::<gtk::CheckButton>() {
+                                values
+                                    .insert(w.widget_name().to_string(), json!(button.is_active()));
+                            }
+                        }
+                        // GtkExpander keeps its collapsed content outside the
+                        // visible widget child tree; inspect its owned child.
+                        if let Some(expander) = w.downcast_ref::<gtk::Expander>() {
+                            if let Some(child) = expander.child() {
+                                selection_options(&child, values);
+                            }
+                            return;
+                        }
+                        let mut child = w.first_child();
+                        while let Some(w) = child {
+                            child = w.next_sibling();
+                            selection_options(&w, values);
+                        }
+                    }
+                    let mut options = serde_json::Map::new();
+                    selection_options(d.content_area().upcast_ref(), &mut options);
+                    dialogs.push(json!({"width":d.content_area().width(),"height":d.content_area().height(),"fields":rows,"selection_options":options}));
                 }
             }
         }
@@ -5347,6 +5376,27 @@ pub(crate) fn configure_primary(
     }
     profile.validate()?;
     store.save()
+}
+
+/// Reload saved options for explicit reconnect, without retargeting credentials.
+pub(crate) fn saved_reconnect_profile(expected: &Profile) -> Result<Option<Profile>, String> {
+    let store = Store::load();
+    if let Some(error) = store.error {
+        return Err(error);
+    }
+    let Some(saved) = store.items.iter().find(|p| p.id == expected.id) else {
+        return Ok(None);
+    };
+    let fresh = resolve(saved, &store.groups, &store.items)?;
+    if fresh.protocol != expected.protocol
+        || fresh.server != expected.server
+        || fresh.username != expected.username
+        || fresh.secret_reference != expected.secret_reference
+        || fresh.preferences.trust != expected.preferences.trust
+    {
+        return Err("Saved connection identity changed; reopen it from Machines".into());
+    }
+    Ok(Some(fresh))
 }
 
 /// Stop selection helpers when their saved account, route or desktop changes.

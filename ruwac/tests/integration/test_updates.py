@@ -380,6 +380,21 @@ class Updates(unittest.TestCase):
         self.assertEqual(status.call_args.args[0], '0.0.0')
         self.assertTrue(install.call_args.args[3])
 
+    def test_remote_bootstrap_checks_selected_cli_and_never_shadows_a_newer_one(self):
+        with patch.object(sys, 'argv', ['updater', '--bootstrap', '--remote-cli', 'ruwac', '--prefix', str(self.root / 'prefix')]), patch.object(updates, 'remote_cli_version', return_value='0.4.99') as probe, patch.object(updates, 'verified_status', return_value={'available': False}) as status, patch.object(updates, 'install') as install, contextlib.redirect_stdout(io.StringIO()):
+            updates.main()
+        probe.assert_called_once_with('ruwac')
+        status.assert_called_once_with('0.4.99', 'source-build')
+        install.assert_not_called()
+
+    def test_remote_cli_version_probes_actual_executable_and_rejects_invalid_output(self):
+        with patch.object(updates.shutil, 'which', return_value='/generated/ruwac'), patch.object(updates.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'RUWAC 0.4.23\n', '')) as probe:
+            self.assertEqual(updates.remote_cli_version('ruwac'), '0.4.23')
+            self.assertEqual(probe.call_args.args[0], ['/generated/ruwac', '--version'])
+        with patch.object(updates.shutil, 'which', return_value='/generated/ruwac'), patch.object(updates.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'unexpected', '')):
+            with self.assertRaises(ValueError):
+                updates.remote_cli_version('ruwac')
+
     def test_bootstrap_respects_installed_version_and_does_not_downgrade(self):
         self.fixture_install('0.0.2')
         with patch.object(sys, 'argv', ['updater', '--bootstrap', '--prefix', str(self.root / 'prefix')]), patch.object(updates, 'verified_status', return_value={'available': False}) as status, patch.object(updates, 'install') as install, contextlib.redirect_stdout(io.StringIO()):

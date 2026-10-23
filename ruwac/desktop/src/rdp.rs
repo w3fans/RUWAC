@@ -21,6 +21,7 @@ pub fn install_tab_menu(
     let mut actions = Vec::new();
     for (name, label) in [
         ("reconnect", "Reconnect"),
+        ("retry-sign-in", "Retry automatic sign-in"),
         ("dynamic", "Dynamic resolution"),
         ("fit", "Fit to window"),
         ("native", "Original size"),
@@ -38,6 +39,7 @@ pub fn install_tab_menu(
                         }
                     }
                     "disconnect" => view.close(),
+                    "retry-sign-in" => view.retry_auto_gdm(),
                     mode => view.set_display(mode, 1.0, 0, 0),
                 }
             }
@@ -113,7 +115,11 @@ pub fn install_tab_menu(
     menu.append_section(None, &general);
     terminal_menu.append_section(None, &general);
     window.insert_action_group("connection", Some(&group));
-    tabs.set_menu_model(Some(&general));
+    // libadwaita captures this model before emitting setup-menu and caches its
+    // popover. Keep its identity stable; update its sections for each tab.
+    let context_menu = gtk::gio::Menu::new();
+    context_menu.append_section(None, &general);
+    tabs.set_menu_model(Some(&context_menu));
     tabs.connect_setup_menu(move |tabs, page| {
         let selected = page.and_then(|page| {
             views
@@ -143,7 +149,9 @@ pub fn install_tab_menu(
                 })
         });
         for action in &actions {
-            action.set_enabled(selected.is_some());
+            action.set_enabled(selected.as_ref().is_some_and(|view| {
+                action.name() != "retry-sign-in" || view.auto_gdm_retry_available()
+            }));
         }
         for (name, action) in &terminal_actions {
             action.set_enabled(
@@ -157,13 +165,19 @@ pub fn install_tab_menu(
         *page_target.borrow_mut() = page.cloned();
         *target.borrow_mut() = selected.as_ref().map(Rc::downgrade);
         *terminal.borrow_mut() = selected_terminal.as_ref().map(Rc::downgrade);
-        tabs.set_menu_model(Some(if selected_terminal.is_some() {
-            &terminal_menu
-        } else if selected.is_some() {
-            &menu
-        } else {
-            &general
-        }));
+        if page.is_some() {
+            context_menu.remove_all();
+            context_menu.append_section(
+                None,
+                if selected_terminal.is_some() {
+                    &terminal_menu
+                } else if selected.is_some() {
+                    &menu
+                } else {
+                    &general
+                },
+            );
+        }
     });
     group
 }
@@ -179,6 +193,8 @@ pub fn menu_fixture(
         return serde_json::json!({"error":"Unknown fixture tab"});
     }
     let page = tabs.nth_page(index);
+    // Model captured in the same order as libadwaita's actual do_popup.
+    let presented_model = tabs.menu_model();
     tabs.emit_by_name::<()>("setup-menu", &[&Some(page.clone())]);
     fn labels(model: &gtk::gio::MenuModel) -> Vec<String> {
         let mut result = Vec::new();
@@ -196,6 +212,8 @@ pub fn menu_fixture(
         result
     }
     let menu = tabs.menu_model().map(|m| labels(&m)).unwrap_or_default();
+    let presented_menu = presented_model.as_ref().map(labels).unwrap_or_default();
+    let stable_model = presented_model == tabs.menu_model();
     let states = actions
         .list_actions()
         .iter()
@@ -214,7 +232,7 @@ pub fn menu_fixture(
             None,
         );
     }
-    let value = serde_json::json!({"title":page.title().to_string(),"status_icon":page.indicator_icon().is_some(),"icon":page.icon().is_some(),"menu":menu,"enabled":states});
+    let value = serde_json::json!({"title":page.title().to_string(),"status_icon":page.indicator_icon().is_some(),"icon":page.icon().is_some(),"menu":menu,"presented_menu":presented_menu,"stable_model":stable_model,"enabled":states});
     tabs.emit_by_name::<()>("setup-menu", &[&None::<adw::TabPage>]);
     value
 }
@@ -1425,6 +1443,7 @@ struct PendingConnect {
 struct AutoGdm {
     armed: bool,
     sequence: crate::gdm::Sequence,
+    last_observation: Option<crate::gdm::Kind>,
     began: std::time::Instant,
     scan_at: std::time::Instant,
     tick_at: std::time::Instant,
@@ -1451,6 +1470,7 @@ impl Default for AutoGdm {
         Self {
             armed: false,
             sequence: Default::default(),
+            last_observation: None,
             began: std::time::Instant::now(),
             scan_at: std::time::Instant::now(),
             tick_at: std::time::Instant::now(),
@@ -1470,6 +1490,9 @@ impl Default for AutoGdm {
     }
 }
 impl AutoGdm {
+    fn retry_on_greeter(&self, handovers: u32, verified_live: bool) -> bool {
+        !self.armed && self.stopped_at.is_some() && handovers > 0 && verified_live
+    }
     fn reconnects_to_greeter(&self, transport: &str, generation: u64, handovers: u32) -> bool {
         !self.armed
             && self
@@ -1536,6 +1559,7 @@ pub struct RdpView {
     held: RefCell<HashSet<(u8, bool)>>,
     buttons: RefCell<HashSet<u32>>,
     pointer_position: Cell<(u16, u16)>,
+    native_middle_presses: Cell<u64>,
     pointer_geometry: Cell<Option<(f64, f64, f64, f64)>>,
     broker: crate::clipboard::Broker,
     id: String,
@@ -1758,6 +1782,7 @@ impl RdpView {
             held: RefCell::new(HashSet::new()),
             buttons: RefCell::new(HashSet::new()),
             pointer_position: Cell::new((0, 0)),
+            native_middle_presses: Cell::new(0),
             pointer_geometry: Cell::new(None),
             broker,
             id: ruwac_protocol::id("rdp"),
@@ -2459,7 +2484,7 @@ impl RdpView {
                 .collect();
             serde_json::json!({"decoded_updates":s.frames,"decoded_sizes":s.decoded_sizes,"update_intervals_ms":times})
         });
-        serde_json::json!({"draws":self.drawn.get(),"mouse_selection":self.primary_status.text().as_str(),"selection_paste_pending":self.primary_click.borrow().is_some(),"selection_sharing_ready":self.primary.borrow().as_ref().is_some_and(|b|b.ready),"connection_pending":self.pending_connect.borrow().is_some(),"transport_id":self.connection.borrow().as_ref().map(|c|c.id.as_str()),"requested_size":self.requested.get(),"display_mode":format!("{:?}",self.mode.get()),"reconnect_visible":self.disconnect_card.is_visible(),"metrics":metrics,"gnome_auto":{"armed":self.auto_gdm.borrow().armed,"step":format!("{:?}",self.auto_gdm.borrow().sequence.step),"input_epoch":self.assist_epoch.load(Ordering::Acquire),"guards":{"canvas_focus":self.area.has_focus(),"window_active":self.root.root().and_downcast::<gtk::Window>().is_some_and(|w|w.is_active()),"selected":self.selected.borrow().as_ref().is_some_and(|f|f()),"profile_current":self.profile_metadata.borrow().as_ref().is_some_and(crate::profiles::assist_profile_current),"rendered_generation":self.rendered_generation.get(),"surface_generation":self.surface_generation.get()},"generation":self.connection.borrow().as_ref().map(|c|c.state.lock().unwrap().generation),"handovers":self.connection.borrow().as_ref().map(|c|c.state.lock().unwrap().handovers)},"last_pixel":self.last_pixel.get(),"status":self.status.text().as_str(),"size":self.size.get(),"zoom":self.zoom.get(),"pan":[self.scroll.hadjustment().value(),self.scroll.vadjustment().value()],"viewport":[self.area.width(),self.area.height()],"window_width":self.root.root().and_then(|r|r.downcast::<gtk::Window>().ok()).map(|w|w.width()),"active":self.broker.borrow().active()==Some(self.id.as_str()),"epoch":self.broker.borrow().epoch(),"pending":self.pending.borrow().is_some(),"received_generation":self.received_generation.get(),"offers":self.offers_seen.get(),"policy":format!("{:?}",self.policy.get())})
+        serde_json::json!({"draws":self.drawn.get(),"mouse_selection":self.primary_status.text().as_str(),"selection_paste_pending":self.primary_click.borrow().is_some(),"selection_sharing_ready":self.primary.borrow().as_ref().is_some_and(|b|b.ready),"connection_pending":self.pending_connect.borrow().is_some(),"transport_id":self.connection.borrow().as_ref().map(|c|c.id.as_str()),"requested_size":self.requested.get(),"display_mode":format!("{:?}",self.mode.get()),"reconnect_visible":self.disconnect_card.is_visible(),"metrics":metrics,"selection_settings":self.profile_metadata.borrow().as_ref().map(|p|serde_json::json!({"enabled":p.preferences.primary_sync,"paste":p.preferences.primary_paste})),"gnome_auto":{"armed":self.auto_gdm.borrow().armed,"step":format!("{:?}",self.auto_gdm.borrow().sequence.step),"input_epoch":self.assist_epoch.load(Ordering::Acquire),"guards":{"canvas_focus":self.area.has_focus(),"window_active":self.root.root().and_downcast::<gtk::Window>().is_some_and(|w|w.is_active()),"selected":self.selected.borrow().as_ref().is_some_and(|f|f()),"profile_current":self.profile_metadata.borrow().as_ref().is_some_and(crate::profiles::assist_profile_current),"rendered_generation":self.rendered_generation.get(),"surface_generation":self.surface_generation.get()},"generation":self.connection.borrow().as_ref().map(|c|c.state.lock().unwrap().generation),"handovers":self.connection.borrow().as_ref().map(|c|c.state.lock().unwrap().handovers)},"last_pixel":self.last_pixel.get(),"status":self.status.text().as_str(),"size":self.size.get(),"zoom":self.zoom.get(),"pan":[self.scroll.hadjustment().value(),self.scroll.vadjustment().value()],"viewport":[self.area.width(),self.area.height()],"window_width":self.root.root().and_then(|r|r.downcast::<gtk::Window>().ok()).map(|w|w.width()),"active":self.broker.borrow().active()==Some(self.id.as_str()),"epoch":self.broker.borrow().epoch(),"pending":self.pending.borrow().is_some(),"received_generation":self.received_generation.get(),"offers":self.offers_seen.get(),"policy":format!("{:?}",self.policy.get())})
     }
     pub fn fixture_policy(&self, index: u32) {
         fn find(w: &gtk::Widget) -> Option<gtk::DropDown> {
@@ -2759,6 +2784,7 @@ impl RdpView {
         self.canvas();
     }
     fn begin_connect(&self, activate: bool) -> Result<(), String> {
+        self.refresh_saved_profile_for_reconnect()?;
         let address = self.entries[0].text();
         let (host, port) = crate::profiles::endpoint(&address, 3389)?;
         let user = self.entries[1].text();
@@ -2807,6 +2833,31 @@ impl RdpView {
         } else {
             self.start_connection(profile, activate);
         }
+        Ok(())
+    }
+    fn refresh_saved_profile_for_reconnect(&self) -> Result<(), String> {
+        let Some(previous) = self.profile_metadata.borrow().clone() else {
+            return Ok(());
+        };
+        // Preserve manually edited connection fields. A reconnect of a saved,
+        // unchanged endpoint picks up its current selection and sign-in options.
+        if self.entries[0].text() != previous.server
+            || self.entries[1].text() != previous.username
+            || self.entries[2].text() != previous.secret_reference
+            || self.entries[3].text() != previous.preferences.trust
+        {
+            return Ok(());
+        }
+        let Some(fresh) = crate::profiles::saved_reconnect_profile(&previous)? else {
+            return Ok(());
+        };
+        // saved_reconnect_profile has verified the exact host/user/credential/
+        // trust identity. Reapplying identical entry text emits changed and
+        // clears a tab-only certificate approval, even though its endpoint has
+        // not changed. Keep that approval across this options-only refresh.
+        let pin = self.transient_pin.borrow().clone();
+        self.configure(&fresh);
+        *self.transient_pin.borrow_mut() = pin;
         Ok(())
     }
     fn cancel_pending_connect(&self, reason: &str) {
@@ -2936,6 +2987,10 @@ impl RdpView {
     }
     pub fn metadata(&self) -> serde_json::Value {
         let connection = self.connection.borrow();
+        let automatic_sign_in = {
+            let a = self.auto_gdm.borrow();
+            serde_json::json!({"armed":a.armed,"stage":format!("{:?}",a.sequence.step),"last_screen":a.last_observation.map(|kind|format!("{kind:?}")),"retry_available":self.auto_gdm_retry_available()})
+        };
         let phase = connection
             .as_ref()
             .map(|c| c.state.lock().unwrap().phase.clone())
@@ -2946,7 +3001,7 @@ impl RdpView {
                     "disconnected".into()
                 }
             });
-        serde_json::json!({"id":self.root.widget_name().as_str(),"phase":phase,"display_mode":format!("{:?}",self.mode.get()),"viewport":[self.scroll.width(),self.scroll.height()],"zoom":self.zoom.get(),"input_paused_for_login":self.auto_gdm.borrow().armed,"reactivating":connection.as_ref().is_some_and(|c|c.state.lock().unwrap().reactivating),"mouse_selection":self.primary_status.text().as_str(),"connection_stage":connection.as_ref().map(|c|c.state.lock().unwrap().connection_stage.clone()),"recovery":connection.as_ref().map(|c|{let st=c.state.lock().unwrap();serde_json::json!({"attempt":st.reconnect_attempt,"elapsed_ms":st.reconnect_elapsed.as_millis() as u64,"background":st.reconnect_background})}),"size":self.size.get(),"transport_id":connection.as_ref().map(|c|c.id.as_str()),"decoded_updates":connection.as_ref().map(|c|c.state.lock().unwrap().frames).unwrap_or(0),"clipboard_owner":self.broker.borrow().active()==Some(self.id.as_str()),"display_control":connection.as_ref().map(|c|{let s=c.state.lock().unwrap();serde_json::json!({"channel_opened":s.display_channel_opened,"capability_messages":s.display_capability_messages,"negotiated":s.display_cap.is_some()})}),"clipboard_channel_negotiated":connection.as_ref().is_some_and(|c|c.state.lock().unwrap().clipboard_channel_negotiated),"verified_tls_sha256":connection.as_ref().and_then(|c|c.state.lock().unwrap().verified_tls_sha256.clone()),"protocol_error":connection.as_ref().and_then(|c|c.state.lock().unwrap().protocol_error.clone()),"authentication_error":connection.as_ref().and_then(|c|c.state.lock().unwrap().authentication_error.clone()),"certificate_review":self.certificate.borrow().as_ref().map(|r|serde_json::json!({"sha256":r.fingerprint(),"changed":r.changed,"valid_now":r.valid_now})),"profile":self.profile_metadata.borrow().as_ref().map(|p|p.id.clone())})
+        serde_json::json!({"id":self.root.widget_name().as_str(),"automatic_sign_in":automatic_sign_in,"phase":phase,"display_mode":format!("{:?}",self.mode.get()),"viewport":[self.scroll.width(),self.scroll.height()],"zoom":self.zoom.get(),"input_paused_for_login":self.auto_gdm.borrow().armed,"reactivating":connection.as_ref().is_some_and(|c|c.state.lock().unwrap().reactivating),"mouse_selection":self.primary_status.text().as_str(),"connection_stage":connection.as_ref().map(|c|c.state.lock().unwrap().connection_stage.clone()),"recovery":connection.as_ref().map(|c|{let st=c.state.lock().unwrap();serde_json::json!({"attempt":st.reconnect_attempt,"elapsed_ms":st.reconnect_elapsed.as_millis() as u64,"background":st.reconnect_background})}),"size":self.size.get(),"transport_id":connection.as_ref().map(|c|c.id.as_str()),"decoded_updates":connection.as_ref().map(|c|c.state.lock().unwrap().frames).unwrap_or(0),"clipboard_owner":self.broker.borrow().active()==Some(self.id.as_str()),"display_control":connection.as_ref().map(|c|{let s=c.state.lock().unwrap();serde_json::json!({"channel_opened":s.display_channel_opened,"capability_messages":s.display_capability_messages,"negotiated":s.display_cap.is_some()})}),"clipboard_channel_negotiated":connection.as_ref().is_some_and(|c|c.state.lock().unwrap().clipboard_channel_negotiated),"verified_tls_sha256":connection.as_ref().and_then(|c|c.state.lock().unwrap().verified_tls_sha256.clone()),"protocol_error":connection.as_ref().and_then(|c|c.state.lock().unwrap().protocol_error.clone()),"authentication_error":connection.as_ref().and_then(|c|c.state.lock().unwrap().authentication_error.clone()),"certificate_review":self.certificate.borrow().as_ref().map(|r|serde_json::json!({"sha256":r.fingerprint(),"changed":r.changed,"valid_now":r.valid_now})),"profile":self.profile_metadata.borrow().as_ref().map(|p|p.id.clone())})
     }
     pub fn connect_profile(&self) {
         fn find(w: &gtk::Widget) -> Option<gtk::Button> {
@@ -3006,6 +3061,16 @@ impl RdpView {
     }
     pub fn fixture_pointer(&self, q: &serde_json::Value) -> serde_json::Value {
         let position_before = self.pointer_position.get();
+        // Scope the owned fixture's disabled-route probe to this callback;
+        // no asynchronous profile watcher observes synthetic metadata.
+        let saved_primary_paste = if q["disable_primary_paste"] == true {
+            self.profile_metadata
+                .borrow_mut()
+                .as_mut()
+                .map(|p| std::mem::replace(&mut p.preferences.primary_paste, false))
+        } else {
+            None
+        };
         if q["cancel"] == true {
             let controllers = self.area.observe_controllers();
             for i in 0..controllers.n_items() {
@@ -3026,7 +3091,12 @@ impl RdpView {
             self.scroll.hadjustment().set_value(x);
             self.scroll.vadjustment().set_value(y);
         }
-        serde_json::json!({"held_buttons":self.buttons.borrow().len(),"position_before":position_before,"position":self.pointer_position.get(),"state":self.fixture_inspect()})
+        if let Some(saved) = saved_primary_paste {
+            if let Some(p) = self.profile_metadata.borrow_mut().as_mut() {
+                p.preferences.primary_paste = saved;
+            }
+        }
+        serde_json::json!({"held_buttons":self.buttons.borrow().len(),"middle_presses":self.native_middle_presses.get(),"position_before":position_before,"position":self.pointer_position.get(),"state":self.fixture_inspect()})
     }
     pub fn set_profile(&self, host: &str, user: &str, reference: &str, ca: &str) {
         self.cancel_pending_connect("Connection cancelled: settings changed");
@@ -3069,7 +3139,8 @@ impl RdpView {
             .borrow()
             .as_ref()
             .is_some_and(|p| p.preferences.primary_sync);
-        self.primary_status.set_visible(enabled);
+        self.primary_status
+            .set_visible(enabled || self.primary_error.borrow().is_some());
         if !enabled {
             self.primary.borrow_mut().take();
             return;
@@ -3689,11 +3760,34 @@ impl RdpView {
                 .profile_metadata
                 .borrow()
                 .as_ref()
-                .is_some_and(|p| p.preferences.primary_paste)
+                .is_some_and(|p| p.preferences.primary_sync)
         {
             let clipboard = self.area.display().primary_clipboard();
             if let Some(text) = crate::terminal_primary::selected(&clipboard) {
+                if self
+                    .primary
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|bridge| bridge.selection_from_this_desktop(&clipboard))
+                {
+                    self.primary_click.borrow_mut().take();
+                    self.primary_error.borrow_mut().take();
+                    self.suppress_middle_release.set(false);
+                    self.pointer_native(x, y, button, release);
+                    return;
+                }
                 self.suppress_middle_release.set(true);
+                if !self
+                    .profile_metadata
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|p| p.preferences.primary_paste)
+                {
+                    *self.primary_error.borrow_mut() = Some("Pasting local mouse selections is disabled for this connection. Enable selection paste in connection settings".into());
+                    self.primary_status
+                        .set_text(self.primary_error.borrow().as_deref().unwrap());
+                    return;
+                }
                 if self.primary_click.borrow().is_some() {
                     return;
                 }
@@ -3818,6 +3912,10 @@ impl RdpView {
         };
         if button != 0 && !release {
             flags |= PointerFlags::DOWN;
+        }
+        if button == 2 && !release {
+            self.native_middle_presses
+                .set(self.native_middle_presses.get().saturating_add(1));
         }
         self.send(vec![FastPathInputEvent::MouseEvent(MousePdu {
             flags,
@@ -3996,18 +4094,21 @@ impl RdpView {
     /// After a stop, the same greeter (no later handover) may be retried.
     fn auto_gdm_retry_available(&self) -> bool {
         let a = self.auto_gdm.borrow();
-        !a.armed
-            && a.stopped_at.is_some()
-            && a.stopped_at
-                == self.connection.borrow().as_ref().and_then(|c| {
-                    let st = c.state.lock().unwrap();
-                    (st.phase == "connected").then_some(st.handovers)
-                })
-            && self
-                .profile_metadata
-                .borrow()
-                .as_ref()
-                .is_some_and(|p| auto_sign_in_missing(p).is_none())
+        self.connection.borrow().as_ref().is_some_and(|c| {
+            let st = c.state.lock().unwrap();
+            a.retry_on_greeter(
+                st.handovers,
+                st.phase == "connected"
+                    && st.frames > 0
+                    && !st.reactivating
+                    && st.verified_tls_sha256.is_some()
+                    && st.authentication_error.is_none(),
+            )
+        }) && self
+            .profile_metadata
+            .borrow()
+            .as_ref()
+            .is_some_and(|p| auto_sign_in_missing(p).is_none())
     }
     fn retry_auto_gdm(&self) {
         if !self.auto_gdm_retry_available() {
@@ -4244,6 +4345,7 @@ impl RdpView {
             if restart {
                 let mut a = self.auto_gdm.borrow_mut();
                 a.sequence = Default::default();
+                a.last_observation = None;
                 a.binding = None;
                 a.pending = None;
                 a.scan_binding = None;
@@ -4291,7 +4393,11 @@ impl RdpView {
                     return;
                 }
             };
-            let action = self.auto_gdm.borrow_mut().sequence.observe(&observation);
+            let action = {
+                let mut a = self.auto_gdm.borrow_mut();
+                a.last_observation = Some(observation.kind);
+                a.sequence.observe(&observation)
+            };
             if matches!(
                 action,
                 Action::Click(..) | Action::Username | Action::Password
@@ -4710,6 +4816,18 @@ impl RdpView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_retry_survives_a_later_handover_but_needs_a_verified_live_greeter() {
+        let mut a = AutoGdm::default();
+        assert!(!a.retry_on_greeter(1, true));
+        a.stopped_at = Some(1);
+        assert!(a.retry_on_greeter(1, true));
+        assert!(a.retry_on_greeter(2, true));
+        assert!(!a.retry_on_greeter(2, false));
+        assert!(!a.retry_on_greeter(0, true));
+        a.armed = true;
+        assert!(!a.retry_on_greeter(2, true));
+    }
     #[test]
     fn completed_login_rearms_only_for_a_later_verified_service_handover() {
         let mut a = AutoGdm::default();

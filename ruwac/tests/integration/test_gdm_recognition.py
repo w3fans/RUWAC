@@ -96,6 +96,32 @@ else:
     def test_unbranded_user_list_only_leads_to_the_not_listed_click(self):
         self.assertEqual(self.observe(self.unbranded_ocr()), 'users')
 
+    def small_link_ocr(self, recovered_confidence=96):
+        tool = self.root / 'small-link-ocr'
+        tool.write_text(f"""#!/usr/bin/python3
+from pathlib import Path
+import sys
+print('left\\ttop\\twidth\\theight\\tconf\\ttext')
+name = Path(sys.argv[1]).name
+if name in ['layout.png', 'user-link.png']:
+    confidence = 50 if name == 'layout.png' else {recovered_confidence}
+    x,y = (480,540) if name == 'layout.png' else (24,18)
+    print(f'{{x}}\\t{{y}}\\t30\\t12\\t{{confidence}}\\tNot')
+    print(f'{{x+34}}\\t{{y}}\\t44\\t12\\t{{confidence}}\\tlisted?')
+else:
+    print('30\\t30\\t150\\t30\\t99\\tEmail')
+""")
+        tool.chmod(0o700)
+        return tool
+
+    def test_small_user_link_requires_high_confidence_crop_confirmation(self):
+        self.assertEqual(self.observe(self.small_link_ocr()), 'users')
+        self.assertEqual(self.observe(self.small_link_ocr(69)), 'unknown')
+
+    def test_recovered_user_link_does_not_bypass_unknown_field_guard(self):
+        self.focus_boxes(1)
+        self.assertEqual(self.observe(self.small_link_ocr()), 'unknown')
+
     def test_unbranded_fields_need_a_sign_in_that_passed_the_login_screen(self):
         self.focus_boxes(1)
         tool = self.unbranded_ocr()

@@ -659,13 +659,33 @@ try:
    saved=command('gui','profile-editor',operation='inspect',response='connect');assert not saved['error'],saved
    frame=spike.eventually(decoded,20)
    before=frame['transport_id'];tab=frame['tab'];viewport=frame['viewport']
+   item=next(p for p in saved['items']if p['name']=='Generated reconnect host')
+   assert frame['selection_settings']=={'enabled':False,'paste':False}
+   # Production settings changes must reach this existing view on Reconnect.
+   # Port1 deliberately refuses the unrelated SSH bridge; this case exercises
+   # saved settings and the real RDP connection, not a remote desktop account.
+   subprocess.run([a.gui,'--receive-primary',item['id'],'fixture','wayland-77','1'],env=env,check=True,stdout=subprocess.DEVNULL)
+   subprocess.run([a.gui,'--paste-primary',item['id']],env=env,check=True,stdout=subprocess.DEVNULL)
    menu=command('gui','rdp-tab-menu',tab=tab,control='disconnect');assert menu['title']=='Generated reconnect host',menu
    lost=spike.eventually(lambda:r if (r:=command('gui','rdp-inspect',rdp=3)).get('reconnect_visible') else False,8)
    assert lost['viewport']==viewport
    command('gui','rdp-tab-menu',tab=tab,control='reconnect')
    fresh=spike.eventually(lambda:r if (r:=decoded()) and r['transport_id']!=before and not r['reconnect_visible'] else None,20)
+   assert fresh['selection_settings']=={'enabled':True,'paste':True},fresh
    assert [command('gui','rdp-inspect',rdp=i)['transport_id']for i in range(3)]==neighbors
    command('gui','close-rdp',rdp=3)
+   # A status message may belong to an earlier write (or earlier test). Wait
+   # for the actual editor snapshot to include BOTH external CLI changes.
+   # Cancel stale forms without saving; retain the production stale-save guard.
+   def editor_has_current_options():
+    command('gui','profiles',search='Generated reconnect host')
+    command('gui','profile-editor',operation='edit',response='keep')
+    try:
+     layouts=command('gui','profile-editor',operation='layout')['dialogs']
+     (root/'center-options-probe.json').write_text(json.dumps(layouts,indent=2)+'\n')
+     return any(d.get('selection_options')=={'primary-sync':True,'primary-paste':True}for d in layouts)
+    finally:command('gui','profile-editor',operation='inspect',response='cancel')
+   spike.eventually(editor_has_current_options,8)
    for _ in range(3):
     command('gui','profiles',search='Generated reconnect host')
     command('gui','profile-editor',operation='edit',response='keep');spike.eventually(mapped,10)
@@ -673,7 +693,10 @@ try:
     again=spike.eventually(decoded,20)
     assert [command('gui','rdp-inspect',rdp=i)['transport_id']for i in range(3)]==neighbors
     command('gui','close-rdp',rdp=3)
-   return {'editor_connect_cycles':4,'configured_profile':True,'center_card_visible_when_disconnected':True,'overlay_preserves_viewport':True,'tab_reconnect_actual_CredSSP_and_frame':True,'neighbors_preserved':True}
+   return {'editor_connect_cycles':4,'configured_profile':True,'center_card_visible_when_disconnected':True,'overlay_preserves_viewport':True,'tab_reconnect_actual_CredSSP_and_frame':True,'neighbors_preserved':True,'saved_selection_options_reloaded':True}
+  except Exception:
+   (root/'center-reconnect-failure.json').write_text(json.dumps({'frame':command('gui','rdp-inspect',rdp=3),'editor':command('gui','profile-editor',operation='inspect'),'last_save':saved},indent=2)+'\n')
+   raise
   finally:
    command('gui','close-rdp',rdp=3)
  case('RDP-NATIVE-CENTER-RECONNECT',center_reconnect)

@@ -2,7 +2,7 @@
 """Owned Wayland terminal menus and confirmed PRIMARY paste across a real RDP client.
 
 The generated RDP server supplies a synthetic framebuffer; its received middle
-state and packet counts gate a native button replay on the second private Mutter
+press serial and packet counts gate a native button replay on the second private Mutter
 seat. The pinned test server drops middle-button flags; its MouseEvent conversion
 is not evidence of wire-level middle-button correctness. Both GUIs and the
 SSH selection peer are production code. No owner desktop or real host is used.
@@ -18,7 +18,7 @@ a=parser.parse_args();assert os.environ.get('WAYLAND_DISPLAY')=='ruwac-test' and
 # Keep software renderers, icon loaders and Tokio within the existing task
 # budget on large hosts. This restricts resources; it never raises the limit.
 os.sched_setaffinity(0, sorted(os.sched_getaffinity(0))[:2])
-root=Path(tempfile.mkdtemp(prefix='t-',dir=a.evidence));root.chmod(0o700);children=[];inputs=[];checks=[];sequences={};forwarded=0;middle_events=[];gesture_baseline=None;replay_down=False
+root=Path(tempfile.mkdtemp(prefix='t-',dir=a.evidence));root.chmod(0o700);children=[];inputs=[];checks=[];sequences={};forwarded=0;middle_events=[];gesture_baseline=None;replay_down=False;active_rdp=0
 def load(path):
  try:return json.loads(path.read_text())
  except(OSError,ValueError):return {}
@@ -48,6 +48,7 @@ def resources(stage):
  (root/('resources-'+stage+'.json')).write_text(json.dumps(rows,indent=2))
 
 def command(who,action,**kw):
+ if who=='source' and action in ['rdp-switch','rdp-inspect','rdp-pointer','rdp-policy'] and 'rdp'not in kw:kw['rdp']=active_rdp
  directory=root/who;seq=sequences.get(who,0)+1;sequences[who]=seq
  write(directory/'gui-request.json',dict(seq=seq,action=action,**kw))
  try:return eventually(lambda:v['result']if(v:=load(directory/'gui-response.json')).get('seq')==seq else None,12)
@@ -112,10 +113,11 @@ def forward_middle():
  if gesture_baseline is None:return events
  state=command('source','rdp-pointer')
  # ironrdp-server 0.13 loses middle flags in its fast-path conversion. Check
- # the real client's held state and received packet counts independently of
+ # the real client's middle-press serial and received packet counts independently of
  # the native target paste. No synthetic keyboard or left-click is used.
- delivered=len(events)-gesture_baseline
- if not replay_down and (state['held_buttons']==1 or delivered>=3):
+ delivered=len(events)-gesture_baseline[0]
+ pressed=state['middle_presses']>gesture_baseline[1]
+ if not replay_down and pressed and delivered>=2:
   button(remote_input,274,True);middle_events.append('down');replay_down=True
  if replay_down and state['held_buttons']==0 and not state['state']['selection_paste_pending']:
   button(remote_input,274,False);middle_events.append('up');replay_down=False;gesture_baseline=None
@@ -127,11 +129,11 @@ def rdp_focus():
  assert command('receiver','inspect')['active']
  info=command('receiver','inspect');ox,oy=info['area_origin'];move(remote_input,ox+80,oy+80)
 
-def middle(release=True):
+def middle(release=True, disabled_route=False):
  global gesture_baseline
- gesture_baseline=len(load(root/'source'/('input-'+str(port)+'.mouse.json')).get('events',[]))
+ gesture_baseline=(len(load(root/'source'/('input-'+str(port)+'.mouse.json')).get('events',[])),command('source','rdp-pointer')['middle_presses'])
  info=command('source','rdp-inspect');w,h=info['viewport'];x,y=w*.5,h*.5
- command('source','rdp-pointer',x=x,y=y,button=2,release=False)
+ command('source','rdp-pointer',x=x,y=y,button=2,release=False,disable_primary_paste=disabled_route)
  if release:command('source','rdp-pointer',x=x,y=y,button=2,release=True)
  return x,y
 
@@ -199,23 +201,31 @@ try:
  subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=generated-loopback','-addext','subjectAltName=IP:127.0.0.1','-keyout',str(source/'key.pem'),'-out',str(source/'cert.pem')],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);(source/'key.pem').chmod(0o600)
  start([a.server,source],'RDP-server',env_local);ready=eventually(lambda:load(source/'server-ready.json'),12);port=ready['ports'][0]
  profile={'id':'endpoint_primary_terminal','machine_id':'machine_primary_terminal','name':'Generated RDP desktop','group':'','protocol':'RDP','server':'127.0.0.1:'+str(port),'username':'fixture','secret_reference':'generated','favorite':False,'last_used':0,'tags':[],'preferences':{'primary_sync':True,'primary_paste':True,'primary_user':'fixture','primary_display':'wayland-77','clipboard':0}}
- path=Path(env_local['XDG_CONFIG_HOME'])/'RUWAC/machines.json';path.write_text(json.dumps({'schema':1,'items':[profile],'groups':[]}));path.chmod(0o600)
+ profile_b={**profile,'id':'endpoint_primary_terminal_b','machine_id':'machine_primary_terminal_b','name':'Generated second RDP connection','server':'127.0.0.1:'+str(ready['ports'][1]),'preferences':dict(profile['preferences'])}
+ path=Path(env_local['XDG_CONFIG_HOME'])/'RUWAC/machines.json';path.write_text(json.dumps({'schema':1,'items':[profile,profile_b],'groups':[]}));path.chmod(0o600)
  source_program=root/'source.py';payload='GENERATED_terminal_Ž\nsecond_line_end'
  source_program.write_text('import os,tty\ntty.setraw(0)\nos.write(1,b"READY")\nwhile True:\n b=os.read(0,4096)\n if b==b"q":break\n if b in [b"s",b"m"]:\n  os.write(1,(b"\\x1b[?1000h\\x1b[?1006h" if b==b"m" else b"\\x1b[?1000l\\x1b[?1006l")+b"\\x1b[3J\\x1b[2J\\x1b[H"+'+repr(payload.replace('\n','\r\n').encode())+')\n')
  target=root/'target.py';target.write_text('import os,sys,tty\nfrom pathlib import Path\ntty.setraw(0)\np=Path(sys.argv[1]);p.write_bytes(b"")\nos.write(1,b"GENERATED_TARGET_READY\\x1b[?2004h")\nwhile True:\n b=os.read(0,4096)\n if not b:break\n with p.open("ab")as f:f.write(b)\n')
  local_socket=source/'control.sock';remote_socket=receiver/'control.sock'
  for sock,env,name in [(local_socket,env_local,'local-daemon'),(remote_socket,env_remote,'remote-daemon')]:start([a.binary,'--socket',sock,'serve'],name,env);eventually(sock.exists)
  left=rpc(local_socket,'session.create',{'name':'Generated source','argv':[sys.executable,str(source_program)]});right=rpc(remote_socket,'session.create',{'name':'Generated target','argv':[sys.executable,str(target),str(root/'received.bin')]})
- start([a.gui,'--new-instance','--socket',local_socket,'--session',left['session'],'--fixture-dir',source],'local-GUI',env_local)
+ local_target=rpc(local_socket,'session.create',{'name':'Generated local paste target','argv':[sys.executable,str(target),str(root/'received-local.bin')]})
+ local_nested=rpc(local_socket,'session.create',{'name':'Generated local nested target','argv':[a.binary,'--socket',str(local_socket),'attach','--session',local_target['session']]})
+ start([a.gui,'--new-instance','--socket',local_socket,'--session',left['session'],'--session',local_nested['session'],'--fixture-dir',source],'local-GUI',env_local)
  start([a.gui,'--new-instance','--socket',remote_socket,'--session',right['session'],'--fixture-dir',receiver],'remote-GUI',env_remote)
+ command('source','focus-view',view=0)
  eventually(lambda:command('source','inspect').get('target')==left['pane'],20);eventually(lambda:command('receiver','inspect').get('target')==right['pane'],20)
  fullscreen('source',local_input);fullscreen('receiver',remote_input)
  front_socket=runtime/'ruwac';front_socket.mkdir(mode=0o700);proxy=root/'proxy.py';proxy.write_text(proxy_source);start([sys.executable,proxy,front_socket/'control.gui.sock',remote_socket.with_suffix('.gui.sock'),root],'GUI-IPC-delay-proxy',env_remote);eventually(lambda:(root/'proxy-ready').exists())
  rpc(local_socket,'pane.sendText',{'pane':left['pane'],'text':'s'});time.sleep(.25)
- empty=command('source','rdp-tab-menu',tab=0,control='inspect');assert 'Copy'in empty['menu'] and 'Dynamic resolution'not in empty['menu'] and empty['enabled']['paste'] and not empty['enabled']['copy'];mark('terminal-tabs-show-terminal-actions-instead-of-disabled-RDP-menu')
+ empty=command('source','rdp-tab-menu',tab=0,control='inspect');assert empty['stable_model'] and empty['presented_menu']==empty['menu'];assert 'Copy'in empty['menu'] and 'Dynamic resolution'not in empty['menu'] and empty['enabled']['paste'] and not empty['enabled']['copy'];mark('terminal-tabs-show-terminal-actions-instead-of-disabled-RDP-menu')
  text=select_source();menu=command('source','rdp-tab-menu',tab=0,control='inspect');assert menu['enabled']['copy'];mark('live-terminal-selection-is-copyable')
  resources('before-rdp');command('source','rdp-open',port=port,profile=profile);eventually(lambda:command('source','rdp-inspect').get('metrics',{}).get('decoded_updates',0)>0,20);rdp_focus()
- rdp_menu=command('source','rdp-tab-menu',tab=1,control='inspect');assert 'Dynamic resolution'in rdp_menu['menu']and 'Copy'not in rdp_menu['menu'];mark('RDP-tabs-retain-their-own-connection-menu')
+ rdp_menu=command('source','rdp-tab-menu',tab=2,control='inspect');assert rdp_menu['stable_model'] and rdp_menu['presented_menu']==rdp_menu['menu'];assert 'Dynamic resolution'in rdp_menu['menu']and 'Copy'not in rdp_menu['menu']and 'Retry automatic sign-in'in rdp_menu['menu'];mark('RDP-tabs-retain-their-own-connection-menu')
+ before=len(middle_events);middle(disabled_route=True);time.sleep(.25);forward_middle()
+ assert len(middle_events)==before and contents()==b'' and not (root/'proxy-started').exists()
+ assert 'disabled for this connection' in command('source','rdp-inspect')['mouse_selection']
+ mark('disabled-selection-route-blocks-local-selection-instead-of-pasting-unrelated-remote-text')
  before=len(middle_events);middle();eventually(lambda:not command('source','rdp-inspect')['selection_paste_pending'],8);forward_middle();assert len(middle_events)==before and contents()==b'';mark('remote-reception-default-deny-does-not-paste-stale-PRIMARY')
  subprocess.run([a.gui,'--enable-primary-receive'],env=env_remote,check=True,stdout=subprocess.DEVNULL)
  expected=b'\x1b[200~'+text.encode()+b'\x1b[201~';x,y=middle(release=False);eventually(lambda:('down'in middle_events)or (forward_middle()and 'down'in middle_events),10);command('source','rdp-pointer',x=x,y=y,button=2,release=True);wait_input(expected);assert middle_events[-2:]==['down','up'];mark('confirmed-remote-primary-then-real-middle-paste-preserves-multiline-Unicode')
@@ -252,17 +262,43 @@ try:
  else:raise AssertionError('Independent PRIMARY consumer could not gain focus')
  eventually(lambda:peer_command('local-peer','read',which='primary')==remote_selection,10)
  rdp_focus()
+ # A selection from this very desktop must keep its native middle-click path,
+ # including with the optional inbound receiver and cross-desktop paste off.
+ subprocess.run([a.gui,'--disable-primary-receive'],env=env_remote,check=True,stdout=subprocess.DEVNULL)
+ same_before=contents();same_proxy=(root/'proxy-started').read_text();middle(disabled_route=True)
+ wait_input(same_before+b'\x1b[200~'+remote_selection.encode()+b'\x1b[201~')
+ assert (root/'proxy-started').read_text()==same_proxy
+ check_clipboards();mark('same-RDP-native-selection-pastes-without-cross-desktop-receiver')
+ subprocess.run([a.gui,'--enable-primary-receive'],env=env_remote,check=True,stdout=subprocess.DEVNULL)
+ # Keep the original confirmed-path requirement for another connection. The
+ # two actual RDP transports share this generated peer desktop, not real hosts.
+ port=ready['ports'][1]
+ command('source','rdp-open',port=port,profile=profile_b);active_rdp=1
+ eventually(lambda:command('source','rdp-inspect').get('metrics',{}).get('decoded_updates',0)>0,20)
+ rdp_focus()
  previous=(root/'proxy-started').read_text();before=contents();middle()
  eventually(lambda:(root/'proxy-started').read_text()!=previous,8)
  wait_input(before+b'\x1b[200~'+remote_selection.encode()+b'\x1b[201~')
  check_clipboards();mark('RDP-origin-PRIMARY-remains-pasteable-through-confirmed-tab-path')
+ # Match an editor selection in one remote desktop followed by a native middle
+ # click in an outer terminal tab. Its nested TUI must receive a paste, rather
+ # than choosing an unrelated canonical session buffer.
+ front('source',local_input);command('source','focus-view',view=1)
+ eventually(lambda:command('source','inspect',view=1).get('target')==local_nested['pane'],10)
+ info=command('source','inspect',view=1);ox,oy=info['area_origin']
+ move(local_input,ox+25,oy+25);button(local_input,274,True);button(local_input,274,False)
+ local_expected=b'\x1b[200~'+remote_selection.encode()+b'\x1b[201~'
+ eventually(lambda:(root/'received-local.bin').read_bytes()==local_expected,10)
+ check_clipboards();mark('RDP-origin-selection-pastes-exactly-into-outer-nested-terminal-tab')
+ rdp_focus()
+
  # Invalid write requests are refused by the actual native receiver without
  # exposing any read or input operation through the GUI API.
  for value in [{'text':''},{'text':'x\0y'},{'text':'x'*(128*1024+1)},{'text':'test','extra':True}]:
   with Client(remote_socket.with_suffix('.gui.sock'))as client:
    client.call('clipboard.primary.offer',value,error='INVALID_REQUEST' if len(value)!=1 else 'PRIMARY_REFUSED')
  mark('receiver-rejects-empty-NUL-oversized-and-extra-field-requests')
- (root/'acceptance.json').write_text(json.dumps({'PASS':True,'checks':checks,'production_GUI_and_peer':True,'native_Wayland_desktops':2,'RDP':'authenticated generated loopback framebuffer; client held state and received packet counts gate native private-seat replay; pinned server drops middle flags, no wire-level middle-button assertion','SSH':'stand-in executes exact production peer command','physical_input':False,'owner_desktop_used':False},indent=2)+'\n')
+ (root/'acceptance.json').write_text(json.dumps({'PASS':True,'checks':checks,'production_GUI_and_peer':True,'native_Wayland_desktops':2,'RDP':'authenticated generated loopback framebuffer; client middle-press serial and received packet counts gate native private-seat replay; pinned server drops middle flags, no wire-level middle-button assertion','SSH':'stand-in executes exact production peer command','physical_input':False,'owner_desktop_used':False},indent=2)+'\n')
 finally:
  for call in reversed(inputs):
   try:call('Stop')

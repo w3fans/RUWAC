@@ -234,6 +234,8 @@ Contribution and repository checks: see [CONTRIBUTING.md](CONTRIBUTING.md), [SEC
 
 Native windows, the overlay sidebar and GNOME dual-credential storage are documented in [GNOME login and desktop windows](spec/RUWAC_GNOME_LOGIN.md). GNOME modes support the non-AVC Graphics Pipeline and verified same-endpoint RDSTLS handover. Real Fedora GDM rendering is tested; Linux user sign-in remains a separate explicit action.
 
+RUWAC agent connections check and display the remote CLI version and executable path on every attachment. Enable “Check and update RUWAC on agent connection” in the machine properties to check verified published releases and update an existing per-user installation as well as installing a missing CLI. If an update check fails, the connection reports the failure and tries the installed CLI. Existing engines and sessions keep running; a newer CLI does not replace them. Per-user installations use `ruwac update --check` / `ruwac update --install`; `ruwac-rpm-update` belongs to system RPM installations.
+
 Fedora 44 updates: use Main menu → Updates or `ruwac update --check` and `ruwac update --install`. Automatic checks announce newer stable GitHub releases; per-user installations support source builds or explicitly selected testing bundles, retaining active sessions and the previous version. Bundle updates require `gh` to verify signed build provenance before installation. System installations use the release RPMs and DNF. See [prerequisites, bootstrap and rollback](spec/RUWAC_UPDATES.md).
 
 The native Files view supports SFTP and verified staged rsync copies of files and folders. See [SSH file transfers](spec/RUWAC_FILES.md) for authentication, replacement and cancellation behavior.
@@ -413,13 +415,17 @@ ruwac-desktop --receive-primary ENDPOINT_ID LINUX_SSH_USER wayland-0 0
 ruwac-desktop --disable-primary ENDPOINT_ID
 ```
 
-Reopen the RDP tab after enabling it. Disabling or changing the saved route stops
-its existing selection helper; running terminal processes remain independent.
+Reconnect the RDP tab after enabling it to load the saved options. If its saved
+host, user, credential reference or certificate trust changed, reopen it from
+Machines instead. Disabling or changing the saved route stops its existing
+selection helper; running terminal processes remain independent.
 
 ### Terminal menus and selection paste into remote RUWAC
 
 Terminal tabs have **Copy**, **Paste**, **Paste selection**, **Select text…** and
-**Close tab** actions. RDP tabs retain their connection/display actions. Copying
+**Close tab** actions. RDP tabs retain their connection/display actions and
+**Retry automatic sign-in**, available for a stopped attempt on a verified
+connected GNOME greeter. Copying
 retained text is also available after a terminal session ends; pasting into an
 ended session is disabled. The terminal's own context menu includes these actions
 above the saved hosts. Applications using mouse input keep their right-click;
@@ -432,9 +438,12 @@ configure the Linux selection-sharing route above and enable **Middle-click
 pastes local terminal selections into remote RUWAC** on its RDP endpoint. In the
 receiving GUI's Controls menu enable **Receive mouse selections from another
 RUWAC desktop**. Both GUIs must support this feature, and the receiving RUWAC
-window must already have focus on its desktop. Select the source text, switch
+window must already have focus on its desktop. With mouse-selection sharing enabled, disabling local selection paste causes a clear refusal for selections from outside that remote desktop. Native selections within the same desktop keep their normal mouse path. Select the source text, switch
 to the RDP tab and middle-click the remote terminal. Programs handling the mouse
 can use **Select text…** or Shift+drag for the source selection.
+
+A selection belonging to the same RDP connection keeps its native middle-click
+path within that desktop, including when cross-desktop selection paste is off.
 
 The existing trusted SSH peer asks the foreground native GUI to publish PRIMARY,
 confirms the complete selection through the compositor, and only then forwards

@@ -17,3 +17,20 @@ For unsupported screens, use **Assisted GNOME Sign-in** in the toolbar or RDP co
 Use New window for independent saved workspaces sharing the persistent daemon. Alt+1–9/0 switches tabs within each window. Live RDP transports stay in their process. On owner-authorized publication, the installed latest frontend replaces the older owner frontend after open dialogs close, preserving daemon PTYs and saved layouts.
 
 Machines overlays content by default. Ctrl+K opens search; Escape/tab selection hides it. Preferences controls width and pinning. Dynamic resolution starts at 100%; manual zoom switches to Fit, and received frames acknowledge pending resolution requests. New terminals use the configured user login shell; existing sessions are preserved.
+
+A small “Not listed?” button with a low-confidence full-layout OCR result is
+rechecked in a tight local crop. Only a single complete link meeting the original
+confidence threshold is accepted. Low-confidence text only locates that crop;
+it cannot authorize typing, bypass an unknown focused field, or skip the ordered
+username/password sequence. This recognizer regression is separate from physical
+acceptance on an owner’s remote login screen.
+
+Read-only RDP metadata reports the automatic sign-in stage and last recognized
+screen kind. It contains neither captured images nor OCR text or credentials,
+so a stopped user-list/username/password transition can be diagnosed separately
+from transport or credential availability.
+
+The workspace description also reports `gui_version` for the running GUI.
+An installed CLI version does not identify an already-open GUI process.
+
+Explicit retry is also available from the RDP tab menu. A stopped attempt may be retried on a later verified connected greeter handover; this requires a decoded frame and verified TLS without transport authentication errors. It resets screen recognition and does not automatically repeat a submitted password. Reconnect reloads saved selection/sign-in options only for the same saved host, service user, credential reference and trust; changed transport identity requires reopening the saved machine.

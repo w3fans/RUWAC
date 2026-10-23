@@ -816,6 +816,23 @@ def install(release, prefix, cache, desktop=True, automatic=False, prebuilt=Fals
         os.close(lock)
 
 
+def remote_cli_version(binary):
+    """Inspect the selected SSH executable, with the same user-local fallback."""
+    executable = shutil.which(binary)
+    if executable is None and binary == 'ruwac':
+        candidate = Path.home() / '.local/bin/ruwac'
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            executable = str(candidate)
+    if executable is None:
+        return '0.0.0'
+    result = subprocess.run([executable, '--version'], capture_output=True, text=True, timeout=5)
+    match = re.fullmatch(r'RUWAC ([0-9]+\.[0-9]+\.[0-9]+)\s*', result.stdout)
+    if result.returncode or not match:
+        raise ValueError('Selected remote RUWAC executable has an invalid version')
+    version(match[1])
+    return match[1]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group(required=True)
@@ -830,6 +847,7 @@ def main():
     modes.add_argument('--auto-check', choices=['on', 'off', 'status'])
     modes.add_argument('--testing-bundles', choices=['on', 'off', 'status'])
     parser.add_argument('--current', default='0.0.0')
+    parser.add_argument('--remote-cli', help='Check the executable selected for a remote agent before a verified per-user update')
     parser.add_argument('--prefix', type=Path, default=Path.home() / '.local')
     parser.add_argument('--headless', action='store_true')
     parser.add_argument('--running-executable', help=argparse.SUPPRESS)
@@ -838,6 +856,10 @@ def main():
     if not args.bootstrap and args.current == '0.0.0':
         parser.error('--current is required except for bootstrap installation')
     version(args.current)
+    if args.remote_cli:
+        if not args.bootstrap or args.managed_rpm:
+            parser.error('--remote-cli requires per-user bootstrap mode')
+        args.current = max(args.current, remote_cli_version(args.remote_cli), key=version)
     if args.managed_rpm:
         if args.auto_install:
             result = rpm_operation(args.auto_install)
@@ -886,6 +908,8 @@ def main():
             os.close(lock)
     else:
         installed = installed_version(prefix, '0.0.0' if args.bootstrap else args.current)
+        if args.remote_cli:
+            installed = max(installed, args.current, key=version)
         delivery = 'testing-bundle' if args.prebuilt or (not args.headless and testing_bundle_setting()) else 'source-build'
         result = verified_status(installed, delivery)
         result = installation_status(result, installation_identity(prefix, args.current, args.running_executable))
