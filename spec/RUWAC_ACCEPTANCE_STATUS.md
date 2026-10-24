@@ -4,6 +4,34 @@ Public results summarize qualification without publishing host identities, accou
 network topology, credential references or operational troubleshooting. Detailed
 receipts and original reports are archived privately outside Git.
 
+## Released v0.4.40 baseline — reconciled 2026-10-24
+
+Commit `5b62c3404397bd7591e5f5c9351a77ff96178619` completed all nineteen
+required frozen acceptance categories. All nine published assets passed integrity,
+provenance and installation qualification; nine actual-public runtime phases
+passed, including terminal ergonomics, RDP clipboard ordering and native Web Preview
+with original-SSH routing. The eight terminal ergonomics cases cover full-screen
+wheel up/down, click-only mouse mode and offset splits as well as clipboard/SIGINT
+and inline history. These are generated native input and authenticated fixtures,
+not a physical keyboard/touchpad or external-provider conversation pass.
+
+Actual owner external GNOME sign-in, Windows interoperability, physical Wayland
+input, clipboard-manager persistence and generic cross-host Wayland PRIMARY
+injection remain unqualified. The RSA advisory remains unresolved; see
+[dependency security](RUWAC_DEPENDENCY_SECURITY.md). Reopening after installation
+loads the new GUI while preserving daemon-owned terminal processes; reconnecting
+RDP after reopening is an accepted boundary.
+
+New changes after this baseline require their own frozen acceptance and public
+artifact qualification. In particular, the current remote-selection epoch fix is
+development work, not part of the v0.4.40 receipt.
+
+## Historical prepublication notes and earlier evidence
+
+The notes below retain what was known before v0.4.40's final release. References
+to a changed candidate or a run still required are historical and do not undo the
+completed baseline above. They also cannot qualify a later changed candidate.
+
 Prior published baseline (2026-10-23): v0.4.39, commit
 `8e792df38731a1b6c11a9896f965ca33de4023b2`, completed all 16 required frozen
 local gate categories, retained 72 runtime/artifact groups, and verified all nine

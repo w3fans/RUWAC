@@ -133,6 +133,7 @@ def xlib():
         "XDeleteProperty": ([d,u,u],i),
         "XGetSelectionOwner": ([d,u],u),
         "XFlush": ([d],i),
+        "XSync": ([d,i],i),
         "XPending": ([d],i),
         "XNextEvent": ([d,c.c_void_p],i),
         "XConnectionNumber": ([d],i),
@@ -145,6 +146,63 @@ def xlib():
         getattr(lib,name).argtypes=args;getattr(lib,name).restype=result
     XLIB=lib
     return lib
+
+
+class SelectionChanges:
+    """Track server ownership changes independently of GDK's initial notification."""
+    def __init__(self):
+        import ctypes as c
+        self.lib = xlib()
+        self.display = self.lib.XOpenDisplay(os.environ["DISPLAY"].encode())
+        if not self.display:
+            raise ValueError("Desktop selection display is unavailable")
+        self.window = 0
+        self.count = 0
+        try:
+            fixes = c.CDLL("libXfixes.so.3")
+            fixes.XFixesQueryExtension.argtypes = [c.c_void_p,c.POINTER(c.c_int),c.POINTER(c.c_int)]
+            fixes.XFixesQueryExtension.restype = c.c_int
+            fixes.XFixesQueryVersion.argtypes = [c.c_void_p,c.POINTER(c.c_int),c.POINTER(c.c_int)]
+            fixes.XFixesQueryVersion.restype = c.c_int
+            fixes.XFixesSelectSelectionInput.argtypes = [c.c_void_p,c.c_ulong,c.c_ulong,c.c_ulong]
+            fixes.XFixesSelectSelectionInput.restype = None
+            event, error = c.c_int(), c.c_int()
+            major, minor = c.c_int(1), c.c_int(0)
+            if not fixes.XFixesQueryExtension(self.display,c.byref(event),c.byref(error)) or not fixes.XFixesQueryVersion(self.display,c.byref(major),c.byref(minor)):
+                raise ValueError("Desktop selection change tracking is unavailable")
+            self.event = event.value
+            self.primary = self.lib.XInternAtom(self.display,b"PRIMARY",0)
+            self.window = self.lib.XCreateSimpleWindow(self.display,self.lib.XDefaultRootWindow(self.display),-1,-1,1,1,0,0,0)
+            fixes.XFixesSelectSelectionInput(self.display,self.window,self.primary,7)
+            self.revision()  # Discard any subscription snapshot before accepting a mode.
+        except BaseException:
+            self.close()
+            raise
+
+    def revision(self):
+        import ctypes as c
+        class Selection(c.Structure):
+            _fields_ = [("type",c.c_int),("serial",c.c_ulong),("send_event",c.c_int),("display",c.c_void_p),("window",c.c_ulong),("subtype",c.c_int),("owner",c.c_ulong),("selection",c.c_ulong),("timestamp",c.c_ulong),("selection_timestamp",c.c_ulong)]
+        class Event(c.Union):
+            _fields_ = [("type",c.c_int),("selection",Selection),("pad",c.c_long*24)]
+        # GDK and this monitor use independent connections. A round trip drains
+        # ownership changes already processed before GDK emitted its callback.
+        self.lib.XSync(self.display,0)
+        for _ in range(4096):
+            if not self.lib.XPending(self.display):
+                return self.count
+            event = Event()
+            self.lib.XNextEvent(self.display,c.byref(event))
+            if event.type == self.event and not event.selection.send_event and event.selection.selection == self.primary:
+                self.count += 1
+        raise ValueError("Desktop selection notification limit exceeded")
+
+    def close(self):
+        if self.display:
+            if self.window:
+                self.lib.XDestroyWindow(self.display,self.window)
+            self.lib.XCloseDisplay(self.display)
+            self.display = None
 
 
 def read_primary_bytes():
@@ -248,6 +306,7 @@ class Primary:
         self.reading = False
         self.queued = None
         self.changed = changed
+        self.changes = SelectionChanges()
         self.clip.connect("changed", self.on_change)
 
     def on_change(self, clip):
@@ -373,7 +432,11 @@ class Peer:
         self.last_heartbeat = time.monotonic()
         self.local = local
         self.primary = Primary(self.changed)
-        self.initial = True
+        # Classify the selection event, not the first successful read after a
+        # mode change. A fresh selection in this active epoch must supersede
+        # another tab's selection even when it is the first one we have read.
+        self.changed_epoch = None
+        self.mode_revision = self.primary.changes.revision()
         self.allow_offer = False
         self.offering = False
         self.pipe = Pipe(source, target, self.message, loop.quit)
@@ -389,6 +452,7 @@ class Peer:
 
     def changed(self):
         self.dirty = True
+        self.changed_epoch = self.epoch if self.enabled and self.primary.changes.revision() > self.mode_revision else None
         if self.timer:
             GLib.source_remove(self.timer)
         def settled():
@@ -401,10 +465,10 @@ class Peer:
         if not self.enabled:
             return
         epoch = self.epoch
+        initial = self.changed_epoch != epoch
         self.dirty = False
         def ready(text):
             if self.enabled and self.epoch == epoch:
-                initial, self.initial = self.initial, False
                 self.pipe.send({"type":"text", "epoch":epoch, "initial":initial, "text":text})
         self.primary.read(ready)
 
@@ -424,7 +488,8 @@ class Peer:
                 # A local selection may have replaced our last delivery while
                 # this remote canvas was inactive. Equal text is a new copy.
                 self.primary.last_digest = None
-                self.initial = True
+                self.changed_epoch = None
+                self.mode_revision = self.primary.changes.revision()
             self.epoch = epoch
             self.enabled = value["send"] is True
             self.receive_enabled = value["receive"] is True
@@ -475,13 +540,17 @@ def run():
     if sys.argv[1] == "--peer":
         peer = Peer(0, 1)
         peer.pipe.send({"type":"hello"})
-        loop.run()
+        try:
+            loop.run()
+        finally:
+            peer.primary.changes.close()
         return
     argv = json.loads(sys.argv[2])
     if not isinstance(argv, list) or not argv or argv[0] != "ssh" or not all(isinstance(x, str) for x in argv):
         raise ValueError("Expected a reviewed SSH command")
     child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=sys.stderr if os.environ.get("RUWAC_PRIMARY_TRACE") == "1" else subprocess.DEVNULL)
+    local = None
     try:
         local = Peer(child.stdout.fileno(), child.stdin.fileno(), local=True)
         # Peer.send addresses the opposite desktop; local messages require the
@@ -508,6 +577,8 @@ def run():
         Pipe(0, 1, control, loop.quit)
         loop.run()
     finally:
+        if local is not None:
+            local.primary.changes.close()
         child.stdin.close()
         child.terminate()
         try:

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v0.4.41 — 2026-10-24 — Stable source release
+
+- Update crypto-bigint to 0.7.6 for RUSTSEC-2026-0387 and its compatible ctutils
+  dependency to 0.4.5. The existing RSA advisory remains unresolved.
+- Preserve the first new remote mouse selection after returning to an RDP tab.
+  Correlate its epoch with actual X11 ownership notifications, so it can replace
+  an older terminal/tab selection while initial GDK notifications, background
+  snapshots and late replies stay guarded.
+
 ## v0.4.40 — 2026-10-23 — Stable source release
 
 - Forward wheel events to full-screen mouse applications such as Codex even when

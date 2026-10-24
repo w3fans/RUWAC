@@ -1,25 +1,25 @@
-# Explicit SSH checks and reliable update readiness
+# Keep the first new remote selection when switching tabs
 
-RUWAC contacts saved machines for key-access checks only after **Check now**.
-Checks use public-key-only OpenSSH authentication and existing host trust,
-including configured jump routes. Results identify the accepted SHA-256 key
-when known. Additions start unselected and require a separate confirmation;
-changed inventory, keys or trust invalidate the result. Closing the review
-cancels its owned helpers. Existing credentials and chosen identities are retained.
+After returning to an RDP tab, the first new mouse selection could be classified
+as an initial snapshot. If a terminal or another RDP tab already owned a selection,
+RUWAC could retain that older text instead. The relay now records the epoch in
+which the selection actually changed, using server ownership notifications to
+distinguish it from GDK's initial snapshot: a new selection in the active desktop
+can replace older text, while background snapshots and late replies remain guarded.
+PRIMARY and the Ctrl+C/V clipboard stay separate.
 
-Update controls distinguish the latest published tag, latest eligible release,
-installed version and running frontend, including mixed installations. Failed
-quality/privacy checks or missing package/attestation assets hold installation
-with a specific reason. Downloaded hashes and provenance are verified before
-installation; installed receipts, command links and binary hashes are checked
-before reporting success. Publication requires artifact-bound frozen technical gates and
-exact-commit hosted quality/privacy checks.
+The desktop lockfile also updates crypto-bigint to 0.7.6 for
+[RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387.html),
+with compatible ctutils 0.4.5. The separate RSA advisory remains unresolved.
 
-RPM directory modes are explicit, and repeated assembly varies the inherited
-default ACL. Running daemons and terminals are preserved by installation;
-reopen the frontend when ready. RDP reconnects after reopening are the accepted
-lifetime boundary.
+Regression coverage includes the first deliberate selection after a mode change,
+inactive snapshots, late completion, independent X11 INCR transfer, Unicode,
+multiline text, size limits and preservation of both Ctrl+C/V clipboards.
+The acceptance ledger now separates the completed v0.4.40 baseline from its
+historical prepublication notes and later development candidates.
 
-External Windows, physical input and provider-account qualification remain
-separate from generated fixtures. The documented RSA dependency advisory and
-signed Fedora repository qualification remain open.
+Reopen the GUI after updating to load the new relay. Daemon-owned terminal
+processes remain available; RDP reconnects after reopening. Physical touchpad,
+clipboard-manager behavior, generic cross-host Wayland PRIMARY injection and
+external GNOME/Windows qualification remain separate limits. The known RSA
+dependency advisory remains unresolved.

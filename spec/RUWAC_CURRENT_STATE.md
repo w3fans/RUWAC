@@ -5,6 +5,13 @@ instructions. [The functionality audit](RUWAC_FUNCTIONALITY_AUDIT.md) tracks
 requirements and distinguishes implementation from full acceptance. Versioned
 receipts are summarized in [acceptance status](RUWAC_ACCEPTANCE_STATUS.md).
 
+Reconciled baseline (2026-10-24): v0.4.40 delivered terminal shortcut/inline-history
+changes, full-screen wheel routing, correlated clipboard transactions and native
+ephemeral Web Preview. Nineteen required frozen categories and nine actual-public
+runtime phases passed. This does not qualify physical input, every external host
+or the unresolved RSA advisory. Installed updates take effect only after reopening
+the GUI; running older engines keep their behavior and terminal processes.
+
 The Linux daemon owns terminal processes independently of the optional GTK
 frontend. Closing a frontend detaches; new engines drain final output before
 reporting exit. After engine loss, saved history/layout are recovered as ended
@@ -34,8 +41,9 @@ GNOME Remote Login has separate service and Linux-user credentials and optional
 automatic sign-in for the supported recognized English greeter. Actual targeted
 Fedora journeys and generated loopback RDP tests exist; they do not establish all
 Windows display/clipboard, mixed-external-host or physical-input acceptance.
-RDP transports still belong to the GUI process, so seamless frontend replacement
-with a retained RDP transport remains unfinished.
+RDP transports belong to the GUI process. The owner accepts reconnection after
+reopening; seamless transport preservation across frontend replacement is not a
+completion requirement. Daemon-owned terminal persistence remains required.
 
 Public source builds use Cargo and the source installer. External target paths
 are explicit; archive installs keep their verified artifact paths. Source releases,

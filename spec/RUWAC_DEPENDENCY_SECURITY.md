@@ -1,5 +1,22 @@
 # RUWAC dependency security assessment
 
+Release qualification update (2026-10-24): a fresh unsuppressed scan discovered
+[RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387.html)
+in crypto-bigint 0.7.5. The pending release now locks crypto-bigint 0.7.6 and
+ctutils 0.4.5, using the compatible upstream patch. The advisory covers timing
+variability in arithmetic intended to be constant-time; upstream identifies
+0.7.6 as patched. This does not resolve the separate RSA finding. Fresh build,
+scan and runtime qualification are required before this candidate is delivered.
+
+Published baseline reconciliation (2026-10-24): v0.4.40 includes the compatible
+patches described below and completed frozen/native/public-artifact acceptance.
+Its hosted unsuppressed scanner reports RUSTSEC-2023-0071 for the desktop, no
+headless vulnerabilities, and the two documented maintenance warnings. Hosted
+quality/privacy and package builds passed; the advisory job remains nonzero.
+The following candidate notes and older assessment are dated history, not a
+claim that v0.4.39 remains the latest delivered build. Any future dependency
+change requires a fresh scan and runtime qualification.
+
 Current remediation candidate (2026-10-23): the desktop lockfile resolves
 `rustls-webpki 0.103.16` and `ctutils 0.4.4`; both workspaces pin Tokio 1.53.3.
 The Tokio patch also removes the unsoundness warning RUSTSEC-2026-0386 found
