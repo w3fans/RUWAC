@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.4.42 — 2026-10-25 — Stable source release
+
+- Give new local CLI, TUI and GUI terminals their creating frontend's display and
+  clipboard environment, including when an older daemon remains running. Remove
+  stale values absent from the frontend; preserve existing processes and keep
+  remote launches independent of the local desktop.
+
 ## v0.4.41 — 2026-10-24 — Stable source release
 
 - Update crypto-bigint to 0.7.6 for RUSTSEC-2026-0387 and its compatible ctutils

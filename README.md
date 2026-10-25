@@ -28,6 +28,13 @@ Exiting an attached shell removes its completed window, including the final wind
 
 New CLI sessions and TUI windows/splits explicitly load your selected login shell, including with a preserved older daemon. Existing shells retain their startup flags. For `--host` named creation, update the endpoint RUWAC CLI too: it resolves the remote shell over verified SSH, rather than using your local shell path. Raw `rpc` and JSON `request` parameters remain literal for custom commands and automation.
 
+New local terminals also receive the creating CLI or GUI's desktop environment,
+including its display and clipboard connection settings. Missing settings remove
+stale daemon values. This works with preserved older daemons; it does not change
+already running shells or applications. A new window created by an already
+attached older client retains that client's behavior until it is reopened.
+Remote `--host` launches do not forward your local desktop settings.
+
 The default socket is beneath your private runtime directory. `RUWAC_SOCKET` or `--socket PATH` selects an explicit socket; its parent must be owned by you with mode 0700. Use the same socket in each terminal.
 
 Ctrl-A then `c/n/p/d/a` creates/cycles/detaches/sends literal Ctrl-A. Double Ctrl-A forwards the literal prefix; Ctrl-A then o selects the previous window on a matching daemon. Ctrl-A `S` splits horizontally and `|` vertically; `Tab` changes pane; `0–9` selects windows. `[` opens interactive canonical keyboard copy/search in both clients; `]` pastes the independent internal buffer. `z` zooms, `"` opens the window chooser, `:` opens commands and `?` shows configured shortcuts. PTYs survive final-client detach. Each attached client keeps its own selected window, pane and zoom. Shared PTYs and split ratios remain canonical. The session uses the minimum attached rows and columns; each pane uses the minimum dimensions of its visible rectangles. Unattached explicit selection sets the default for future attachments without redirecting current clients. Existing daemons retain the behavior of their running version until deliberately replaced. `rpc daemon.stop` stops the selected daemon and its owned panes.

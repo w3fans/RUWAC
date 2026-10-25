@@ -419,10 +419,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "session.create" | "window.create" | "pane.create"
         ) && request.params.get("argv").is_none()
         {
-            request.params["argv"] = json!(ruwac_pty::shell::terminal_argv(match &remote {
-                Some(remote) => remote.shell_argv()?,
-                None => ruwac_pty::shell::default_argv().map_err(io::Error::other)?,
-            }));
+            request.params["argv"] = json!(match &remote {
+                Some(remote) => ruwac_pty::shell::terminal_argv(remote.shell_argv()?),
+                None => ruwac_pty::shell::default_terminal_argv().map_err(io::Error::other)?,
+            });
         }
         call(&request)
     };
