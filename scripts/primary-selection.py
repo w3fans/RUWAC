@@ -17,6 +17,45 @@ import time
 LIMIT = 1024 * 1024
 FRAME = LIMIT * 6 + 1024
 
+
+class LoopGuard:
+    """Bound this disposable helper even if an Xlib call blocks its main loop."""
+    def __init__(self, glib):
+        import threading
+        self.glib = glib
+        self.stopped = threading.Event()
+        self.last_progress = time.monotonic()
+        self.timer = glib.timeout_add(250, self.progress)
+        try:
+            threading.Thread(target=self.watch, daemon=True).start()
+        except RuntimeError:
+            self.close()
+            raise ValueError("Selection helper watchdog unavailable") from None
+
+    def progress(self):
+        self.last_progress = time.monotonic()
+        return not self.stopped.is_set()
+
+    def watch(self):
+        while not self.stopped.wait(.25):
+            if time.monotonic() - self.last_progress > 3:
+                # No selection or desktop is changed. Process exit closes the
+                # owned bus/SSH channel and invalidates any connection lease.
+                os._exit(2)
+
+    def close(self):
+        self.stopped.set()
+        if self.timer is not None:
+            self.glib.source_remove(self.timer)
+            self.timer = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+
 def trace(event, **fields):
     if os.environ.get("RUWAC_PRIMARY_TRACE") == "1":
         print(json.dumps({"primary_trace":event, **fields}), file=sys.stderr, flush=True)
@@ -307,7 +346,7 @@ class Primary:
         self.queued = None
         self.changed = changed
         self.changes = SelectionChanges()
-        self.clip.connect("changed", self.on_change)
+        self.changed_handler = self.clip.connect("changed", self.on_change)
 
     def on_change(self, clip):
         trace("changed", generation=self.generation)
@@ -323,7 +362,14 @@ class Primary:
         # Invalidate delivery immediately, but drain an already negotiated X11
         # INCR transfer. Aborting during TARGETS negotiation can stall the owner.
         self.read_serial += 1
-        self.queued = None
+        queued, self.queued = self.queued, None
+        self._discard_read(queued)
+
+    @staticmethod
+    def _discard_read(request):
+        if request is not None and request[1] is not None:
+            finished = request[1]
+            GLib.idle_add(lambda: (finished(False), False)[1])
 
     def set(self, text):
         if not isinstance(text, str) or not text or len(text.encode("utf-8")) > LIMIT or "\0" in text:
@@ -338,32 +384,58 @@ class Primary:
         self.clip.set_content(self.provider)
         self.display.flush()
 
-    def read(self, ready):
+    def read(self, ready, *, finished=None):
         if self.reading:
-            self.queued = ready
+            previous, self.queued = self.queued, (ready, finished)
+            self._discard_read(previous)
             return
         import threading
         self.reading = True
         serial, generation = self.read_serial, self.generation
+        def expired():
+            # The transfer's two-second deadline is checked between Xlib calls;
+            # even XOpenDisplay can block before that code can check its clock.
+            # Keep this active while a cancelled transfer is still draining.
+            if self.reading:
+                os._exit(2)
+            return False
+        watchdog = GLib.timeout_add(2500, expired)
         def fetch():
-            data = read_primary_bytes()
+            try:
+                data = read_primary_bytes()
+            except (OSError, ValueError, RuntimeError):
+                trace("read-refused", stage="worker")
+                data = None
             def complete():
+                GLib.source_remove(watchdog)
                 self.reading = False
                 queued, self.queued = self.queued, None
-                if queued:
-                    GLib.idle_add(lambda: self.read(queued) or False)
-                if data and serial == self.read_serial and generation == self.generation:
-                    try:
-                        text = data.decode("utf-8")
-                    except UnicodeError:
-                        return False
-                    digest = hashlib.sha256(data).digest()
-                    if "\0" not in text and digest != self.last_digest:
-                        self.last_digest = digest
-                        ready(text)
+                if queued is not None:
+                    GLib.idle_add(lambda: self.read(queued[0], finished=queued[1]) or False)
+                delivered = False
+                try:
+                    if data and serial == self.read_serial and generation == self.generation:
+                        try:
+                            text = data.decode("utf-8")
+                        except UnicodeError:
+                            return False
+                        digest = hashlib.sha256(data).digest()
+                        if "\0" not in text and digest != self.last_digest:
+                            self.last_digest = digest
+                            delivered = True
+                            ready(text)
+                finally:
+                    if finished is not None:
+                        finished(delivered)
                 return False
             GLib.idle_add(complete)
-        threading.Thread(target=fetch, daemon=True).start()
+        try:
+            threading.Thread(target=fetch, daemon=True).start()
+        except RuntimeError:
+            GLib.source_remove(watchdog)
+            self.reading = False
+            self._discard_read((ready, finished))
+            trace("read-refused", stage="worker-start")
 
 
 def offer_to_gui(text, session):
@@ -533,59 +605,63 @@ def run():
     import gi
     gi.require_version("Gdk", "4.0")
     gi.require_version("Gtk", "4.0")
-    from gi.repository import Gdk, Gio, GLib, Gtk
+    from gi.repository import Gio, GLib
     loop = GLib.MainLoop()
     signal.signal(signal.SIGTERM, lambda *_: loop.quit())
     signal.signal(signal.SIGINT, lambda *_: loop.quit())
-    if sys.argv[1] == "--peer":
-        peer = Peer(0, 1)
-        peer.pipe.send({"type":"hello"})
+    with LoopGuard(GLib):
+        # Gtk's Python override can open the display while loading, before
+        # Primary.__init__ gets a chance to call init_check explicitly.
+        from gi.repository import Gdk, Gtk
+        if sys.argv[1] == "--peer":
+            peer = Peer(0, 1)
+            peer.pipe.send({"type":"hello"})
+            try:
+                loop.run()
+            finally:
+                peer.primary.changes.close()
+            return
+        argv = json.loads(sys.argv[2])
+        if not isinstance(argv, list) or not argv or argv[0] != "ssh" or not all(isinstance(x, str) for x in argv):
+            raise ValueError("Expected a reviewed SSH command")
+        child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=sys.stderr if os.environ.get("RUWAC_PRIMARY_TRACE") == "1" else subprocess.DEVNULL)
+        local = None
         try:
+            local = Peer(child.stdout.fileno(), child.stdin.fileno(), local=True)
+            # Peer.send addresses the opposite desktop; local messages require the
+            # opposite direction. The same epoch invalidates both pending reads.
+            remote_message = local.message
+            def remote(value):
+                remote_message(value)
+            local.pipe.receive = remote
+            def control(value):
+                if not isinstance(value, dict) or type(value.get("send")) is not bool or type(value.get("receive")) is not bool:
+                    raise ValueError("Invalid GUI selection policy")
+                changed = (local.enabled, local.receive_enabled) != (value["send"], value["receive"])
+                if changed:
+                    local.epoch += 1
+                    local.primary.cancel()
+                    local.primary.last_digest = None
+                local.enabled = value["send"]
+                local.receive_enabled = value["receive"]
+                local.last_heartbeat = time.monotonic()
+                local.pipe.send({"type":"mode", "epoch":local.epoch,
+                                 "send":local.receive_enabled, "receive":local.enabled})
+                if changed and local.enabled and local.dirty:
+                    local.publish()
+            Pipe(0, 1, control, loop.quit)
             loop.run()
         finally:
-            peer.primary.changes.close()
-        return
-    argv = json.loads(sys.argv[2])
-    if not isinstance(argv, list) or not argv or argv[0] != "ssh" or not all(isinstance(x, str) for x in argv):
-        raise ValueError("Expected a reviewed SSH command")
-    child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=sys.stderr if os.environ.get("RUWAC_PRIMARY_TRACE") == "1" else subprocess.DEVNULL)
-    local = None
-    try:
-        local = Peer(child.stdout.fileno(), child.stdin.fileno(), local=True)
-        # Peer.send addresses the opposite desktop; local messages require the
-        # opposite direction. The same epoch invalidates both pending reads.
-        remote_message = local.message
-        def remote(value):
-            remote_message(value)
-        local.pipe.receive = remote
-        def control(value):
-            if not isinstance(value, dict) or type(value.get("send")) is not bool or type(value.get("receive")) is not bool:
-                raise ValueError("Invalid GUI selection policy")
-            changed = (local.enabled, local.receive_enabled) != (value["send"], value["receive"])
-            if changed:
-                local.epoch += 1
-                local.primary.cancel()
-                local.primary.last_digest = None
-            local.enabled = value["send"]
-            local.receive_enabled = value["receive"]
-            local.last_heartbeat = time.monotonic()
-            local.pipe.send({"type":"mode", "epoch":local.epoch,
-                             "send":local.receive_enabled, "receive":local.enabled})
-            if changed and local.enabled and local.dirty:
-                local.publish()
-        Pipe(0, 1, control, loop.quit)
-        loop.run()
-    finally:
-        if local is not None:
-            local.primary.changes.close()
-        child.stdin.close()
-        child.terminate()
-        try:
-            child.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            child.kill()
-            child.wait()
+            if local is not None:
+                local.primary.changes.close()
+            child.stdin.close()
+            child.terminate()
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
 
 
 if __name__ == "__main__":

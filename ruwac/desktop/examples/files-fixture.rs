@@ -73,6 +73,100 @@ fn main() {
         )
         .map_err(|_| "invalid fixture profile")?;
         p.validate()?;
+        if args[1] == "primary-flow" {
+            // Exercise the actual saved-route Bridge without substituting a
+            // second transport or dispatching any desktop input.
+            let root =
+                std::path::PathBuf::from(args.get(3).ok_or("Private flow fixture required")?);
+            let mut bridge = primary::Bridge::start(&p)?;
+            let mut sequence = 0u64;
+            let mut active = true;
+            let mut preparing = None;
+            let mut committing = None;
+            let mut prepared = serde_json::Value::Null;
+            let mut committed = serde_json::Value::Null;
+            let mut response = serde_json::Value::Null;
+            let started = std::time::Instant::now();
+            while started.elapsed() < Duration::from_secs(120) {
+                bridge.tick(active, false);
+                let command = std::fs::read(root.join("flow-command.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .unwrap_or_default();
+                if let Some(next) = command["seq"].as_u64().filter(|next| *next > sequence) {
+                    sequence = next;
+                    let mut ok = false;
+                    let mut id = None;
+                    match command["action"].as_str() {
+                        Some("close") => return Ok(serde_json::json!({"closed":true})),
+                        Some("mode") => {
+                            if let Some(enabled) = command["active"].as_bool() {
+                                active = enabled;
+                                bridge.tick(active, false);
+                                preparing = None;
+                                committing = None;
+                                prepared = serde_json::Value::Null;
+                                committed = serde_json::Value::Null;
+                                ok = true;
+                            }
+                        }
+                        Some("authorize") => ok = bridge.authorize().is_ok(),
+                        Some("prepare") => {
+                            if let Some(text) = command["text"].as_str() {
+                                if let Ok(wanted) = bridge.offer_primary(text.to_owned()) {
+                                    preparing = Some(wanted);
+                                    id = Some(wanted);
+                                    prepared = serde_json::Value::Null;
+                                    ok = true;
+                                }
+                            }
+                        }
+                        Some("commit") => {
+                            if let Some(wanted) = command["id"].as_u64() {
+                                ok = bridge.commit_primary(wanted).is_ok();
+                                if ok {
+                                    committing = Some(wanted);
+                                    committed = serde_json::Value::Null;
+                                }
+                            }
+                        }
+                        Some("cancel") => {
+                            if let Some(wanted) = command["id"].as_u64() {
+                                bridge.cancel_primary(wanted);
+                                preparing = None;
+                                committing = None;
+                                ok = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                    response = serde_json::json!({"seq":sequence,"ok":ok,"id":id});
+                }
+                if let Some(id) = preparing {
+                    if let Some(ok) = bridge.take_prepare_result(id) {
+                        prepared = serde_json::json!({"id":id,"ok":ok});
+                        preparing = None;
+                    }
+                }
+                if let Some(id) = committing {
+                    if let Some(ok) = bridge.take_offer_result(id) {
+                        committed = serde_json::json!({"id":id,"ok":ok});
+                        committing = None;
+                    }
+                }
+                let value = serde_json::json!({"ready":bridge.ready,"failed":bridge.failed,
+                    "native":bridge.native(),"observes":bridge.observes(),"active":active,
+                    "authorized":bridge.authorized(),"authorizing":bridge.authorizing(),
+                    "response":response,"prepared":prepared,"committed":committed});
+                let temporary = root.join("flow-state.tmp");
+                std::fs::write(&temporary, serde_json::to_vec(&value).unwrap())
+                    .map_err(|_| "Cannot write flow state")?;
+                std::fs::rename(temporary, root.join("flow-state.json"))
+                    .map_err(|_| "Cannot publish flow state")?;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            return Err("Private flow fixture timed out".into());
+        }
         if args[1] == "primary-receive" {
             use gtk::prelude::*;
             let root =

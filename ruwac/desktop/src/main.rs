@@ -29,6 +29,7 @@ mod jobs;
 mod launch_context;
 mod launches;
 mod primary;
+mod primary_setup;
 mod profiles;
 mod rdp;
 mod rdp_retry;
@@ -100,6 +101,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut theme = adw::ColorScheme::PreferDark;
     let mut args: Vec<_> = std::env::args().skip(1).collect();
     flags::options(&mut args, flags::DESKTOP);
+    if args.first().is_some_and(|arg| arg == "--primary-companion") {
+        if args.len() != 2 {
+            return Err("Usage: ruwac-desktop -G install|status|preferences|uninstall".into());
+        }
+        match primary_setup::run(&args[1]) {
+            Ok(value) => println!("{}", serde_json::to_string(&value)?),
+            Err(message) => {
+                println!("{}", json!({"ok":false,"message":message}));
+                return Err("Companion setup failed".into());
+            }
+        }
+        return Ok(());
+    }
+
     if args.first().is_some_and(|a| {
         matches!(
             a.as_str(),
@@ -322,7 +337,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
   let window_socket=socket.clone();let window_theme=theme;new_window.connect_clicked(move|button|{
     let result=(||->Result<(),Box<dyn std::error::Error>>{let mut cmd=std::process::Command::new(std::env::current_exe()?);cmd.arg("--new-instance").arg("--window-id").arg(ruwac_protocol::id("window")).arg("--socket").arg(&window_socket).arg("--theme").arg(match window_theme {adw::ColorScheme::PreferLight=>"light",adw::ColorScheme::Default=>"system",_=>"dark"});if clipboard_disabled{cmd.arg("--clipboard-disabled");}if allow_workspace_control{cmd.arg("--allow-workspace-control");}if allow_rdp_control{cmd.arg("--allow-rdp-control");}let mut child=cmd.spawn()?;std::thread::spawn(move||{let _=child.wait();});Ok(())})();if result.is_err(){button.set_tooltip_text(Some("Unable to open a new window"));}
   });
-  let control_policy=Rc::new(Cell::new(allow_workspace_control));let control_gate=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(allow_workspace_control));let consent=gtk::CheckButton::with_label("Allow automation to open, restore and focus workspace views");consent.set_active(control_policy.get());let policy=control_policy.clone();let gate=control_gate.clone();consent.connect_toggled(move|c|{policy.set(c.is_active());gate.store(c.is_active(),std::sync::atomic::Ordering::Release);});let remote_policy=Rc::new(Cell::new(allow_rdp_control));let remote_consent=gtk::CheckButton::with_label("Allow automation to open/control RDP connections");remote_consent.set_active(remote_policy.get());let rp=remote_policy.clone();remote_consent.connect_toggled(move|c|rp.set(c.is_active()));let primary_receive=gtk::CheckButton::with_label("Receive mouse selections from another RUWAC desktop");primary_receive.set_widget_name("allow-primary-receive");primary_receive.set_active(sidebar_shell::primary_receive_allowed());primary_receive.connect_toggled(|button|{if let Err(error)=sidebar_shell::set_primary_receive(button.is_active()){button.set_tooltip_text(Some(&error));button.set_active(false);}});let choices=gtk::Box::new(gtk::Orientation::Vertical,6);choices.append(&consent);choices.append(&remote_consent);choices.append(&primary_receive);let preferences=gtk::Popover::new();let menu_body=gtk::Box::new(gtk::Orientation::Vertical,6);menu_body.append(&gtk::Label::new(Some(&format!("RUWAC {}",env!("CARGO_PKG_VERSION")))));let pref_button=gtk::Button::with_label("Preferences…");menu_body.append(&pref_button);preferences.set_child(Some(&menu_body));let options=gtk::MenuButton::builder().icon_name("open-menu-symbolic").tooltip_text("Main menu").popover(&preferences).build();header.pack_end(&options);
+  let control_policy=Rc::new(Cell::new(allow_workspace_control));let control_gate=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(allow_workspace_control));let consent=gtk::CheckButton::with_label("Allow automation to open, restore and focus workspace views");consent.set_active(control_policy.get());let policy=control_policy.clone();let gate=control_gate.clone();consent.connect_toggled(move|c|{policy.set(c.is_active());gate.store(c.is_active(),std::sync::atomic::Ordering::Release);});let remote_policy=Rc::new(Cell::new(allow_rdp_control));let remote_consent=gtk::CheckButton::with_label("Allow automation to open/control RDP connections");remote_consent.set_active(remote_policy.get());let rp=remote_policy.clone();remote_consent.connect_toggled(move|c|rp.set(c.is_active()));let primary_receive=gtk::CheckButton::with_label("Receive mouse selections from another RUWAC desktop");primary_receive.set_widget_name("allow-primary-receive");primary_receive.set_active(sidebar_shell::primary_receive_allowed());primary_receive.connect_toggled(|button|{if let Err(error)=sidebar_shell::set_primary_receive(button.is_active()){button.set_tooltip_text(Some(&error));button.set_active(false);}});let choices=gtk::Box::new(gtk::Orientation::Vertical,6);choices.append(&consent);choices.append(&remote_consent);choices.append(&primary_receive);choices.append(&primary_setup::controls());let preferences=gtk::Popover::new();let menu_body=gtk::Box::new(gtk::Orientation::Vertical,6);menu_body.append(&gtk::Label::new(Some(&format!("RUWAC {}",env!("CARGO_PKG_VERSION")))));let pref_button=gtk::Button::with_label("Preferences…");menu_body.append(&pref_button);preferences.set_child(Some(&menu_body));let options=gtk::MenuButton::builder().icon_name("open-menu-symbolic").tooltip_text("Main menu").popover(&preferences).build();header.pack_end(&options);
   let (pref_window,pref_choices,pref_pop)=(window.downgrade(),choices.clone(),preferences.clone());pref_button.connect_clicked(move |_|{pref_pop.popdown();let Some(window)=pref_window.upgrade()else{return;};chrome::detach(&pref_choices);let dialog=gtk::Window::builder().title("Preferences").transient_for(&window).modal(true).default_width(480).child(&pref_choices).build();dialog.present();});
 
   let about_button=gtk::Button::with_label("About RUWAC / Support…");about_button.set_widget_name("ruwac-about-button");menu_body.append(&about_button);
@@ -608,11 +623,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     "inspect"=>reply(json!({"display":gtk::prelude::WidgetExt::display(&window).type_().name(),"active":window.is_active(),"tabs":tabs.n_pages(),"selected_tab":tabs.selected_page().map(|p|tabs.page_position(&p)),"dark":app.style_manager().is_dark(),"focused_view":tiles::focused_id(&tabs,&focus_memory),"clipboard_owner":broker.borrow().active(),"terminal_views":0,"rdp_views":rdp_views.borrow().len(),"panes":[],"ticks":tick.get()})),
     "new-terminal"=>reply(json!({"clicked":sessions::fixture(&window,"New terminal")})),
     "workspace-close"=>{reply(json!({"closing":true}));window.close();},
+    "primary-setup"=>{if q["operation"]=="open"{pref_button.emit_clicked();}reply(primary_setup::fixture(window.upcast_ref(),q["operation"]=="close"));},
     "updates"=>reply(updates::fixture(&window,&q)),
     _=>reply(json!({"error":"This terminal fixture action requires an open terminal view"})),
    }}else if let Some(v)=view{match q["action"].as_str().unwrap_or(""){
     "new-terminal"=>reply(json!({"clicked":sessions::fixture(&window,"New terminal")})),
     "sessions-open"=>{let label=q["session"].as_str().unwrap_or("Sessions…");let mut clicked=sessions::fixture(&window,label);if !clicked{for widget in gtk::Window::list_toplevels(){if let Ok(w)=widget.downcast::<gtk::Window>(){if w.title().as_deref()==Some("Persistent terminal sessions"){clicked=sessions::fixture(&w,label);}}}}reply(json!({"clicked":clicked}));},
+    "primary-setup"=>{if q["operation"]=="open"{pref_button.emit_clicked();}reply(primary_setup::fixture(window.upcast_ref(),q["operation"]=="close"));},
     "updates"=>reply(updates::fixture(&window,&q)),
     "close-rdp"=>{let r=rdp_views.borrow().get(q["rdp"].as_u64().unwrap_or(0)as usize).cloned();if let Some(r)=r{if let Some(page)=tiles::page(&tabs,&r.root){tabs.close_page(&page);}}reply(json!({"rdp_views":rdp_views.borrow().len()}));},
     "close-tab"=>{let i=q["tab"].as_i64().unwrap_or(0)as i32;if i>=0&&i<tabs.n_pages(){let page=tabs.nth_page(i);tabs.close_page(&page);}reply(json!({"tabs":tabs.n_pages(),"selected_tab":tabs.selected_page().map(|p|tabs.page_position(&p)),"dark":app.style_manager().is_dark(),"focused_view":tiles::focused_id(&tabs,&focus_memory),"clipboard_owner":broker.borrow().active(),"terminal_views":vv.borrow().len()}));},
@@ -669,7 +686,7 @@ v.set_display(q["mode"].as_str().unwrap_or("fit"),q["zoom"].as_f64().unwrap_or(1
     "key"=>{if let Some(key)=q["key"].as_str().and_then(gdk::Key::from_name){let mods=gdk::ModifierType::from_bits_truncate(q["mods"].as_u64().unwrap_or(0)as u32);v.key(key,mods);}reply(json!({"handler":"synthetic GTK callback"}));},
     "copy"=>{v.select_fixture();v.copy_clipboard(q["primary"]==true);reply(json!({"offered":true}));},
     "paste"=>{v.paste_clipboard(q["primary"]==true);reply(json!({"async":true}));},
-    "read-text"=>{let epoch=v.broker.borrow().epoch();clipboard::read_text(&v.area.display().clipboard(),v.broker.clone(),epoch,ruwac_clipboard::ClipScope::Clipboard,Duration::from_millis(q["delay_ms"].as_u64().unwrap_or(0).min(100)),move|r|{use sha2::{Digest,Sha256};reply(match r{Ok(t)=>json!({"bytes":t.len(),"sha256":format!("{:x}",Sha256::digest(t.as_bytes()))}),Err(e)=>json!({"error":e})});});},
+    "read-text"=>{let epoch=v.broker.borrow().epoch();let primary=q["primary"]==true;let display=v.area.display();let buffer=if primary{display.primary_clipboard()}else{display.clipboard()};let scope=if primary{ruwac_clipboard::ClipScope::Primary}else{ruwac_clipboard::ClipScope::Clipboard};clipboard::read_text(&buffer,v.broker.clone(),epoch,scope,Duration::from_millis(q["delay_ms"].as_u64().unwrap_or(0).min(100)),move|r|{use sha2::{Digest,Sha256};reply(match r{Ok(t)=>json!({"bytes":t.len(),"sha256":format!("{:x}",Sha256::digest(t.as_bytes()))}),Err(e)=>json!({"error":e})});});},
     "attach-image-button"=>reply(json!({"clicked":sessions::fixture(&window,"Attach PNG to Codex")})),
     "attach-image"=>{if let Some(stage)=staging.clone(){let(t,root)=(tabs.downgrade(),v.root.downgrade());let selected:Rc<dyn Fn()->bool>=Rc::new(move||t.upgrade().zip(root.upgrade()).is_some_and(|(t,r)|t.selected_page().is_some_and(|p|tiles::contains(&p.child(),&r))));image_attach::clipboard(&v,stage,selected,Duration::from_millis(q["delay_ms"].as_u64().unwrap_or(0).min(100)),move|result|reply(match result{Ok(v)=>v,Err(error)=>json!({"error":error})}));}else{reply(json!({"error":"Private stage required"}));}},
     "read-image"=>{if let Some(stage)=staging.clone(){let epoch=v.broker.borrow().epoch();let owned=owned.clone();clipboard::ingest_png(&v.area.display().clipboard(),stage,v.broker.clone(),epoch,q["limit"].as_u64().unwrap_or(ruwac_clipboard::MAX_IMAGE_BYTES as u64)as usize,Duration::from_millis(q["delay_ms"].as_u64().unwrap_or(0).min(100)),move|r|reply(match r{Ok(r)=>{owned.borrow_mut().push(r.path.clone());json!({"path":r.path,"sha256":r.sha256,"bytes":r.bytes,"width":r.width,"height":r.height})},Err(e)=>json!({"error":e})}));}else{reply(json!({"error":"staging directory required"}));}},

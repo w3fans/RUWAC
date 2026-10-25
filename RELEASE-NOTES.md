@@ -1,25 +1,27 @@
-# Keep the first new remote selection when switching tabs
+# Native mouse-selection delivery for GNOME desktops
 
-After returning to an RDP tab, the first new mouse selection could be classified
-as an initial snapshot. If a terminal or another RDP tab already owned a selection,
-RUWAC could retain that older text instead. The relay now records the epoch in
-which the selection actually changed, using server ownership notifications to
-distinguish it from GDK's initial snapshot: a new selection in the active desktop
-can replace older text, while background snapshots and late replies remain guarded.
-PRIMARY and the Ctrl+C/V clipboard stay separate.
+The optional GNOME Shell 50 companion lets RUWAC publish a selected text into
+native Wayland applications on an explicitly chosen remote desktop. Installation
+is available from Preferences or `ruwac-desktop -G install`. Enable desktop
+publication permission, then authorize each selection connection on that desktop.
+Installation never approves a connection or restarts your desktop; GNOME may
+require a new login before loading installed code.
 
-The desktop lockfile also updates crypto-bigint to 0.7.6 for
-[RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387.html),
-with compatible ctutils 0.4.5. The separate RSA advisory remains unresolved.
+Selection-only retry preserves the RDP connection and requires fresh approval.
+Newer selections survive delayed replies, helper restarts and imported-selection
+echoes. A separate ownership confirmation cancels stale paste input. Confirmation
+is a point-in-time check; SSH and later RDP input are not atomic. Ctrl+C/V and image
+attachments retain their independent clipboard routes.
 
-Regression coverage includes the first deliberate selection after a mode change,
-inactive snapshots, late completion, independent X11 INCR transfer, Unicode,
-multiline text, size limits and preservation of both Ctrl+C/V clipboards.
-The acceptance ledger now separates the completed v0.4.40 baseline from its
-historical prepublication notes and later development candidates.
+Helper startup, identity/metadata checks and blocked X11 reads are bounded.
+Long Unicode machine names fit the remote approval label without splitting a
+character. The companion archive and managed installation include instructions,
+the project license and a notice. A public packaging test verifies exact archive
+contents and schema compilation without installing the extension.
 
-Reopen the GUI after updating to load the new relay. Daemon-owned terminal
-processes remain available; RDP reconnects after reopening. Physical touchpad,
-clipboard-manager behavior, generic cross-host Wayland PRIMARY injection and
-external GNOME/Windows qualification remain separate limits. The known RSA
-dependency advisory remains unresolved.
+Native publication supports GNOME Shell 50. Receiving remote selections still
+requires that desktop's configured Xwayland bridge. Other desktops retain their
+available compatibility routes. Isolated GNOME, virtual input, authenticated
+loopback transport and generated RDP tests do not replace physical-input or
+external-host qualification. Broader development work remains open. The existing
+RSA advisory remains unsuppressed.

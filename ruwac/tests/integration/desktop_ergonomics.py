@@ -40,7 +40,7 @@ def move(x,y):
 def button(code,down):seat('NotifyPointerButton',GLib.Variant('(ib)',(code,down)));time.sleep(.08)
 receiver=root/'receiver.py';receiver.write_text('import os,sys,tty\ntty.setraw(0)\nos.write(1,b"SELECT_CLIPBOARD\\r\\nREADY\\r\\n\\x1b[?2004h")\nf=open(sys.argv[1],"ab",buffering=0)\nwhile True:\n b=os.read(0,4096)\n if not b:break\n f.write(b)\n if b==b"H":os.write(1,b"".join(("HISTORY_%03d\\r\\n"%n).encode()for n in range(150)))\n')
 interrupt=root/'interrupt.py';interrupt.write_text('import os,sys,signal,tty\ntty.setcbreak(0)\nsignal.signal(signal.SIGINT,lambda *_:open(sys.argv[1],"w").write("SIGINT"))\nos.write(1,b"INTERRUPT_READY\\r\\n")\nwhile True:os.read(0,4096)\n')
-mouse_receiver=root/'mouse_receiver.py';mouse_receiver.write_text('import os,sys,tty\ntty.setraw(0)\nf=open(sys.argv[1],"ab",buffering=0)\nos.write(1,b"\\x1b[?1049h\\x1b[?1003h\\x1b[?1006hAPP_MOUSE_READY")\nwhile True:\n b=os.read(0,4096)\n if not b:break\n f.write(b)\n if b==b"C":os.write(1,b"\\x1b[?1003l\\x1b[?1002l\\x1b[?1000hMODE_CLICK")\n')
+mouse_receiver=root/'mouse_receiver.py';mouse_receiver.write_text('import os,sys,tty\ntty.setraw(0)\nf=open(sys.argv[1],"ab",buffering=0)\nos.write(1,b"\\x1b[?1049h\\x1b[?1003h\\x1b[?1006hAPP_MOUSE_READY")\nwhile True:\n b=os.read(0,4096)\n if not b:break\n f.write(b)\n if b"C" in b:os.write(1,b"\\x1b[?1003l\\x1b[?1002l\\x1b[?1000hMODE_CLICK")\n')
 try:
  session=bus.call_sync(service,'/org/gnome/Mutter/RemoteDesktop',service,'CreateSession',None,None,Gio.DBusCallFlags.NONE,5000,None).unpack()[0];seat('Start');seat('NotifyPointerMotionRelative',GLib.Variant('(dd)',(1.,1.)));key(194,True);key(194,False)
  start([a.binary,'--socket',sock,'serve'],'daemon');eventually(sock.exists)

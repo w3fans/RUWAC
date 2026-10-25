@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## v0.4.43 — 2026-10-25 — Stable source release
+
+- Add optional GNOME Shell 50 native mouse-selection delivery with desktop
+  permission and explicit approval for each connection. Include managed companion
+  installation, status, preferences and removal in the GUI and `-G` CLI.
+- Preserve newer local and remote selections across delayed replies and helper
+  restarts. Confirm remote ownership before dispatching paste input; keep the
+  Ctrl+C/V clipboard independent and require fresh approval after recovery.
+- Bound selection-helper startup, metadata and X11 read failures. Selection-only
+  retry recovers temporary failures without reconnecting the RDP desktop.
+- Include companion setup instructions, license and notice, with a reproducible
+  standalone archive check. Support long Unicode connection names within the
+  remote approval label's UTF-8 byte limit.
+
 ## v0.4.42 — 2026-10-25 — Stable source release
 
 - Give new local CLI, TUI and GUI terminals their creating frontend's display and

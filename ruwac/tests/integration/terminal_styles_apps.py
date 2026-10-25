@@ -12,6 +12,7 @@ paint=root/'paint.py';paint.write_text('''import os,tty
 tty.setraw(0)
 for row,(code,label)in enumerate([('0','STYLES_READY'),('3','ITALIC'),('2','DIM'),('8','HIDDEN'),('9','STRIKE'),('4','SINGLE'),('4:2','DOUBLE'),('4:3','CURLY'),('4:4','DOTTED'),('4:5','DASHED')],1):
  os.write(1,(f'\\x1b[{row};1H\\x1b[0;{code};58:2::7:8:9m'+label+' e\\u0301界'+'\\x1b[0m').encode())
+os.write(1,b"\\x1b[11;1HSTYLES_COMPLETE")
 while os.read(0,1):pass
 ''')
 chooser=root/'chooser.py';chooser.write_text('''import json,os,subprocess,sys
@@ -45,7 +46,7 @@ def command(action,**kw):
  return eventually(read,10)
 def record(name,**details):results.append({'id':name,'status':'PASS',**details});print(name,'PASS',flush=True)
 try:
- start('daemon');s=rpc('session.create',{'name':'Extended styles','rows':24,'cols':80,'argv':[sys.executable,str(paint)]});owned.append(s['pid']);eventually(lambda:'STYLES_READY'in rpc('pane.capture',{'pane':s['pane']})['text']);grid=frame(s['session']);cells=grid['cells']
+ start('daemon');s=rpc('session.create',{'name':'Extended styles','rows':24,'cols':80,'argv':[sys.executable,str(paint)]});owned.append(s['pid']);eventually(lambda:'STYLES_COMPLETE'in rpc('pane.capture',{'pane':s['pane']})['text']);grid=frame(s['session']);cells=grid['cells']
  assert cells[1][0][6]['italic']and cells[2][0][6]['dim']and cells[3][0][6]['hidden']and cells[4][0][6]['strike']
  assert [cells[row][0][6]['underline']for row in range(5,10)]==['single','double','curly','dotted','dashed'];assert all(cells[row][0][6]['underline_color']==[7,8,9]for row in range(5,10))
  record('STYLES-ACTUAL-PTY-CANONICAL',five_underlines=True,Unicode_combining_wide=True)

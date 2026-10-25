@@ -181,11 +181,11 @@ try:
  for k in ['DISPLAY','WAYLAND_DISPLAY','DBUS_SESSION_BUS_ADDRESS','XAUTHORITY']:env_remote.pop(k,None)
  env_remote['XDG_RUNTIME_DIR']=str(runtime)
  # A separate pipe supplies the private bus address, never an owner's bus.
- # This private bus needs only explicitly started fixture services. Avoid
+ # Model the selected account canonical bus, with only fixture services. Avoid
  # starting a second GNOME portal/settings/keyring stack during clipboard tests.
- bus_config=root/'remote-bus.xml';bus_config.write_text('<busconfig><type>session</type><listen>unix:tmpdir='+str(runtime)+'</listen><auth>EXTERNAL</auth><policy context="default"><allow own="*"/><allow send_destination="*"/><allow receive_sender="*"/></policy></busconfig>')
+ bus_config=root/'remote-bus.xml';bus_config.write_text('<busconfig><type>session</type><listen>unix:path='+str(runtime/'bus')+'</listen><auth>EXTERNAL</auth><policy context="default"><allow own="*"/><allow send_destination="*"/><allow receive_sender="*"/></policy></busconfig>')
  log=(root/'remote-bus-2.log').open('wb');bus=subprocess.Popen(['dbus-daemon','--config-file='+str(bus_config),'--nofork','--print-address=1'],env=env_remote,stdout=subprocess.PIPE,stderr=log);children.append(bus)
- assert select.select([bus.stdout],[],[],5)[0];address=bus.stdout.readline().decode().strip();assert address.startswith('unix:');env_remote['DBUS_SESSION_BUS_ADDRESS']=address
+ assert select.select([bus.stdout],[],[],5)[0];address=bus.stdout.readline().decode().strip();assert address.split(',',1)[0]=='unix:path='+str(runtime/'bus');env_remote['DBUS_SESSION_BUS_ADDRESS']=address
  start(['mutter','--headless','--virtual-monitor','900x600','--wayland','--wayland-display','wayland-77'],'remote-mutter',env_remote)
  eventually(lambda:(runtime/'wayland-77').exists(),10);display=re.search(r'Using public X11 display (:[0-9]+)',(root/'remote-mutter.log').read_text()).group(1);auth=list(runtime.glob('.mutter-Xwaylandauth.*'));assert len(auth)==1
  env_remote.update(WAYLAND_DISPLAY='wayland-77',DISPLAY=display,XAUTHORITY=str(auth[0]))

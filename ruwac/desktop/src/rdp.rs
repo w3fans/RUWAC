@@ -1600,6 +1600,13 @@ impl AutoGdm {
             && attempt == self.submitted_attempt.saturating_add(1)
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PrimaryStage {
+    Preparing,
+    Committing,
+    Confirming,
+    LegacyOffer,
+}
 #[derive(Clone)]
 struct PrimaryClick {
     id: u64,
@@ -1612,6 +1619,7 @@ struct PrimaryClick {
     epoch: u64,
     geometry: (f64, f64, f64, f64),
     source: gdk::ContentProvider,
+    stage: PrimaryStage,
 }
 #[derive(Clone, PartialEq, Eq)]
 struct ClipboardRequest {
@@ -1706,6 +1714,7 @@ pub struct RdpView {
     primary_transport: RefCell<Option<String>>,
     primary_checked: Cell<Option<std::time::Instant>>,
     primary_status: gtk::Label,
+    primary_authorize: gtk::Button,
     primary_click: RefCell<Option<PrimaryClick>>,
     primary_error: RefCell<Option<String>>,
     suppress_middle_release: Cell<bool>,
@@ -1864,6 +1873,9 @@ impl RdpView {
         primary_status.set_wrap(true);
         primary_status.set_visible(false);
         root.append(&primary_status);
+        let primary_authorize = gtk::Button::with_label("Authorize selection connection…");
+        primary_authorize.set_widget_name("primary-authorize");
+        primary_authorize.set_visible(false);
         let v = Rc::new(Self {
             root: root.clone(),
             area,
@@ -1936,6 +1948,7 @@ impl RdpView {
             primary_transport: RefCell::new(None),
             primary_checked: Cell::new(None),
             primary_status,
+            primary_authorize,
             primary_click: RefCell::new(None),
             primary_error: RefCell::new(None),
             suppress_middle_release: Cell::new(false),
@@ -2173,6 +2186,13 @@ impl RdpView {
                 }
             });
         }
+        tools.insert(&v.primary_authorize, -1);
+        let weak = Rc::downgrade(&v);
+        v.primary_authorize.connect_clicked(move |_| {
+            if let Some(v) = weak.upgrade() {
+                v.authorize_primary();
+            }
+        });
         let recover = gtk::Button::with_label("Recover GNOME login…");
         recover.set_widget_name("rdp-recover-sign-in");
         tools.insert(&recover, -1);
@@ -2605,6 +2625,7 @@ impl RdpView {
     pub fn fixture_toolbar(&self, action: Option<&str>) -> serde_json::Value {
         let toolbar = &self.toolbar;
         let mut controls = Vec::new();
+        let mut controls_menu = None;
         let mut clicked = false;
         let mut child = toolbar.first_child();
         while let Some(w) = child {
@@ -2617,8 +2638,38 @@ impl RdpView {
                     clicked = true;
                 }
             }
+            if let Some(menu) = w.downcast_ref::<gtk::MenuButton>() {
+                let origin = self
+                    .root
+                    .root()
+                    .and_downcast::<gtk::Window>()
+                    .and_then(|window| {
+                        menu.compute_point(&window, &gtk::graphene::Point::new(0., 0.))
+                    })
+                    .map(|p| [p.x(), p.y()]);
+                controls_menu = Some(
+                    serde_json::json!({"action":"rdp-controls","mapped":menu.is_mapped(),
+                    "origin":origin,"size":[menu.width(),menu.height()]}),
+                );
+            }
         }
-        serde_json::json!({"controls":controls,"clicked":clicked,"state":self.fixture_inspect()})
+        let button = &self.primary_authorize;
+        let origin = self
+            .root
+            .root()
+            .and_downcast::<gtk::Window>()
+            .and_then(|w| button.compute_point(&w, &gtk::graphene::Point::new(0., 0.)))
+            .map(|p| [p.x(), p.y()]);
+        let native_point = button.native().and_then(|native| {
+            let widget = native.clone().dynamic_cast::<gtk::Widget>().ok()?;
+            let point = button.compute_point(&widget, &gtk::graphene::Point::new(0., 0.))?;
+            let (x, y) = native.surface_transform();
+            Some(serde_json::json!({"kind":widget.type_().name(),"point":[point.x() as f64-x,point.y() as f64-y]}))
+        });
+        serde_json::json!({"controls":controls,"controls_menu":controls_menu,"clicked":clicked,"state":self.fixture_inspect(),
+            "primary_control":{"native":native_point,"label":button.label().map(|s|s.to_string()),"visible":button.is_visible(),
+                "mapped":button.is_mapped(),"sensitive":button.is_sensitive(),"origin":origin,
+                "size":[button.width(),button.height()]}})
     }
     pub fn fixture_inspect(&self) -> serde_json::Value {
         let metrics = self.connection.borrow().as_ref().map(|c| {
@@ -3258,7 +3309,7 @@ impl RdpView {
         self.release_keys();
     }
     pub fn inactive(&self) {
-        self.primary_click.borrow_mut().take();
+        self.cancel_primary_click();
         if !self.auto_gdm.borrow().armed {
             self.assist_epoch.fetch_add(1, Ordering::AcqRel);
         }
@@ -3320,6 +3371,7 @@ impl RdpView {
         self.primary_status
             .set_visible(enabled || self.primary_error.borrow().is_some());
         if !enabled {
+            self.primary_authorize.set_visible(false);
             self.primary.borrow_mut().take();
             return;
         }
@@ -3343,6 +3395,7 @@ impl RdpView {
                 && (!login || s.handovers >= 2)
         });
         if !connected {
+            self.primary_authorize.set_visible(false);
             self.primary_click.borrow_mut().take();
             if self.primary.borrow_mut().take().is_some() {
                 self.primary_attempted.set(false);
@@ -3363,6 +3416,7 @@ impl RdpView {
                 .as_ref()
                 .is_some_and(crate::profiles::primary_profile_current);
             if !current {
+                self.primary_authorize.set_visible(false);
                 self.primary_click.borrow_mut().take();
                 self.primary.borrow_mut().take();
                 self.primary_attempted.set(true);
@@ -3392,6 +3446,16 @@ impl RdpView {
                 active && self.allowed(false, true),
                 active && self.allowed(true, false),
             );
+            self.primary_authorize.set_visible(
+                bridge.failed || (bridge.native() && bridge.ready && !bridge.authorized()),
+            );
+            self.primary_authorize.set_label(if bridge.failed {
+                "Retry selection connection"
+            } else {
+                "Authorize selection connection…"
+            });
+            self.primary_authorize
+                .set_sensitive(!bridge.authorizing() && !self.auto_gdm.borrow().armed);
             if active && self.allowed(true, false) && self.primary_click.borrow().is_none() {
                 if let Err(error) = bridge.publish_primary(&self.area.display().primary_clipboard())
                 {
@@ -3402,10 +3466,97 @@ impl RdpView {
             if let Some(error) = self.primary_error.borrow().as_ref() {
                 self.primary_status.set_text(error);
             } else {
-                self.primary_status.set_text(if bridge.failed {"Mouse selection sharing unavailable: check SSH key/trusted host, Python3 GTK4, Xwayland and the configured desktop session; reconnect to retry"} else if bridge.ready {"Mouse selection sharing ready · Ctrl+C clipboard remains separate"} else {"Connecting mouse selection sharing over SSH…"});
+                self.primary_status.set_text(if bridge.failed {"Selection sharing stopped. Check the SSH account, trusted host and configured desktop, then retry the selection connection"} else if bridge.native() && bridge.authorizing() {"Approve or deny this connection on the remote desktop; no paste is waiting"} else if bridge.native() && !bridge.authorized() {"Native selection delivery needs account permission and explicit connection authorization"} else if bridge.native() && bridge.authorized() && !bridge.observes() && self.allowed(true, false) {"Selection sending ready; receiving remote selections needs this desktop’s Xwayland bridge"} else if bridge.ready {"Mouse selection sharing ready · Ctrl+C clipboard remains separate"} else {"Connecting mouse selection sharing over SSH…"});
             }
+        } else {
+            self.primary_authorize.set_visible(false);
         }
         self.finish_primary_click();
+    }
+    fn authorize_primary(&self) {
+        if self.auto_gdm.borrow().armed
+            || !self
+                .selected
+                .borrow()
+                .as_ref()
+                .is_some_and(|selected| selected())
+            || !self
+                .root
+                .root()
+                .and_downcast::<gtk::Window>()
+                .is_some_and(|w| w.is_active())
+            || !self
+                .profile_metadata
+                .borrow()
+                .as_ref()
+                .is_some_and(crate::profiles::primary_profile_current)
+        {
+            self.primary_status.set_text(
+                "Authorization requires the current connected desktop and its send policy",
+            );
+            return;
+        }
+        self.cancel_primary_click();
+        // Opening the controls intentionally relinquishes desktop ownership.
+        // This explicit action restores the selected view before evaluating its
+        // send policy; it never reuses an earlier paste or approval transaction.
+        if let Some(popover) = self
+            .primary_authorize
+            .ancestor(gtk::Popover::static_type())
+            .and_downcast::<gtk::Popover>()
+        {
+            popover.popdown();
+        }
+        self.focus();
+        if !self.area.has_focus() || !self.allowed(false, true) {
+            self.primary_status.set_text(
+                "Authorization requires the current connected desktop and its send policy",
+            );
+            return;
+        }
+        self.primary_tick();
+        if self
+            .primary
+            .borrow()
+            .as_ref()
+            .is_some_and(|bridge| bridge.failed)
+        {
+            self.primary.borrow_mut().take();
+            self.primary_attempted.set(false);
+            self.primary_error.borrow_mut().take();
+            self.primary_tick();
+            return;
+        }
+        let active = self.area.has_focus()
+            && self
+                .root
+                .root()
+                .and_downcast::<gtk::Window>()
+                .is_some_and(|w| w.is_active());
+        if !active {
+            return;
+        }
+        let result = self
+            .primary
+            .borrow_mut()
+            .as_mut()
+            .ok_or("Selection connection is unavailable".to_string())
+            .and_then(|b| b.authorize());
+        match result {
+            Ok(()) => {
+                self.primary_error.borrow_mut().take();
+            }
+            Err(error) => {
+                *self.primary_error.borrow_mut() = Some(error);
+            }
+        }
+    }
+    fn cancel_primary_click(&self) {
+        if let Some(pending) = self.primary_click.borrow_mut().take() {
+            if let Some(bridge) = self.primary.borrow_mut().as_mut() {
+                bridge.cancel_primary(pending.id);
+            }
+        }
     }
     fn finish_primary_click(&self) {
         let Some(pending) = self.primary_click.borrow().clone() else {
@@ -3430,15 +3581,47 @@ impl RdpView {
             && self.geometry(self.area.width() as f64, self.area.height() as f64)
                 == pending.geometry
             && self.area.display().primary_clipboard().content().as_ref() == Some(&pending.source);
+        valid &= self.profile_metadata.borrow().as_ref().is_some_and(|p| {
+            p.preferences.primary_paste && crate::profiles::primary_profile_current(p)
+        });
         let answer = self
             .primary
-            .borrow()
-            .as_ref()
-            .and_then(|b| b.take_offer_result(pending.id));
-        if answer == Some(true) {
-            valid &= self.profile_metadata.borrow().as_ref().is_some_and(|p| {
-                p.preferences.primary_paste && crate::profiles::primary_profile_current(p)
+            .borrow_mut()
+            .as_mut()
+            .and_then(|b| match pending.stage {
+                PrimaryStage::Preparing => b.take_prepare_result(pending.id),
+                PrimaryStage::Committing | PrimaryStage::LegacyOffer => {
+                    b.take_offer_result(pending.id)
+                }
+                PrimaryStage::Confirming => b.take_confirm_result(pending.id),
             });
+        if matches!(
+            pending.stage,
+            PrimaryStage::Preparing | PrimaryStage::Committing
+        ) && valid
+            && answer == Some(true)
+            && pending.started.elapsed() <= Duration::from_secs(4)
+        {
+            let advanced =
+                self.primary
+                    .borrow_mut()
+                    .as_mut()
+                    .is_some_and(|b| match pending.stage {
+                        PrimaryStage::Preparing => b.commit_primary(pending.id).is_ok(),
+                        PrimaryStage::Committing => b.confirm_primary(pending.id).is_ok(),
+                        _ => false,
+                    });
+            if advanced {
+                if let Some(current) = self.primary_click.borrow_mut().as_mut() {
+                    current.stage = if pending.stage == PrimaryStage::Preparing {
+                        PrimaryStage::Committing
+                    } else {
+                        PrimaryStage::Confirming
+                    };
+                }
+                return;
+            }
+            valid = false;
         }
         let failed = self.primary.borrow().as_ref().is_none_or(|b| b.failed);
         if !valid
@@ -3446,8 +3629,16 @@ impl RdpView {
             || pending.started.elapsed() > Duration::from_secs(4)
             || answer.is_some()
         {
-            self.primary_click.borrow_mut().take();
-            if valid && !failed && answer == Some(true) {
+            self.cancel_primary_click();
+            if valid
+                && !failed
+                && matches!(
+                    pending.stage,
+                    PrimaryStage::Confirming | PrimaryStage::LegacyOffer
+                )
+                && pending.started.elapsed() <= Duration::from_secs(4)
+                && answer == Some(true)
+            {
                 self.suppress_middle_release.set(false);
                 self.pointer_native(pending.x, pending.y, 2, false);
                 if pending.released {
@@ -3455,7 +3646,7 @@ impl RdpView {
                 }
                 self.primary_error.borrow_mut().take();
             } else {
-                *self.primary_error.borrow_mut()=Some(if !valid {"Selection paste cancelled: source, focus, endpoint or display changed"} else {"Selection paste was not confirmed. Focus the remote RUWAC window, enable its mouse-selection reception, and check that both GUIs are updated"}.into());
+                *self.primary_error.borrow_mut()=Some(if !valid {"Selection paste cancelled: source, focus, endpoint or display changed"} else if pending.stage == PrimaryStage::Confirming {"Selection paste cancelled: remote selection changed or confirmation expired. Select the text again"} else {"Selection paste was not confirmed. Focus the remote RUWAC window, enable its mouse-selection reception, and check that both GUIs are updated"}.into());
             }
         }
     }
@@ -4223,6 +4414,11 @@ impl RdpView {
                             epoch: self.broker.borrow().epoch(),
                             geometry,
                             source: clipboard.content().unwrap(),
+                            stage: if self.primary.borrow().as_ref().is_some_and(|b| b.native()) {
+                                PrimaryStage::Preparing
+                            } else {
+                                PrimaryStage::LegacyOffer
+                            },
                         });
                         self.primary_error.borrow_mut().take();
                     }

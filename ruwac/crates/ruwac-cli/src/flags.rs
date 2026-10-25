@@ -37,6 +37,7 @@ pub const CONTROL: &[(&str, &str, usize)] = &[
     ("-N", "--snapshot", 1),
 ];
 pub const DESKTOP: &[(&str, &str, usize)] = &[
+    ("-G", "--primary-companion", 1),
     ("-s", "--socket", 1),
     ("-S", "--session", 1),
     ("-f", "--fixture-dir", 1),

@@ -79,7 +79,9 @@ jobs:
       - name: Fedora candidate bundle and installation integrity guards
         run: python3 ruwac/tests/integration/test_bundles.py
       - name: Validate workflow test command execution
-        run: python3 ruwac/tests/integration/test_workflow_commands.py
+        run: |
+          python3 ruwac/tests/integration/test_workflow_commands.py
+          python3 ruwac/tests/integration/test_desktop_mouse_stream.py
       - name: Testing artifact attestation subject regressions
         run: |
           python3 ruwac/tests/integration/test_testing_subjects.py

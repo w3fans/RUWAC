@@ -397,21 +397,38 @@ under Advanced. Enter its Linux SSH account, SSH port (0 keeps SSH configuration
 and the exact remote Wayland session, such as `wayland-0`. The SSH account must
 be the account owning that desktop, with an existing trusted host key and key
 authentication. The configured SSH identity, known-hosts file and jump route apply;
-the RDP service password is never reused. The remote desktop needs Python3, GTK4
-PyGObject and Xwayland (Fedora: `python3-gobject gtk4 xorg-x11-server-Xwayland`).
+the RDP service password is never reused. Receiving remote selections needs Python3,
+GTK4 PyGObject and Xwayland on that desktop (Fedora:
+`python3-gobject gtk4 xorg-x11-server-Xwayland`). Native publication through the
+GNOME companion does not require Xwayland.
 
 This optional helper receives remote text into local PRIMARY separately from the
 Ctrl+C clipboard. It follows the RDP tab’s receive clipboard policy and operates
 while its canvas has focus. Inactive remote selections are ignored. The focused
 native GUI publishes the selection, including on Wayland; a background Xwayland
-client cannot reliably do this. General local PRIMARY sharing into arbitrary remote native Wayland apps is not
-implemented; the confirmed remote RUWAC terminal path below is available.
+client cannot reliably do this. Native PRIMARY delivery to GNOME Shell 50
+applications is available through the optional [desktop companion](ruwac/desktop/primary-companion/README.md).
+Install it on the receiving desktop with `ruwac-desktop -G install`, open
+`ruwac-desktop -G preferences` to enable desktop publication permission, and
+authorize each selection connection from the source RDP controls. If status
+requires a new login, sign out and back in when convenient; setup never restarts
+your desktop. Other desktops retain their available compatibility routes,
+including the confirmed remote RUWAC terminal path below.
+
+The standalone companion archive can be checked without installing it or opening
+a desktop. Under a bounded test runner, run
+`python3 ruwac/tests/integration/primary_companion_package.py --evidence /path/to/new/evidence`.
+This checks exact archive inventory/bytes, the project license and schema
+compilation with GNOME tools; desktop login, authorization, transport and physical
+input require separate acceptance.
 Ctrl+C/V continues to work in both directions.
 CLIPBOARD, images and saved credentials are unchanged. It stops on tab disconnect
-or GUI exit; no remote service or clipboard-history file is installed. A missing
+or GUI exit; no background clipboard service or clipboard-history file is installed.
+The optional companion remains installed until explicitly removed. A missing
 SSH key, unavailable Xwayland, mismatched desktop or missing dependency leaves
-normal RDP/Ctrl+C usable and shows a selection-sharing error. Reconnect after
-correcting the settings. This helper supports Linux desktops with a working
+normal RDP/Ctrl+C usable and shows a selection-sharing error. Use **Retry selection
+connection** after correcting the settings; RDP stays connected and the new native
+helper needs fresh approval. Receiving selections supports Linux desktops with a working
 Xwayland PRIMARY bridge; it does not add PRIMARY support to Windows.
 
 Headless setup for an existing RDP endpoint is also available (no graphical
