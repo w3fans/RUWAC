@@ -6,6 +6,7 @@ from gi.repository import Gio,GLib
 from spike import Client,eventually
 p=argparse.ArgumentParser()
 for name in ['binary','gui','evidence']:p.add_argument('--'+name,required=True)
+p.add_argument('--tui')
 a=p.parse_args();assert os.environ.get('WAYLAND_DISPLAY')=='ruwac-test'
 root=Path(tempfile.mkdtemp(prefix='ergonomics-',dir=a.evidence));root.chmod(0o700)
 env={**os.environ,'GTK_A11Y':'none','GSETTINGS_BACKEND':'memory','LP_NUM_THREADS':'2','TOKIO_WORKER_THREADS':'2','SHELL':'/bin/bash'}
@@ -59,7 +60,7 @@ def png(path,n):
  def chunk(t,b):return struct.pack('!I',len(b))+t+b+struct.pack('!I',zlib.crc32(t+b))
  raw=b''.join(b'\0'+bytes([n,40,90,255])*8 for _ in range(5))
  path.write_bytes(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('!IIBBBBB',8,5,8,6,0,0,0))+chunk(b'IDAT',zlib.compress(raw))+chunk(b'IEND',b''))
-consumer=root/'consumer.py';consumer.write_text("""import os,sys,tty,json,hashlib
+consumer=root/'consumer.py';consumer.write_text("""import os,sys,tty,json,hashlib,subprocess
 from pathlib import Path
 tty.setraw(0);r=Path(sys.argv[1]);r.mkdir(exist_ok=True);f=(r/'raw').open('ab',buffering=0);n=0;buf=b''
 os.write(1,b'\\x1b[?2004hOpenAI Codex synthetic receiver\\r\\nGPT-6.1-Sol\\r\\n> ')
@@ -67,6 +68,10 @@ while True:
  b=os.read(0,8192)
  if not b:break
  f.write(b);buf+=b
+ if b'\\x16' in b:
+  data=subprocess.check_output(['wl-paste','--type','image/png'],timeout=5);n+=1
+  (r/'image.json').write_text(json.dumps({'count':n,'sha256':hashlib.sha256(data).hexdigest(),'native':True}))
+  os.write(1,('\\r\\n[Image #%d]\\r\\nGPT-6.1-Sol\\r\\n> '%n).encode())
  while b'\\x1b[200~'in buf and b'\\x1b[201~'in buf:
   before,tail=buf.split(b'\\x1b[200~',1);path,buf=tail.split(b'\\x1b[201~',1)
   p=Path(path.decode());data=p.read_bytes();assert data.startswith(b'\\x89PNG\\r\\n\\x1a\\n');n+=1
@@ -84,18 +89,26 @@ try:
   folder=root/('consumer'+str(n));folder.mkdir()
   rows.append(rpc('session.create',{'name':'Synthetic image key '+str(n),'argv':[str(program),str(consumer),str(folder)]}))
   rpc('pane.wait',{'pane':rows[-1]['pane'],'contains':'GPT-6.1-Sol','timeout_ms':5000})
- start([a.gui,'--new-instance','--socket',sock,*sum((['--session',v['session']]for v in rows),[]),'--fixture-dir',root,'--staging-dir',stage],'gui')
- eventually(lambda:command('inspect')['tabs']==2,15)
+ folder=root/'consumer2';folder.mkdir()
+ inner=rpc('session.create',{'name':'Nested Codex','argv':[str(exe),str(consumer),str(folder)]})
+ rpc('pane.wait',{'pane':inner['pane'],'contains':'GPT-6.1-Sol','timeout_ms':5000})
+ tui=root/'tui';tui.mkdir();shutil.copy2(a.tui or a.binary,tui/'ruwac')
+ rows.append(rpc('session.create',{'name':'Real nested TUI','argv':[str(tui/'ruwac'),'--socket',str(sock),'-r',inner['session']]}))
+ rpc('pane.wait',{'pane':rows[-1]['pane'],'contains':'GPT-6.1-Sol','timeout_ms':5000})
+ # An update replaces the executable without terminating the attached TUI.
+ (tui/'ruwac').unlink()
+ start([a.gui,'--new-instance' ,'--socket',sock,*sum((['--session',v['session']]for v in rows),[]),'--fixture-dir',root,'--staging-dir',stage],'gui')
+ eventually(lambda:command('inspect')['tabs']==3,15)
  start([sys.executable,str(Path(__file__).parents[1]/'fixtures/desktop_clipboard.py'),root],'peer')
  eventually(lambda:(root/'peer-ready.json').exists())
  focus('gui');command('tab-select',tab=0);command('focus-view',view=0)
  key(100,True);key(100,False)
  chord(20,shift=True);time.sleep(.3)
- assert command('inspect')['tabs']==2, 'Mapped shortcut opened a host tab'
+ assert command('inspect')['tabs']==3, 'Mapped shortcut opened a host tab'
  eventually(lambda:(root/'consumer0/raw').read_bytes().endswith(b'\x14'))
  mark('MAPPED-CTRL-SHIFT-T-REACHES-CHILD-WITHOUT-OPENING-HOST-TAB')
  key(100,True);key(100,False)
- chord(20,shift=True);eventually(lambda:command('inspect')['tabs']==3)
+ chord(20,shift=True);eventually(lambda:command('inspect')['tabs']==4)
  command('tab-select',tab=0);command('focus-view',view=0)
  for n,mode in enumerate(['desktop','traditional'],1):
   command('chrome',terminal_shortcuts=mode)
@@ -114,6 +127,19 @@ try:
  eventually(lambda:'required'in command('inspect',view=1)['status'],15)
  assert (root/'consumer1/raw').read_bytes()==b''
  mark('FORGED-MODEL-TITLE-CANNOT-AUTHORIZE-IMAGE-INPUT')
+ for n,mode in enumerate(['desktop','traditional'],1):
+  command('chrome',terminal_shortcuts=mode)
+  focus('peer');peer('set-png',file='image'+str(n)+'.png');focus('gui',view=2)
+  command('tab-select',tab=2);command('focus-view',view=2)
+  chord(47)
+  def nested_attached():
+   p=root/'consumer2/image.json'
+   return p.exists() and json.loads(p.read_text())['count']==n
+  eventually(nested_attached,15)
+  receipt=json.loads((root/'consumer2/image.json').read_text())
+  assert receipt['native'] and receipt['sha256']==hashlib.sha256((root/('image'+str(n)+'.png')).read_bytes()).hexdigest()
+  assert (root/'consumer2/raw').read_bytes()==b'\x16'*n, 'Nested route injected a path or submitted a draft'
+  mark('REAL-NESTED-TUI-CTRL-V-'+mode.upper()+'-NATIVE-CLIPBOARD-NO-SUBMIT')
 finally:
  for child in reversed(children):
   if child.poll() is None:child.terminate()
@@ -122,4 +148,4 @@ finally:
  if session:
   try:seat('Stop')
   except Exception:pass
- (Path(a.evidence)/'acceptance.json').write_text(json.dumps({'PASS':len(checks)==4,'checks':checks,'scope':'Owned compositor, real native keys/GDK clipboard and PTYs; synthetic Codex-named consumer, not provider qualification'},indent=2)+'\n')
+ (Path(a.evidence)/'acceptance.json').write_text(json.dumps({'PASS':len(checks)==6,'checks':checks,'scope':'Owned compositor, real native keys/GDK clipboard and PTYs; synthetic Codex-named consumer, not provider qualification'},indent=2)+'\n')

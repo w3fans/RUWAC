@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.4.46 — 2026-10-26 — Stable source release
+
+- Preserve screenshot Ctrl+V through a local nested RUWAC terminal session.
+  The GUI forwards the native paste key to the nested application instead of
+  rejecting its RUWAC foreground as though Codex were running directly in the tab.
+  Direct PNG attachments keep their process and focus checks; no draft is submitted.
+
 ## v0.4.45 — 2026-10-26 — Stable source release
 
 - Pass Ctrl+Shift+T and Ctrl+Shift+R to the focused application while Map keys is enabled, including applications inside RDP desktops.

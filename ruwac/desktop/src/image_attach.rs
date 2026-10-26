@@ -54,12 +54,26 @@ pub fn attach(
     path: &Path,
     ticket: &AtomicBool,
     native_api: bool,
+    native_clipboard_key: bool,
 ) -> io::Result<Value> {
     allowed(ticket)?;
     let pid = target(rpc, session, pane, None)?;
     let path = path
         .to_str()
         .ok_or_else(|| io::Error::other("Image path is not UTF-8"))?;
+    // A local nested TUI owns another PTY, so its Codex process is not in
+    // this foreground group. Preserve the user's Ctrl+V instead of treating
+    // the visible model footer as permission to inject a path through it.
+    if native_clipboard_key && local_ruwac_foreground(pid) {
+        target(rpc, session, pane, Some(pid))?;
+        allowed(ticket)?;
+        rpc.call(
+            "client.input",
+            json!({"pane":pane,"kind":"keyboard","text":"\u{16}"}),
+        )?;
+        return Ok(json!({"pane":pane,"native_clipboard_key_forwarded":true,
+            "submitted":false,"consumed":false,"queued":true}));
+    }
     guard::validate(
         path,
         pid.try_into()
@@ -104,6 +118,16 @@ pub fn attach(
     )
 }
 
+fn local_ruwac_foreground(pid: u64) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let root = std::path::PathBuf::from(format!("/proc/{pid}"));
+    std::fs::metadata(&root).is_ok_and(|m| m.uid() == unsafe { libc::geteuid() })
+        && std::fs::read_link(root.join("exe")).is_ok_and(|p| {
+            p.file_name()
+                .is_some_and(|n| n == "ruwac" || n == "ruwac (deleted)")
+        })
+}
+
 /// GDK reads are asynchronous; the GTK thread continuously revokes worker delivery on focus changes.
 pub fn clipboard(
     view: &std::rc::Rc<crate::view::View>,
@@ -120,6 +144,17 @@ pub fn clipboard_route(
     selected: std::rc::Rc<dyn Fn() -> bool>,
     delay: Duration,
     remote: Option<crate::remote_image::Target>,
+    done: impl FnOnce(Result<Value, String>) + 'static,
+) {
+    clipboard_route_inner(view, directory, selected, delay, remote, false, done);
+}
+fn clipboard_route_inner(
+    view: &std::rc::Rc<crate::view::View>,
+    directory: std::path::PathBuf,
+    selected: std::rc::Rc<dyn Fn() -> bool>,
+    delay: Duration,
+    remote: Option<crate::remote_image::Target>,
+    native_clipboard_key: bool,
     done: impl FnOnce(Result<Value, String>) + 'static,
 ) {
     use gtk::prelude::*;
@@ -203,6 +238,7 @@ pub fn clipboard_route(
                         pane: view.target.borrow().clone(),
                         path: image.path.clone(),
                         allowed: allowed.clone(),
+                        native_clipboard_key,
                         done: send,
                     })
             };
@@ -299,26 +335,36 @@ pub fn try_clipboard_paste(
     });
     let weak = std::rc::Rc::downgrade(view);
     view.warn("Reading clipboard PNG for the selected Codex draft…");
-    clipboard(view, directory, selected, Duration::ZERO, move |result| {
-        let Some(view) = weak.upgrade() else {
-            return;
-        };
-        if !view.end_image_paste(&ticket) {
-            return;
-        }
-        match result {
-            Ok(receipt)
-                if receipt["draft_attachment_observed"] == true
-                    && receipt["focus_current"] == true =>
-            {
-                view.warn("PNG attached to the Codex draft; submit it in Codex when ready.")
+    clipboard_route_inner(
+        view,
+        directory,
+        selected,
+        Duration::ZERO,
+        None,
+        true,
+        move |result| {
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            if !view.end_image_paste(&ticket) {
+                return;
             }
-            Ok(_) => {
-                view.warn("Image attachment not confirmed; inspect the draft before retrying.")
+            match result {
+                Ok(receipt) if receipt["native_clipboard_key_forwarded"] == true => view
+                    .warn("Ctrl+V forwarded to the nested RUWAC session; check the Codex draft."),
+                Ok(receipt)
+                    if receipt["draft_attachment_observed"] == true
+                        && receipt["focus_current"] == true =>
+                {
+                    view.warn("PNG attached to the Codex draft; submit it in Codex when ready.")
+                }
+                Ok(_) => {
+                    view.warn("Image attachment not confirmed; inspect the draft before retrying.")
+                }
+                Err(error) => view.warn(&error),
             }
-            Err(error) => view.warn(&error),
-        }
-    });
+        },
+    );
     true
 }
 

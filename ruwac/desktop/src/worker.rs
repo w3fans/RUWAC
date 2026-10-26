@@ -411,6 +411,7 @@ pub enum Command {
     AttachImage {
         pane: String,
         path: std::path::PathBuf,
+        native_clipboard_key: bool,
         allowed: Arc<AtomicBool>,
         done: SyncSender<Result<Value, String>>,
     },
@@ -605,6 +606,7 @@ impl Worker {
                             Command::AttachImage {
                                 pane,
                                 path,
+                                native_clipboard_key,
                                 allowed,
                                 done,
                             } => {
@@ -612,7 +614,13 @@ impl Worker {
                                     .as_array()
                                     .is_some_and(|m| m.iter().any(|m| m == "pane.attachImage"));
                                 let result = crate::image_attach::attach(
-                                    &mut rpc, &session, &pane, &path, &allowed, native_api,
+                                    &mut rpc,
+                                    &session,
+                                    &pane,
+                                    &path,
+                                    &allowed,
+                                    native_api,
+                                    native_clipboard_key,
                                 )
                                 .map_err(|e| e.to_string());
                                 let _ = done.try_send(result.clone());
