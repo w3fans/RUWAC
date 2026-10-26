@@ -1495,7 +1495,11 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
     let mut commands_refreshed = Instant::now();
     let mut input_at = Instant::now();
     while !STOP.load(Ordering::Relaxed) {
-        let events = match rx.recv_timeout(Duration::from_millis(10)) {
+        // Briefly poll faster after input so local echo is not delayed by the
+        // ordinary output refresh cadence. Quiet terminals keep their old rate.
+        let interactive = input_at.elapsed() < Duration::from_millis(150);
+        let events = match rx.recv_timeout(Duration::from_millis(if interactive { 4 } else { 10 }))
+        {
             Ok(Some(b)) => {
                 input_at = Instant::now();
                 decoder.feed(&b)
@@ -2130,7 +2134,12 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
             )?;
             dirty = true;
         }
-        if rendered.elapsed() > Duration::from_millis(25) {
+        let render_interval = if input_at.elapsed() < Duration::from_millis(150) {
+            8
+        } else {
+            25
+        };
+        if rendered.elapsed() > Duration::from_millis(render_interval) {
             if matches!(mode, Mode::Live) {
                 // Navigation can already have replaced the frame with an idle
                 // live shell. Observe it before a revision-only poll skips it.
@@ -2496,5 +2505,24 @@ mod display_identity_tests {
             status_line(&renamed, (23, 80), "^A · Window choice cancelled")
                 .contains("Window choice cancelled")
         );
+    }
+}
+
+#[cfg(test)]
+mod modified_navigation_tests {
+    use super::*;
+
+    #[test]
+    fn fragmented_shift_left_survives_tui_decode_and_key_split() {
+        let sequence = b"\x1b[1;2D";
+        for split in 1..sequence.len() {
+            let mut decoder = Decoder::default();
+            assert!(decoder.feed(&sequence[..split]).is_empty());
+            let events = decoder.feed(&sequence[split..]);
+            assert_eq!(events, vec![Input::Keyboard(sequence.to_vec())]);
+            let keys = copy::keys(std::str::from_utf8(sequence).unwrap());
+            assert_eq!(keys.len(), 1);
+            assert_eq!(keys[0].bytes().as_bytes(), sequence);
+        }
     }
 }

@@ -479,12 +479,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
   let shortcut_terminal=new_terminal.clone();let shortcut_window=window.downgrade();let shortcut_controls=chrome.controls.clone();let shell=machine_shell.clone();let search=search.clone();let keys=gtk::EventControllerKey::new();keys.set_propagation_phase(gtk::PropagationPhase::Capture);let mode=Rc::new(shortcuts::LocalMode::default());let tab_switch=tabs.clone();
   // AltGr tap: Map keys (Alt+#, Alt+Tab… go to the terminal/remote) until the next tap.
   let badge=gtk::Label::new(Some("Map keys"));badge.add_css_class("local-mode");badge.set_tooltip_text(Some("Map keys: Alt+1…9 and system shortcuts such as Alt+Tab and Super go to the terminal program or remote desktop (a RUWAC session switches its windows with Alt+N). Tap AltGr again for RUWAC tabs and this computer's shortcuts."));badge.set_visible(false);header.pack_end(&badge);
-  let (released,release_grab,release_badge)=(mode.clone(),key_grab.clone(),badge.clone());keys.connect_key_released(move|_,key,_,_|{if let Some(on)=released.release(key){release_grab.set_local(!on);release_badge.set_visible(on);}});
+  let (released,release_grab,release_badge)=(mode.clone(),key_grab.clone(),badge.clone());keys.connect_key_released(move|_,_,code,_|{if let Some(on)=released.release(code){release_grab.set_local(!on);release_badge.set_visible(on);}});
 
+  shortcuts::bind_mode(window.upcast_ref(),&mode);
   let menu_chrome=chrome.clone();let menu_epoch=Rc::new(Cell::new(0u64));
-  keys.connect_key_pressed(move|_,key,_,mods|{
+  keys.connect_key_pressed(move|_,key,code,mods|{
     // Host menu chords precede application input, in either Map keys mode.
-    mode.press(key);
+    mode.press(key,code);
     if key==gdk::Key::Escape{menu_epoch.set(menu_epoch.get().wrapping_add(1));}
     if let Some(agents)=shortcuts::host_menu(key,mods){
       menu_epoch.set(menu_epoch.get().wrapping_add(1));let ticket=menu_epoch.get();

@@ -562,12 +562,16 @@ impl Worker {
                 let mut shown: Option<Value> = None;
                 // Poll fast while output or input is recent, slowly when quiet.
                 let mut active = Instant::now();
+                let mut typed = Instant::now() - Duration::from_secs(1);
                 while !halt.load(Ordering::Relaxed) {
                     for _ in 0..16 {
                         let Some(cmd) = early.pop_front().or_else(|| rx.try_recv().ok()) else {
                             break;
                         };
                         let size = cmd.bytes();
+                        if matches!(&cmd, Command::Rpc(method, _) if method == "client.input") {
+                            typed = Instant::now();
+                        }
                         let result = match cmd {
                             Command::Rpc(m, p) if m == "client.retireEnded" => {
                                 (|| -> io::Result<_> {
@@ -813,6 +817,8 @@ impl Worker {
                     // Any command (typing, resize) ends the wait immediately.
                     let wait = if !seen.load(Ordering::Relaxed) {
                         250
+                    } else if typed.elapsed() < Duration::from_millis(150) {
+                        8
                     } else if active.elapsed() < Duration::from_secs(1) {
                         20
                     } else {

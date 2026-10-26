@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Assemble a tested Fedora candidate from built artifacts; never assigns versions."""
 import argparse
+from bisect import bisect_right
 import gzip
 import hashlib
 import json
@@ -252,10 +253,11 @@ def unwind_index_data(content, address, frame_address, frames, executable):
 def indexed_branch_slots(data, records):
     """Recognize a bounded x86_64 relative branch table emitted by LLVM.
 
-    This deliberately handles only one fully checked instruction form. Unknown
-    forms remain ordinary scanned data. The index is checked as index-1 < count;
-    every slot, including the unused zero slot, must target executable bytes.
-    No text/section-name allowlist or private matching value is involved.
+    The first form checks index-1 < count, including its unused zero slot.
+    The second has a byte index, independent-reference boundaries and a short
+    negative target prefix whose high byte cannot be UTF-8 text. Unrecognized
+    words retain the ordinary scan. Neither form uses a text/section-name
+    allowlist or a matching private value.
     """
     executable = [(s[3], s[3] + s[5]) for s in records if s[2] & 4]
     slots = set()
@@ -291,6 +293,64 @@ def indexed_branch_slots(data, records):
                        for i in range(count + 1)]
             if all(any(a <= target < b for a, b in executable) for target in targets):
                 slots.update(range(table, table + length, 4))
+    # An independently referenced object starts a new conservative boundary,
+    # even when its instruction form is unknown. Do not let recognition of one
+    # table classify a neighboring table whose own dispatch was not validated.
+    references = set()
+    rip_lea = re.compile(rb'[\x48-\x4f]\x8d[\x05\x0d\x15\x1d\x25\x2d\x35\x3d](.{4})', re.S)
+    for section in records:
+        if not section[2] & 4:
+            continue
+        start, size = section[4:6]
+        if start + size > len(data):
+            raise ValueError('Executable section exceeds artifact bounds')
+        for match in rip_lea.finditer(data[start:start + size]):
+            references.add(section[3] + match.start() + 7 + struct.unpack('<i', match[1])[0])
+    ordered_references = sorted(references)
+    # LLVM also emits byte-discriminant tables without an explicit comparison.
+    # movzbl bounds the index to 0..255. Recognize only this exact load/relative
+    # dispatch form (with one optional stack spill that preserves RAX/RCX).
+    # Classify only the contiguous prefix of negative offsets that actually
+    # target executable bytes; text, positive words, unknown instructions and
+    # the first invalid target remain scanned. No matching policy value, text
+    # hash, symbol/section name or externally supplied exception is consulted.
+    byte_dispatch = re.compile(
+        rb'\x0f\xb6\x46.\x48\x8d\x0d(.{4})'
+        rb'\x48\x63\x04\x81\x48\x01\xc8'
+        rb'(?:\x48\x89\x74\x24.)?\xff\xe0', re.S)
+    for section in records:
+        if not section[2] & 4:
+            continue
+        start, size = section[4:6]
+        if start + size > len(data):
+            raise ValueError('Executable section exceeds artifact bounds')
+        for match in byte_dispatch.finditer(data[start:start + size]):
+            table = section[3] + match.start() + 11 + struct.unpack('<i', match[1])[0]
+            candidates = [s for s in records if s[1] == 1 and s[2] & 2
+                          and not s[2] & 5 and s[3] <= table < s[3] + s[5]]
+            if table % 4 or len(candidates) != 1:
+                continue
+            source = candidates[0]
+            offset = source[4] + table - source[3]
+            boundary_index = bisect_right(ordered_references, table)
+            boundary = source[3] + source[5]
+            if boundary_index < len(ordered_references):
+                boundary = min(boundary, ordered_references[boundary_index])
+            count = min(256, (boundary - table) // 4)
+            if offset + count * 4 > len(data):
+                raise ValueError('Byte-indexed branch table exceeds artifact bounds')
+            numeric = []
+            for i in range(count):
+                relative = struct.unpack_from('<i', data, offset + i * 4)[0]
+                target = table + relative
+                # FE/FF cannot occur in valid UTF-8. Longer negative offsets
+                # remain scanned rather than consuming potentially readable text.
+                if (data[offset + i * 4 + 3] not in {0xfe, 0xff} or relative >= 0
+                        or not any(a <= target < b for a, b in executable)):
+                    break
+                numeric.append(table + i * 4)
+            if len(numeric) >= 2:
+                slots.update(numeric)
     return slots
 
 

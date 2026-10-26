@@ -643,6 +643,75 @@ try:
   def native_chord(mods,key):
    for k in mods+[key]:mutter_input('NotifyKeyboardKeysym',GLib.Variant('(ub)',(k,True)));time.sleep(.04)
    for k in [key]+list(reversed(mods)):mutter_input('NotifyKeyboardKeysym',GLib.Variant('(ub)',(k,False)));time.sleep(.04)
+  tabs_before=command('gui','inspect')['tabs']
+  def map_toggle():
+   for down in [True,False]:mutter_input('NotifyKeyboardKeycode',GLib.Variant('(ub)',(100,down)));time.sleep(.06)
+  tap_start=len(keys());map_toggle();time.sleep(.2)
+  assert not any(k['code']==0x38 and k['extended'] for k in keys()[tap_start:]), 'Clean Right Alt tap reached the remote; a nested GUI would toggle too'
+  for symbol,code in [(116,20),(114,19)]:
+   baseline=len(keys());native_chord([65507,65505],symbol)
+   spike.eventually(lambda:len([k for k in keys()[baseline:]if k['code']==code])>=2)
+   assert [k['down']for k in keys()[baseline:]if k['code']==code]==[True,False],keys()[baseline:]
+   assert command('gui','inspect')['tabs']==tabs_before,'Mapped tab shortcut executed on host'
+   assert command('gui','rdp-inspect',rdp=0)['gnome_auto']['guards']['canvas_focus']
+  # AltGr typing remains a balanced remote chord and must not toggle the host.
+  baseline=len(keys())
+  for code,down in [(100,True),(47,True),(47,False),(100,False)]:
+   mutter_input('NotifyKeyboardKeycode',GLib.Variant('(ub)',(code,down)));time.sleep(.06)
+  spike.eventually(lambda:len([k for k in keys()[baseline:] if k['code']==0x38 and k['extended']])==2)
+  assert [k['down'] for k in keys()[baseline:] if k['code']==0x38 and k['extended']]==[True,False]
+  baseline=len(keys());native_chord([65507,65505],116)
+  spike.eventually(lambda:len([k for k in keys()[baseline:] if k['code']==20])>=2)
+  assert command('gui','inspect')['tabs']==tabs_before
+  # Genuine compositor pointer events preserve a clean tap on ordinary motion,
+  # but flush AltGr before an actual remote button chord.
+  def native_key(code,down):
+   mutter_input('NotifyKeyboardKeycode',GLib.Variant('(ub)',(code,down)));time.sleep(.06)
+  def mouse_events():
+   try:return json.loads((root/f"input-{ready['ports'][0]}.mouse.json").read_text())['events']
+   except (OSError,ValueError):return []
+  pointer_layout=command('gui','chrome')
+  command('gui','rdp-display',rdp=0,mode='fit',zoom=1.0)
+  command('gui','chrome',fullscreen=True)
+  full=spike.eventually(lambda:c if (c:=command('gui','chrome'))['fullscreen'] and c['window_width']>pointer_layout['window_width'] else False,8)
+  command('gui','rdp-switch',rdp=0)
+  # A fullscreen owned fixture has a known global origin on every test display.
+  # Earlier resize cases may leave a small centered window on a 4K compositor.
+  mutter_input('NotifyPointerMotionRelative',GLib.Variant('(dd)',(-10000.,-10000.)))
+  mutter_input('NotifyPointerMotionRelative',GLib.Variant('(dd)',(float(full['window_width'])/2,float(full['window_height'])/2)));time.sleep(.15)
+  baseline=len(keys());moving=len(mouse_events());native_key(100,True)
+  mutter_input('NotifyPointerMotionRelative',GLib.Variant('(dd)',(8.,2.)));time.sleep(.1)
+  native_key(100,False)
+  spike.eventually(lambda:len(mouse_events())>moving)
+  assert not any(k['code']==0x38 and k['extended'] for k in keys()[baseline:]), 'Pointer motion leaked a clean host tap'
+  # That clean tap turned Map keys off; turn it on again before the button chord.
+  map_toggle();baseline=len(keys());mouse_start=len(mouse_events());native_key(100,True)
+  for down in [True,False]:
+   mutter_input('NotifyPointerButton',GLib.Variant('(ib)',(272,down)));time.sleep(.08)
+  native_key(100,False)
+  spike.eventually(lambda:len([k for k in keys()[baseline:] if k['code']==0x38 and k['extended']])==2)
+  assert [k['down'] for k in keys()[baseline:] if k['code']==0x38 and k['extended']]==[True,False]
+  spike.eventually(lambda:'LeftPressed' in mouse_events()[mouse_start:] and mouse_events()[-1]=='LeftReleased')
+  baseline=len(keys());native_chord([65507,65505],116)
+  spike.eventually(lambda:len([k for k in keys()[baseline:] if k['code']==20])>=2)
+  assert command('gui','inspect')['tabs']==tabs_before,'Pointer chord toggled host Map keys'
+  command('gui','chrome',fullscreen=pointer_layout['fullscreen'])
+  spike.eventually(lambda:command('gui','chrome')['window_height']==pointer_layout['window_height'],8)
+  command('gui','rdp-switch',rdp=0)
+  # Focus loss releases a delivered AltGr chord once, without changing Map keys.
+  baseline=len(keys())
+  for code,down in [(100,True),(47,True),(47,False)]:
+   mutter_input('NotifyKeyboardKeycode',GLib.Variant('(ub)',(code,down)));time.sleep(.06)
+  spike.eventually(lambda:any(k['code']==0x38 and k['extended'] and k['down'] for k in keys()[baseline:]))
+  chord(65360)
+  spike.eventually(lambda:not command('gui','rdp-inspect',rdp=0)['gnome_auto']['guards']['canvas_focus'])
+  mutter_input('NotifyKeyboardKeycode',GLib.Variant('(ub)',(100,False)))
+  spike.eventually(lambda:len([k for k in keys()[baseline:] if k['code']==0x38 and k['extended']])==2)
+  assert [k['down'] for k in keys()[baseline:] if k['code']==0x38 and k['extended']]==[True,False]
+  command('gui','rdp-switch',rdp=0);baseline=len(keys());native_chord([65507,65505],116)
+  spike.eventually(lambda:len([k for k in keys()[baseline:] if k['code']==20])>=2)
+  assert command('gui','inspect')['tabs']==tabs_before
+  map_toggle()
   baseline=len(keys())
   native_chord([65507],118)
   time.sleep(.3)
@@ -661,7 +730,30 @@ try:
   spike.eventually(lambda:command('gui','chrome')['window_height']==local['window_height'],8)
   assert command('gui','rdp-inspect',rdp=0)['transport_id']==before['transport_id']
   command('gui','rdp-switch',rdp=0)
-  return {'real_GDK_key_events':True,'paste_key_down_up_balanced':True,'simultaneous_text_PNG_lazy_read_from_independent_GTK_peer':True,'Ctrl_Alt_V_and_Ctrl_Shift_V_forwarded':True,'Ctrl_Alt_Home_releases_remote_focus':True,'Ctrl_Alt_Enter_fullscreen_and_restore':True,'transport_preserved':True,'physical_keyboard':False}
+  # The same host-only tap rule applies after a live tab is moved to a new window.
+  tab=command('gui','rdp-inspect',rdp=0)['tab']
+  command('gui','detach-tab',operation='detach',tab=tab)
+  for _ in range(12):
+   command('gui','rdp-switch',rdp=0)
+   if command('gui','rdp-inspect',rdp=0)['gnome_auto']['guards']['window_active']:break
+   focus_keys(True);time.sleep(.15)
+  assert command('gui','rdp-inspect',rdp=0)['gnome_auto']['guards']['window_active']
+  assert command('gui','rdp-inspect',rdp=0)['gnome_auto']['guards']['canvas_focus']
+  baseline=len(keys());map_toggle();time.sleep(.2)
+  assert not any(k['code']==0x38 and k['extended'] for k in keys()[baseline:])
+  baseline=len(keys());native_chord([65513],49)
+  spike.eventually(lambda:len([k for k in keys()[baseline:] if k['code']==2])>=2)
+  assert [k['down']for k in keys()[baseline:] if k['code']==2]==[True,False]
+  baseline=len(keys());map_toggle();time.sleep(.2)
+  assert not any(k['code']==0x38 and k['extended'] for k in keys()[baseline:])
+  baseline=len(keys());native_chord([65513],49);time.sleep(.2)
+  assert not any(k['code']==2 for k in keys()[baseline:]), 'Detached host mode did not reclaim Alt+digit'
+  command('gui','detach-tab',operation='return',window=1)
+  focus('gui');command('gui','rdp-switch',rdp=0)
+  assert command('gui','rdp-inspect',rdp=0)['transport_id']==before['transport_id']
+  # Later RPC-only pointer cases must not inherit a live hover over the canvas.
+  mutter_input('NotifyPointerMotionRelative',GLib.Variant('(dd)',(-10000.,-10000.)));time.sleep(.2)
+  return {'right_alt_tap_host_only':True,'altgr_chord_and_focus_cancel_balanced':True,'native_pointer_motion_and_button_chord':True,'detached_mapping_independent':True,'mapped_Ctrl_Shift_T_R_reach_authenticated_RDP_peer_balanced':True,'no_host_tab_or_sidebar_action':True,'real_GDK_key_events':True,'paste_key_down_up_balanced':True,'simultaneous_text_PNG_lazy_read_from_independent_GTK_peer':True,'Ctrl_Alt_V_and_Ctrl_Shift_V_forwarded':True,'Ctrl_Alt_Home_releases_remote_focus':True,'Ctrl_Alt_Enter_fullscreen_and_restore':True,'transport_preserved':True,'physical_keyboard':False}
  if mutter_input:case('RDP-NATIVE-HOST-SHORTCUTS',host_shortcuts)
 
  def pointer_drag():

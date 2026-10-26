@@ -79,6 +79,15 @@ try:
  key(56,True);key(50,True);key(50,False);key(56,False)
  eventually(lambda:command('sidebar-shell')['shown']);assert outputs[1].read_bytes()==before+b'\x0b'
  key(1,True);key(1,False);eventually(lambda:not command('sidebar-shell')['shown']);mark('Alt-M-opens-Machines-and-Escape-closes-overlay-without-PTY-input')
+ # Modified cursor keys must stay distinct from plain arrows at the real PTY.
+ command('focus-view',view=1);before=outputs[1].read_bytes()
+ key(42,True);key(105,True);key(105,False);key(42,False)
+ eventually(lambda:outputs[1].read_bytes()==before+b'\x1b[1;2D')
+ key(105,True);key(105,False)
+ eventually(lambda:outputs[1].read_bytes()==before+b'\x1b[1;2D\x1b[D')
+ key(29,True);key(42,True);key(106,True);key(106,False);key(42,False);key(29,False)
+ eventually(lambda:outputs[1].read_bytes()==before+b'\x1b[1;2D\x1b[D\x1b[1;6C')
+ mark('real-GDK-Shift-Left-is-distinct-from-Left-and-Control-Shift-Right-preserves-modifiers')
  # Full-screen mouse applications (including Codex) own their wheel input.
  command('focus-view',view=3);eventually(lambda:'APP_MOUSE_READY'in rpc('pane.capture',{'pane':rows[3]['pane']})['text'])
  def check_app_wheel(label,offset=False):

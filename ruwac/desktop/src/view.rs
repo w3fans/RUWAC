@@ -2400,35 +2400,19 @@ impl View {
             }
             return;
         }
-        let mut text = match key {
+        let navigation = navigation_key(
+            key,
+            mods,
+            self.grid().is_some_and(|g| g["application_cursor"] == true),
+        );
+        let is_navigation = navigation.is_some();
+        let mut text = navigation.unwrap_or_else(|| match key {
             gdk::Key::Return | gdk::Key::KP_Enter => "\r".into(),
             gdk::Key::BackSpace => "\x7f".into(),
             gdk::Key::Tab => "\t".into(),
             gdk::Key::Escape => "\x1b".into(),
-            gdk::Key::Up => "\x1b[A".into(),
-            gdk::Key::Down => "\x1b[B".into(),
-            gdk::Key::Left => "\x1b[D".into(),
-            gdk::Key::Right => "\x1b[C".into(),
-            gdk::Key::Home => "\x1b[H".into(),
-            gdk::Key::End => "\x1b[F".into(),
-            gdk::Key::Delete => "\x1b[3~".into(),
-            gdk::Key::Page_Up => "\x1b[5~".into(),
-            gdk::Key::Page_Down => "\x1b[6~".into(),
             _ => ch.map(|c| c.to_string()).unwrap_or_default(),
-        };
-        if self.grid().is_some_and(|g| g["application_cursor"] == true)
-            && matches!(
-                key,
-                gdk::Key::Up
-                    | gdk::Key::Down
-                    | gdk::Key::Left
-                    | gdk::Key::Right
-                    | gdk::Key::Home
-                    | gdk::Key::End
-            )
-        {
-            text = text.replacen("\x1b[", "\x1bO", 1);
-        }
+        });
         if ctrl {
             if let Some(c) = ch {
                 if ('@'..='_').contains(&c.to_ascii_uppercase()) {
@@ -2440,7 +2424,7 @@ impl View {
             self.status.set_text("NUL key unsupported");
             return;
         }
-        if mods.contains(gdk::ModifierType::ALT_MASK) {
+        if !is_navigation && mods.contains(gdk::ModifierType::ALT_MASK) {
             text.insert(0, '\x1b');
         }
         if !text.is_empty() {
@@ -2836,5 +2820,93 @@ impl Drop for View {
             self.area.display().primary_clipboard().disconnect(handler);
         }
         self.cancel_image_paste();
+    }
+}
+
+// Xterm navigation modifiers are encoded in CSI parameters, including when
+// unmodified cursor keys use SS3. An ESC prefix alone would lose Shift.
+fn navigation_key(key: gdk::Key, mods: gdk::ModifierType, application: bool) -> Option<String> {
+    let (parameter, final_byte) = match key {
+        gdk::Key::Up => (1, 'A'),
+        gdk::Key::Down => (1, 'B'),
+        gdk::Key::Right => (1, 'C'),
+        gdk::Key::Left => (1, 'D'),
+        gdk::Key::Home => (1, 'H'),
+        gdk::Key::End => (1, 'F'),
+        gdk::Key::Delete => (3, '~'),
+        gdk::Key::Page_Up => (5, '~'),
+        gdk::Key::Page_Down => (6, '~'),
+        _ => return None,
+    };
+    let modifier = 1
+        + u8::from(mods.contains(gdk::ModifierType::SHIFT_MASK))
+        + 2 * u8::from(mods.contains(gdk::ModifierType::ALT_MASK))
+        + 4 * u8::from(mods.contains(gdk::ModifierType::CONTROL_MASK));
+    Some(if modifier > 1 {
+        format!("\x1b[{parameter};{modifier}{final_byte}")
+    } else if final_byte == '~' {
+        format!("\x1b[{parameter}~")
+    } else if application {
+        format!("\x1bO{final_byte}")
+    } else {
+        format!("\x1b[{final_byte}")
+    })
+}
+
+#[cfg(test)]
+mod navigation_modifier_tests {
+    use super::*;
+
+    #[test]
+    fn queued_question_shift_left_is_distinct_from_dashboard_left() {
+        for application in [false, true] {
+            assert_eq!(
+                navigation_key(gdk::Key::Left, gdk::ModifierType::SHIFT_MASK, application)
+                    .as_deref(),
+                Some("\x1b[1;2D")
+            );
+            assert_eq!(
+                navigation_key(gdk::Key::Left, gdk::ModifierType::empty(), application).as_deref(),
+                Some(if application { "\x1bOD" } else { "\x1b[D" })
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_preserves_all_shift_alt_control_combinations() {
+        for application in [false, true] {
+            for bits in 1..8 {
+                let mut mods = gdk::ModifierType::empty();
+                if bits & 1 != 0 {
+                    mods |= gdk::ModifierType::SHIFT_MASK;
+                }
+                if bits & 2 != 0 {
+                    mods |= gdk::ModifierType::ALT_MASK;
+                }
+                if bits & 4 != 0 {
+                    mods |= gdk::ModifierType::CONTROL_MASK;
+                }
+                for (key, parameter, final_byte) in [
+                    (gdk::Key::Up, 1, 'A'),
+                    (gdk::Key::Down, 1, 'B'),
+                    (gdk::Key::Right, 1, 'C'),
+                    (gdk::Key::Left, 1, 'D'),
+                    (gdk::Key::Home, 1, 'H'),
+                    (gdk::Key::End, 1, 'F'),
+                    (gdk::Key::Delete, 3, '~'),
+                    (gdk::Key::Page_Up, 5, '~'),
+                    (gdk::Key::Page_Down, 6, '~'),
+                ] {
+                    assert_eq!(
+                        navigation_key(key, mods, application),
+                        Some(format!("\x1b[{parameter};{}{final_byte}", bits + 1))
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            navigation_key(gdk::Key::a, gdk::ModifierType::SHIFT_MASK, false),
+            None
+        );
     }
 }

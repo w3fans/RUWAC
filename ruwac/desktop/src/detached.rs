@@ -350,17 +350,18 @@ impl Windows {
         let g = grab.clone();
         window.connect_is_active_notify(move |_| g.update());
         let mode = Rc::new(shortcuts::LocalMode::default());
+        shortcuts::bind_mode(window.upcast_ref(), &mode);
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let (m, g) = (mode.clone(), grab.clone());
-        keys.connect_key_released(move |_, key, _, _| {
-            if let Some(mapped) = m.release(key) {
+        keys.connect_key_released(move |_, _, code, _| {
+            if let Some(mapped) = m.release(code) {
                 g.set_local(!mapped);
             }
         });
         let (t, w, c) = (tabs.clone(), window.downgrade(), controls.clone());
-        keys.connect_key_pressed(move |_, key, _, mods| {
-            mode.press(key);
+        keys.connect_key_pressed(move |_, key, code, mods| {
+            mode.press(key, code);
             if !mode.active() {
                 if let Some(index) = shortcuts::alt_tab_index(key, mods) {
                     shortcuts::select_tab(&t, index);

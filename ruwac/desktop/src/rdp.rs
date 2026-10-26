@@ -1715,6 +1715,7 @@ pub struct RdpView {
     resize_at: Cell<Option<std::time::Instant>>,
     requested: Cell<(u16, u16)>,
     pending_super: RefCell<crate::remote_keys::DeferredSuper>,
+    pending_altgr: RefCell<crate::remote_keys::DeferredAltGr>,
     clipboard_refresh_pending: Cell<bool>,
     held: RefCell<HashSet<(u8, bool)>>,
     buttons: RefCell<HashSet<u32>>,
@@ -1947,6 +1948,7 @@ impl RdpView {
             resize_at: Cell::new(None),
             requested: Cell::new((0, 0)),
             pending_super: RefCell::new(Default::default()),
+            pending_altgr: RefCell::new(Default::default()),
             clipboard_refresh_pending: Cell::new(false),
             held: RefCell::new(HashSet::new()),
             buttons: RefCell::new(HashSet::new()),
@@ -2446,6 +2448,7 @@ impl RdpView {
                 };
                 let units = (delta * 120.0).round().clamp(-256.0, 255.0) as i16;
                 if units != 0 {
+                    v.flush_deferred_modifiers();
                     v.send(vec![FastPathInputEvent::MouseEvent(MousePdu {
                         flags: if horizontal {
                             PointerFlags::HORIZONTAL_WHEEL
@@ -4242,6 +4245,50 @@ impl RdpView {
             }
         }
     }
+    fn modifier_plan(&self, plan: crate::remote_keys::Plan) -> bool {
+        if !plan.events.is_empty() {
+            let mut events = Vec::new();
+            for (scan, up) in plan.events {
+                if !up {
+                    self.held.borrow_mut().insert((scan, true));
+                } else {
+                    self.held.borrow_mut().remove(&(scan, true));
+                }
+                events.push(FastPathInputEvent::KeyboardEvent(
+                    KeyboardFlags::EXTENDED
+                        | if up {
+                            KeyboardFlags::RELEASE
+                        } else {
+                            KeyboardFlags::empty()
+                        },
+                    scan,
+                ));
+            }
+            self.send(events);
+        }
+        plan.handled
+    }
+    fn input_focused(&self) -> bool {
+        self.area.has_focus()
+            && self
+                .root
+                .root()
+                .and_downcast::<gtk::Window>()
+                .is_some_and(|w| w.is_active())
+    }
+    fn flush_deferred_modifiers(&self) {
+        let focused = self.input_focused();
+        let plan = self
+            .pending_super
+            .borrow_mut()
+            .key(None, false, focused, false);
+        self.modifier_plan(plan);
+        let plan = self
+            .pending_altgr
+            .borrow_mut()
+            .key(false, false, focused, false, false);
+        self.modifier_plan(plan);
+    }
     fn key(&self, key: gdk::Key, code: u32, release: bool) {
         if !release {
             let held = self.held.borrow();
@@ -4277,32 +4324,35 @@ impl RdpView {
                 .root()
                 .and_downcast::<gtk::Window>()
                 .is_some_and(|w| w.is_active());
+        let altgr = matches!(key, gdk::Key::Alt_R | gdk::Key::ISO_Level3_Shift);
+        // Preserve modifier order when Super was pressed before AltGr.
+        if altgr {
+            let plan = self
+                .pending_super
+                .borrow_mut()
+                .key(None, release, focused, false);
+            self.modifier_plan(plan);
+        }
+        let (alt_held, other_held) = {
+            let held = self.held.borrow();
+            (
+                held.contains(&(0x38, true)),
+                held.iter().any(|k| *k != (0x38, true)) || !self.buttons.borrow().is_empty(),
+            )
+        };
+        let plan = self
+            .pending_altgr
+            .borrow_mut()
+            .key(altgr, release, focused, alt_held, other_held);
+        if self.modifier_plan(plan) {
+            return;
+        }
         let held = meta.is_some_and(|scan| self.held.borrow().contains(&(scan, true)));
         let plan = self
             .pending_super
             .borrow_mut()
             .key(meta, release, focused, held);
-        if !plan.events.is_empty() {
-            let mut events = Vec::new();
-            for (scan, up) in plan.events {
-                if !up {
-                    self.held.borrow_mut().insert((scan, true));
-                } else {
-                    self.held.borrow_mut().remove(&(scan, true));
-                }
-                events.push(FastPathInputEvent::KeyboardEvent(
-                    KeyboardFlags::EXTENDED
-                        | if up {
-                            KeyboardFlags::RELEASE
-                        } else {
-                            KeyboardFlags::empty()
-                        },
-                    scan,
-                ));
-            }
-            self.send(events);
-        }
-        if plan.handled {
+        if self.modifier_plan(plan) {
             return;
         }
 
@@ -4553,6 +4603,9 @@ impl RdpView {
         if button == 2 && !release {
             self.native_middle_presses
                 .set(self.native_middle_presses.get().saturating_add(1));
+        }
+        if button != 0 || !self.buttons.borrow().is_empty() {
+            self.flush_deferred_modifiers();
         }
         self.send(vec![FastPathInputEvent::MouseEvent(MousePdu {
             flags,
@@ -5366,6 +5419,7 @@ impl RdpView {
             c.invalidate_input();
         }
         self.pending_super.borrow_mut().clear();
+        self.pending_altgr.borrow_mut().clear();
         self.release_buttons();
         let keys: Vec<_> = self
             .held

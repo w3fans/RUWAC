@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## v0.4.47 — 2026-10-26 — Stable source release
+
+- Reduce terminal echo delay with a short faster refresh window after typing,
+  retaining the existing quiet and hidden-tab polling intervals.
+
+- Preserve Shift, Alt and Control on terminal navigation keys. Shift+Left now
+  reaches applications as its own chord, including through nested terminal
+  multiplexers, instead of becoming plain Left.
+
+- Recognize validated byte-indexed relative branch addresses during artifact
+  privacy scanning. Keep literals, keys, invalid targets and independently
+  referenced neighboring data subject to the ordinary checks.
+
+- Keep a clean Right Alt tap local to the current RUWAC window, preventing a
+  nested remote GUI from toggling Map keys at the same time. Forward AltGr key
+  and pointer chords with balanced releases, and cancel pending taps on focus
+  changes in both main and detached windows.
+
 ## v0.4.46 — 2026-10-26 — Stable source release
 
 - Preserve screenshot Ctrl+V through a local nested RUWAC terminal session.
