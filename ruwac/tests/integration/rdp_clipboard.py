@@ -504,6 +504,39 @@ try:
   after=command('gui','inspect');assert before['tabs']==after['tabs']
   return {'native_dialog':True,'explicit_agents':opened['agents'],'cancel_creates_no_session':True,'SSH_profiles':opened['SSH_profiles'],'external_agent_launch':'not performed in this UI fixture'}
  case('MACHINES-REMOTE-AGENT-LAUNCHER',agent_launcher)
+ def automatic_gdm_pointer():
+  extra=root/'gdm-pointer-server';extra.mkdir(mode=0o700)
+  for name in ['cert.pem','key.pem']:(extra/name).write_bytes((root/name).read_bytes());(extra/name).chmod(0o600)
+  start([a.server,str(extra)],'gdm-pointer-server');spike.eventually(lambda:(extra/'server-ready.json').exists(),10)
+  port=json.loads((extra/'server-ready.json').read_text())['ports'][0];ref='generated-gdm-pointer-'+root.name
+  subprocess.run(['secret-tool','store','--label=RUWAC disposable GDM pointer fixture','application','RUWAC','profile',ref],input=b'generated-local-only',env=env,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
+  try:
+   command('gui','profile-editor',operation='new',response='keep',fields={'0':'Generated GDM pointer','3':'127.0.0.1:'+str(port),'4':'fixture','9':ref,'10':str(root/'cert.pem'),'13':0},named={'rdp-connection-mode':1,'gnome-username':'generated-linux-user','gnome-auto-login':True})
+   spike.eventually(lambda:any(d['fields'] and d['width']>0 for d in command('gui','profile-editor',operation='layout')['dialogs']),10)
+   command('gui','profile-editor',operation='inspect',response='connect')
+   frame=spike.eventually(lambda:r if (r:=command('gui','rdp-inspect',rdp=3)).get('size')==[320,180] and r['gnome_auto']['armed'] else False,20)
+   epoch=frame['gnome_auto']['input_epoch'];mouse_path=extra/f'input-{port}.mouse.json'
+   def mouse():
+    try:return json.loads(mouse_path.read_text())['events']
+    except (FileNotFoundError,ValueError):return []
+   before=len(mouse());denied=command('gui','rdp-assist',rdp=3,operation='automatic-pointer',stale=True)
+   assert not denied['queued'] and denied['epoch_unchanged'],denied
+   stale_lookup=command('gui','rdp-assist',rdp=3,operation='stale-lookup-target')
+   assert not stale_lookup['accepted'] and stale_lookup['armed'] and stale_lookup['epoch_unchanged'],stale_lookup
+   command('gui','rdp-pointer',rdp=3,x=100,y=90,button=1)
+   command('gui','rdp-pointer',rdp=3,x=100,y=90,button=1,release=True)
+   time.sleep(.15);assert len(mouse())==before,'manual click bypassed automatic input shield'
+   queued=command('gui','rdp-assist',rdp=3,operation='automatic-pointer')
+   assert queued['queued'] and queued['epoch_unchanged'],queued
+   actual=spike.eventually(lambda:m[before:] if 'LeftPressed' in (m:=mouse())[before:] and m[-1]=='LeftReleased' else False,8)
+   assert command('gui','rdp-inspect',rdp=3)['gnome_auto']['input_epoch']==epoch
+   command('gui','rdp-assist',rdp=3,operation='cancel-automatic')
+   assert not command('gui','rdp-assist',rdp=3,operation='automatic-pointer')['queued']
+   return {'authenticated_peer_mouse_events':actual,'stale_credential_callback_preserves_new_attempt':True,'manual_shield_preserved':True,'stale_and_cancelled_clicks_rejected':True,'epoch_preserved':True,'scope':'Real GTK frontend and loopback RDP input; no owner login or credentials'}
+  finally:
+   command('gui','close-rdp',rdp=3)
+   subprocess.run(['secret-tool','clear','application','RUWAC','profile',ref],env=env,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
+ case('RDP-NATIVE-GDM-AUTOMATIC-POINTER',automatic_gdm_pointer)
  def save_connect():
   extra=root/'save-connect-server';extra.mkdir(mode=0o700)
   for name in ['cert.pem','key.pem']:(extra/name).write_bytes((root/name).read_bytes());(extra/name).chmod(0o600)
@@ -519,10 +552,24 @@ try:
   assert [command('gui','rdp-inspect',rdp=i)['transport_id']for i in range(3)]==transports
   assert frame['gnome_auto']['armed'],frame
   epoch=frame['gnome_auto']['input_epoch']
+  # The real manual input shield must not swallow the recognized automatic
+  # user-list click. Inspect the authenticated peer, not a queue counter.
+  mouse_path=extra/f'input-{port}.mouse.json'
+  def auto_mouse():
+   try:return json.loads(mouse_path.read_text())['events']
+   except (FileNotFoundError,ValueError):return []
+  start_mouse=len(auto_mouse())
+  denied=command('gui','rdp-assist',rdp=3,operation='automatic-pointer',stale=True)
+  assert not denied['queued'] and denied['epoch_unchanged'],denied
+  queued=command('gui','rdp-assist',rdp=3,operation='automatic-pointer')
+  assert queued['queued'] and queued['epoch_unchanged'],queued
+  actual=spike.eventually(lambda:m[start_mouse:] if 'LeftPressed' in (m:=auto_mouse())[start_mouse:] and m[-1]=='LeftReleased' else False,8)
+  assert command('gui','rdp-inspect',rdp=3)['gnome_auto']['input_epoch']==epoch
   for x in range(600,610):subprocess.run(['xdotool','mousemove',str(x),'450'],env={**env,'DISPLAY':env['RUWAC_XTEST_DISPLAY']},check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
   time.sleep(.2);shield=command('gui','rdp-inspect',rdp=3);assert shield['gnome_auto']['armed']and shield['gnome_auto']['input_epoch']==epoch,shield
   subprocess.run(['import','-display',env['RUWAC_XTEST_DISPLAY'],'-window','root',str(root/'gnome-sign-in-shield.png')],env=env,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
   command('gui','rdp-assist',rdp=3,operation='cancel-automatic');cancelled=command('gui','rdp-inspect',rdp=3);assert not cancelled['gnome_auto']['armed']and cancelled['status'].startswith('Automatic sign-in cancelled'),cancelled
+  assert not command('gui','rdp-assist',rdp=3,operation='automatic-pointer')['queued']
   command('gui','close-rdp',rdp=3);time.sleep(.2)
   command('gui','profiles',search='Generated Save Connect')
   edited=command('gui','profile-editor',operation='edit',response='connect',fields={'0':'Generated Save Connect edited'},named={'gnome-auto-login':False})
@@ -532,7 +579,7 @@ try:
   command('gui','profiles',search='Generated Save Connect')
   removed=command('gui','profile-editor',operation='edit',response='delete',confirm=True);assert not any(p['id']==item['id']for p in removed['items'])
   subprocess.run(['secret-tool','clear','application','RUWAC','profile',ref],env=env,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
-  return {'new_and_edited_profile_saved_before_connect':True,'real_loopback_CredSSP_frame':[320,180],'neighbor_transports_preserved':True,'existing_credential_acquisition_path':True,'owner_credentials_accessed':False,'GNOME_input_shield':{'actual_GTK_motion_epoch_preserved':True,'native_cancel_reveals_frame':True,'screenshot':'gnome-sign-in-shield.png','GDM_authentication':'separate real-host evidence'}}
+  return {'new_and_edited_profile_saved_before_connect':True,'real_loopback_CredSSP_frame':[320,180],'neighbor_transports_preserved':True,'existing_credential_acquisition_path':True,'owner_credentials_accessed':False,'GNOME_input_shield':{'automatic_user_list_click_received_by_authenticated_peer':actual,'stale_and_cancelled_clicks_rejected':True,'actual_GTK_motion_epoch_preserved':True,'native_cancel_reveals_frame':True,'screenshot':'gnome-sign-in-shield.png','GDM_authentication':'separate real-host evidence'}}
  case('MACHINES-SAVE-CONNECT',save_connect)
  def resize():
   focus('gui');command('gui','rdp-switch',rdp=0)

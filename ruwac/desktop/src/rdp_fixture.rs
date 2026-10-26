@@ -148,6 +148,7 @@ fn authenticated_loopback_framebuffer_and_cliprdr() {
                 rx,
                 halt.clone(),
                 state.clone(),
+                Arc::new(AtomicBool::new(true)),
             ));
             if tab == 3 {
                 let result = tokio::time::timeout(Duration::from_secs(5), &mut task)

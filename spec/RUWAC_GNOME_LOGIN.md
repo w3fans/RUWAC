@@ -16,7 +16,7 @@ For unsupported screens, use **Assisted GNOME Sign-in** in the toolbar or RDP co
 
 Use New window for independent saved workspaces sharing the persistent daemon. Alt+1–9/0 switches tabs within each window. Live RDP transports stay in their process. On owner-authorized publication, the installed latest frontend replaces the older owner frontend after open dialogs close, preserving daemon PTYs and saved layouts.
 
-Machines overlays content by default. Ctrl+K opens search; Escape/tab selection hides it. Preferences controls width and pinning. Dynamic resolution starts at 100%; manual zoom switches to Fit, and received frames acknowledge pending resolution requests. New terminals use the configured user login shell; existing sessions are preserved.
+Machines overlays content by default. Alt+M opens Machines search; Escape/tab selection hides it. Preferences controls width and pinning. Dynamic resolution starts at 100%; manual zoom switches to Fit, and received frames acknowledge pending resolution requests. New terminals use the configured user login shell; existing sessions are preserved.
 
 A small “Not listed?” button with a low-confidence full-layout OCR result is
 rechecked in a tight local crop. Only a single complete link meeting the original

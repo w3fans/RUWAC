@@ -1906,7 +1906,7 @@ pub fn sidebar(
     heading.append(&label);
     root.append(&heading);
     let search = gtk::SearchEntry::new();
-    search.set_placeholder_text(Some("Machines, groups, tags (Ctrl+K)"));
+    search.set_placeholder_text(Some("Machines, groups, tags (Alt+M)"));
     search.set_width_chars(12);
     root.append(&search);
     let filter = gtk::DropDown::from_strings(&["All machines", "Favorites", "Recent"]);

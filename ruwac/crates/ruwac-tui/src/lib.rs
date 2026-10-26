@@ -735,6 +735,44 @@ fn route_mouse(v: &Value, bytes: &[u8]) -> Option<(String, Value, bool)> {
 }
 const STATUS_STYLE: &str = "\x1b[0;38;2;16;32;48;48;2;152;198;232m";
 
+/// Shared live/copy SGR: selection reverses colours without discarding attributes.
+fn cell_style(cell: &Value, selected: bool) -> String {
+    let st = format!(
+        "0;{};{};{};{}",
+        sgr(&cell[2], true),
+        sgr(&cell[3], false),
+        if cell[4] == true { 1 } else { 22 },
+        if (cell[5] == true) != selected { 7 } else { 27 }
+    );
+    let mut st = st;
+    let extra = &cell[6];
+    if extra["italic"] == true {
+        st.push_str(";3");
+    }
+    if extra["dim"] == true {
+        st.push_str(";2");
+    }
+    if extra["hidden"] == true {
+        st.push_str(";8");
+    }
+    if extra["strike"] == true {
+        st.push_str(";9");
+    }
+    match extra["underline"].as_str() {
+        Some("single") => st.push_str(";4"),
+        Some("double") => st.push_str(";4:2"),
+        Some("curly") => st.push_str(";4:3"),
+        Some("dotted") => st.push_str(";4:4"),
+        Some("dashed") => st.push_str(";4:5"),
+        _ => (),
+    }
+    if let Some(rgb) = extra["underline_color"].as_array() {
+        st.push_str(&format!(";58;2;{};{};{}", rgb[0], rgb[1], rgb[2]));
+    } else if let Some(index) = extra["underline_color"].as_u64().filter(|i| *i <= 255) {
+        st.push_str(&format!(";58;5;{index}"));
+    }
+    st
+}
 fn draw(v: &Value, status: &str) -> io::Result<()> {
     let mut out = format!(
         "\x1b]2;RUWAC {}\x07\x1b[?25l\x1b[0m\x1b[H{}",
@@ -798,42 +836,7 @@ fn draw(v: &Value, status: &str) -> io::Result<()> {
                         if cell[1] == true {
                             continue;
                         }
-                        let st = format!(
-                            "0;{};{};{};{}",
-                            sgr(&cell[2], true),
-                            sgr(&cell[3], false),
-                            if cell[4] == true { 1 } else { 22 },
-                            if cell[5] == true { 7 } else { 27 }
-                        );
-                        let mut st = st;
-                        let extra = &cell[6];
-                        if extra["italic"] == true {
-                            st.push_str(";3");
-                        }
-                        if extra["dim"] == true {
-                            st.push_str(";2");
-                        }
-                        if extra["hidden"] == true {
-                            st.push_str(";8");
-                        }
-                        if extra["strike"] == true {
-                            st.push_str(";9");
-                        }
-                        match extra["underline"].as_str() {
-                            Some("single") => st.push_str(";4"),
-                            Some("double") => st.push_str(";4:2"),
-                            Some("curly") => st.push_str(";4:3"),
-                            Some("dotted") => st.push_str(";4:4"),
-                            Some("dashed") => st.push_str(";4:5"),
-                            _ => (),
-                        }
-                        if let Some(rgb) = extra["underline_color"].as_array() {
-                            st.push_str(&format!(";58;2;{};{};{}", rgb[0], rgb[1], rgb[2]));
-                        } else if let Some(index) =
-                            extra["underline_color"].as_u64().filter(|i| *i <= 255)
-                        {
-                            st.push_str(&format!(";58;5;{index}"));
-                        }
+                        let st = cell_style(cell, false);
                         if st != style {
                             out.push_str(&format!("\x1b[{st}m"));
                             style = st;
@@ -1277,6 +1280,7 @@ fn draw_mode(
     let height = size.0 as usize;
     let columns = size.1 as usize;
     let mut out = if let Mode::Copy(copy) = mode {
+        copy.preserve_live_styles(snapshot);
         copy.render(height, columns)
     } else {
         let mut out = String::from(

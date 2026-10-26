@@ -262,7 +262,7 @@ impl Shell {
         let button = gtk::ToggleButton::with_label("Machines");
         button.set_widget_name("machines-toggle");
         button.set_tooltip_text(Some(
-            "Show/hide Machines · Alt+M / Ctrl+K searches · Escape closes the overlay",
+            "Show/hide Machines · Alt+M · Escape closes the overlay",
         ));
         button.set_active(view.shows_sidebar());
         let v = view.downgrade();

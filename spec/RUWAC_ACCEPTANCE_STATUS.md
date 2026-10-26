@@ -4,6 +4,47 @@ Public results summarize qualification without publishing host identities, accou
 network topology, credential references or operational troubleshooting. Detailed
 receipts and original reports are archived privately outside Git.
 
+## Delivered v0.4.43 — reconciled 2026-10-25
+
+Commit `1d49ae20a1e0b42be3312171fe9ee50da513c012` passed all nineteen
+required frozen categories, integrity/provenance checks for all nine public assets,
+and twelve runtime phases on actual published binaries. The runtime phases cover
+headless operation, sessions, native clipboard/tab/reconnect behavior, PRIMARY
+epochs, original-endpoint routing, packaging reproducibility, terminal ergonomics,
+Web Preview, SSH Web Preview, RDP clipboard ordering, new-terminal desktop
+environment and image paste. Qualified installations preserved configurations and
+existing GUI, daemon and terminal process identities; GUIs need reopening to load
+the installed update. These results qualify the scoped release, not the whole
+product requirements ledger.
+
+The optional native GNOME Shell 50 selection companion additionally passed managed
+installation (28 checks), Unicode (21), ownership guards (33), startup failures
+(11) and standalone package/schema checks against the final local and actual
+published binaries. Counts overlap. This uses isolated compositors, generated
+peers, authenticated loopback SSH/RDP and explicit remote GTK input relays. It does
+not prove the physical or external-host clipboard matrix. Account publication
+permission and per-connection approval remain explicit; installation does not
+enable them automatically.
+
+Owner feedback confirms scrolling, terminal-tab selection paste and automatic
+GNOME sign-in after reopening v0.4.40, and screenshot paste into Codex in a fresh
+desktop-launched v0.4.42 shell. These are specific journeys, not blanket acceptance.
+One isolated native Ctrl+V run received no payload; the unchanged focused retry and
+actual-public suite passed. The original failure remains retained with cause
+unresolved. An earlier prototype SessionMode restoration refusal also remains
+tracked; later successful isolated cycles do not establish its cause.
+
+Physical input/clipboard-manager timing, actual cross-machine application PRIMARY,
+external Windows interoperability, controlled recovery cycles, the segmented
+one-hour soak and the observed development workflow remain open. The RSA advisory
+is unsuppressed. Hosted quality, privacy and release-build jobs passed for this
+commit; the advisory job failed separately. See the
+[v0.4.43 release](https://github.com/w3fans/RUWAC/releases/tag/v0.4.43).
+
+The older sections below retain their original evidence scope. References to an
+unreleased epoch or native-selection candidate are historical and do not undo
+later release receipts; they also cannot qualify later changed code.
+
 ## Released v0.4.40 baseline — reconciled 2026-10-24
 
 Commit `5b62c3404397bd7591e5f5c9351a77ff96178619` completed all nineteen

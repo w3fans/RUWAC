@@ -574,10 +574,20 @@ impl QueueBudget {
         })
     }
 }
+// Completion is signalled even if the worker unwinds. A replacement connection
+// waits asynchronously until the preceding authentication transport has closed.
+struct WorkerFinished(Arc<AtomicBool>);
+impl Drop for WorkerFinished {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
 struct Connection {
     id: String,
     tx: tokio::sync::mpsc::Sender<QueuedCommand>,
     stop: Arc<AtomicBool>,
+    recovery: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>,
     state: Arc<Mutex<State>>,
     /// Commands waiting while the session queue is briefly full (slow link),
     /// kept in order; and since when the backlog has not drained.
@@ -592,12 +602,16 @@ impl Connection {
     fn start_with_secret(p: Profile, fixture_secret: Option<String>) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(128);
         let stop = Arc::new(AtomicBool::new(false));
+        let recovery = Arc::new(AtomicBool::new(true));
+        let finished = Arc::new(AtomicBool::new(false));
+        let done = finished.clone();
         let state = Arc::new(Mutex::new(State {
             phase: "connecting".into(),
             ..State::default()
         }));
-        let (halt, st) = (stop.clone(), state.clone());
+        let (halt, st, retry) = (stop.clone(), state.clone(), recovery.clone());
         std::thread::spawn(move || {
+            let _done = WorkerFinished(done);
             let result = (|| -> Result<(), String> {
                 let password = if let Some(secret) = fixture_secret {
                     secret
@@ -608,7 +622,7 @@ impl Connection {
                     .enable_all()
                     .build()
                     .map_err(|_| "RDP runtime unavailable".to_string())?;
-                rt.block_on(run(p, password, rx, halt, st.clone()))
+                rt.block_on(run(p, password, rx, halt, st.clone(), retry))
             })();
             let mut state = st.lock().unwrap();
             state.phase = if result.is_err() {
@@ -636,6 +650,8 @@ impl Connection {
             id: ruwac_protocol::id("rdp-transport"),
             tx,
             stop,
+            recovery,
+            finished,
             state,
             backlog: RefCell::default(),
             budget: Arc::default(),
@@ -768,6 +784,7 @@ async fn run(
     mut input: tokio::sync::mpsc::Receiver<QueuedCommand>,
     halt: Arc<AtomicBool>,
     state: Arc<Mutex<State>>,
+    recovery: Arc<AtomicBool>,
 ) -> Result<(), String> {
     // Setup and backoff share one foreground budget. Afterwards keep trying
     // quietly, so an endpoint returning online needs no new profile/tab.
@@ -823,12 +840,20 @@ async fn run(
             } else {
                 setup_limit = crate::rdp_retry::SETUP_LIMIT;
                 state.lock().unwrap().status = Some("Reconnecting · GNOME session handover".into());
-                Duration::from_millis(500)
+                Duration::from_millis(100)
             };
+            // A redirected GNOME endpoint has a short-lived authentication
+            // token. Do not spend the ordinary TCP budget retrying stale tokens.
+            if p.handover.is_some() {
+                setup_limit = setup_limit.min(Duration::from_secs(10));
+            }
             let until = tokio::time::Instant::now() + delay;
             while tokio::time::Instant::now() < until {
                 if halt.load(Ordering::Relaxed) {
                     return Ok(());
+                }
+                if failures > 0 && !recovery.load(Ordering::Acquire) {
+                    return Err("Automatic recovery paused; reconnect to retry".into());
                 }
                 tokio::time::sleep_until(
                     until.min(tokio::time::Instant::now() + Duration::from_millis(50)),
@@ -837,6 +862,9 @@ async fn run(
             }
         }
         first = false;
+        // next_attempt consumes the one-use token; retain only whether this
+        // attempt used it, never the token itself, for failure classification.
+        let redirected = p.handover.is_some();
         let result = run_session(
             p.next_attempt(),
             password.clone(),
@@ -883,13 +911,19 @@ async fn run(
                         | "RDP protocol/session setup failed"
                 ) || e.starts_with("RDP connection timed out")
             });
-        // GNOME aborts a handover the client did not complete within about
-        // half a minute; after a second failure, start again from the
-        // service login (automatic sign-in then runs on the new greeter).
-        if retry && p.handover.is_some() && failures >= 1 {
-            p.handover = None;
+        // A later drop from an already rendered desktop is ordinary network
+        // recovery, even though that connection originally used a redirect.
+        // Re-entering the service after a failed redirect setup creates another
+        // greeter while the original authentication may still be pending.
+        // Release this transport instead; only an explicit reconnect starts
+        // a new sign-in. Existing remote desktop processes are not stopped.
+        if retry && redirected && state.lock().unwrap().connected_since.is_none() {
+            return Err(
+                "GNOME session handover failed; automatic recovery paused. Reconnect to retry"
+                    .into(),
+            );
         }
-        if !p.reconnect || !retry {
+        if !p.reconnect || !retry || !recovery.load(Ordering::Acquire) {
             return result;
         }
         failures = failures.saturating_add(1);
@@ -1528,6 +1562,7 @@ struct PendingConnect {
     profile: Profile,
     began: std::time::Instant,
     viewport: InitialViewport,
+    dynamic: bool,
 }
 struct AutoGdm {
     armed: bool,
@@ -1653,6 +1688,7 @@ pub struct RdpView {
     disconnect_card: gtk::Box,
     disconnect_message: gtk::Label,
     connection: RefCell<Option<Connection>>,
+    retiring: RefCell<Vec<Arc<AtomicBool>>>,
     surface: RefCell<Option<gtk::cairo::ImageSurface>>,
     size: Cell<(u16, u16)>,
     last_size: Cell<Option<(u16, u16)>>,
@@ -1884,6 +1920,7 @@ impl RdpView {
             disconnect_card,
             disconnect_message,
             connection: RefCell::new(None),
+            retiring: RefCell::default(),
             surface: RefCell::new(None),
             size: Cell::new((0, 0)),
             last_size: Cell::new(None),
@@ -3015,7 +3052,10 @@ impl RdpView {
         self.certificate.borrow_mut().take();
         self.certificate_prompt_pending.set(false);
         self.review_certificate.set_visible(false);
-        if self.mode.get() == Scale::Dynamic {
+        self.retiring
+            .borrow_mut()
+            .retain(|done| !done.load(Ordering::Acquire));
+        if self.mode.get() == Scale::Dynamic || !self.retiring.borrow().is_empty() {
             // New tabs and fullscreen transitions have no trustworthy canvas
             // allocation in their creation callback. Do not authenticate at a
             // temporary fallback size and move remote windows a second time.
@@ -3023,6 +3063,7 @@ impl RdpView {
                 profile,
                 began: std::time::Instant::now(),
                 viewport: InitialViewport::default(),
+                dynamic: self.mode.get() == Scale::Dynamic,
             });
             if activate {
                 self.focus();
@@ -3095,7 +3136,13 @@ impl RdpView {
         if self.pending_connect.borrow().is_none() {
             return;
         }
-        if self.mode.get() != Scale::Dynamic {
+        if self
+            .pending_connect
+            .borrow()
+            .as_ref()
+            .is_some_and(|p| p.dynamic)
+            && self.mode.get() != Scale::Dynamic
+        {
             self.cancel_pending_connect("Connection cancelled: display mode changed");
             return;
         }
@@ -3105,14 +3152,34 @@ impl RdpView {
         let Some(request) = pending.as_mut() else {
             return;
         };
+        self.retiring
+            .borrow_mut()
+            .retain(|done| !done.load(Ordering::Acquire));
+        if !self.retiring.borrow().is_empty() {
+            if now.duration_since(request.began) > Duration::from_secs(5) {
+                pending.take();
+                self.status.set_text(
+                    "Previous RDP connection is still closing; reconnect when it finishes",
+                );
+            } else {
+                self.status
+                    .set_text("Waiting for previous RDP connection to close…");
+            }
+            return;
+        }
         if now.duration_since(request.began) > Duration::from_secs(15) {
             pending.take();
             self.status
                 .set_text("Desktop layout is unavailable; show this window and reconnect");
             return;
         }
-        let Some(size) = request.viewport.observe(size, now) else {
-            return;
+        let size = if request.dynamic {
+            let Some(size) = request.viewport.observe(size, now) else {
+                return;
+            };
+            size
+        } else {
+            request.profile.desktop_size
         };
         let mut request = pending.take().unwrap();
         drop(pending);
@@ -4532,8 +4599,37 @@ impl RdpView {
         }) {
             return serde_json::json!({"error":"Loopback profile required"});
         }
+        if q["operation"] == "stale-lookup-target" {
+            let epoch = self.assist_epoch.load(Ordering::Acquire);
+            let profile = self.profile_metadata.borrow().clone().unwrap();
+            let (transport, generation) = self
+                .connection
+                .borrow()
+                .as_ref()
+                .map(|c| (c.id.clone(), c.state.lock().unwrap().generation))
+                .unwrap();
+            let accepted =
+                self.auto_gdm_lookup_ready(&profile, &transport, generation, epoch.wrapping_sub(1));
+            return serde_json::json!({"accepted":accepted,"armed":self.auto_gdm.borrow().armed,"epoch_unchanged":self.assist_epoch.load(Ordering::Acquire)==epoch});
+        }
+        if q["operation"] == "automatic-pointer" {
+            let epoch = self.assist_epoch.load(Ordering::Acquire);
+            let generation = self
+                .connection
+                .borrow()
+                .as_ref()
+                .map(|c| c.state.lock().unwrap().generation)
+                .unwrap_or(0);
+            let expected = if q["stale"] == true {
+                epoch.wrapping_add(1)
+            } else {
+                epoch
+            };
+            let queued = self.automatic_gdm_pointer(100, 90, expected, generation);
+            return serde_json::json!({"queued":queued,"epoch_unchanged":self.assist_epoch.load(Ordering::Acquire)==epoch});
+        }
         if q["operation"] == "cancel-automatic" {
-            let mut child = self.root.first_child();
+            let mut child = self.toolbar.first_child();
             while let Some(w) = child {
                 child = w.next_sibling();
                 if w.widget_name() == "cancel-automatic-sign-in" {
@@ -4730,6 +4826,9 @@ impl RdpView {
             return;
         }
         self.assist_epoch.fetch_add(1, Ordering::AcqRel);
+        if let Some(c) = self.connection.borrow().as_ref() {
+            c.recovery.store(true, Ordering::Release);
+        }
         let mut a = self.auto_gdm.borrow_mut();
         let image = a.image.take();
         *a = AutoGdm::default();
@@ -4769,6 +4868,11 @@ impl RdpView {
         a.fetching = false;
         a.waiting = None;
         if was_armed {
+            // Cancel the independent transport retry loop as well as credential
+            // injection. A live GDM connection stays available for manual input.
+            if let Some(c) = self.connection.borrow().as_ref() {
+                c.recovery.store(false, Ordering::Release);
+            }
             a.notice = Some(reason.to_owned());
             a.stopped_at = handovers;
         }
@@ -4778,6 +4882,64 @@ impl RdpView {
         self.assist_epoch.fetch_add(1, Ordering::AcqRel);
         self.status.set_text(reason);
         self.area.queue_draw();
+    }
+    fn auto_gdm_lookup_ready(
+        &self,
+        profile: &crate::profiles::Profile,
+        transport: &str,
+        generation: u64,
+        epoch: u64,
+    ) -> bool {
+        // A completed lookup belongs to its original attempt. A stale callback
+        // must not stop or overwrite the status of a newer reconnect/retry.
+        if self.assist_epoch.load(Ordering::Acquire) != epoch || !self.auto_gdm.borrow().armed {
+            return false;
+        }
+        if !self.auto_ready(profile, transport, generation) {
+            self.auto_gdm_stop("Automatic sign-in stopped: credential target or focus changed");
+            return false;
+        }
+        true
+    }
+    fn automatic_gdm_pointer(&self, x: u16, y: u16, epoch: u64, generation: u64) -> bool {
+        if !self.auto_gdm.borrow().armed
+            || self.assist_epoch.load(Ordering::Acquire) != epoch
+            || !self.connection.borrow().as_ref().is_some_and(|c| {
+                !c.stop.load(Ordering::Acquire) && c.state.lock().unwrap().generation == generation
+            })
+        {
+            return false;
+        }
+        let events = vec![
+            FastPathInputEvent::MouseEvent(MousePdu {
+                flags: PointerFlags::MOVE,
+                x_position: x,
+                y_position: y,
+                number_of_wheel_rotation_units: 0,
+            }),
+            FastPathInputEvent::MouseEvent(MousePdu {
+                flags: PointerFlags::LEFT_BUTTON | PointerFlags::DOWN,
+                x_position: x,
+                y_position: y,
+                number_of_wheel_rotation_units: 0,
+            }),
+            FastPathInputEvent::MouseEvent(MousePdu {
+                flags: PointerFlags::LEFT_BUTTON,
+                x_position: x,
+                y_position: y,
+                number_of_wheel_rotation_units: 0,
+            }),
+        ];
+        // The manual send path intentionally rejects input while sign-in is
+        // armed. Automatic clicks use the same epoch/generation guards as
+        // automatic credentials, without invalidating their own binding.
+        self.command(Command::Input(
+            events,
+            self.assist_epoch.clone(),
+            epoch,
+            generation,
+        ));
+        true
     }
     fn auto_gdm_tick(self: &Rc<Self>) {
         use crate::gdm::{Action, Step};
@@ -5025,27 +5187,7 @@ impl RdpView {
                     return;
                 }
                 Action::Click(x, y) => {
-                    let events = vec![
-                        FastPathInputEvent::MouseEvent(MousePdu {
-                            flags: PointerFlags::MOVE,
-                            x_position: x,
-                            y_position: y,
-                            number_of_wheel_rotation_units: 0,
-                        }),
-                        FastPathInputEvent::MouseEvent(MousePdu {
-                            flags: PointerFlags::LEFT_BUTTON | PointerFlags::DOWN,
-                            x_position: x,
-                            y_position: y,
-                            number_of_wheel_rotation_units: 0,
-                        }),
-                        FastPathInputEvent::MouseEvent(MousePdu {
-                            flags: PointerFlags::LEFT_BUTTON,
-                            x_position: x,
-                            y_position: y,
-                            number_of_wheel_rotation_units: 0,
-                        }),
-                    ];
-                    self.send(events);
+                    self.automatic_gdm_pointer(x, y, epoch, generation);
                     self.status
                         .set_text("Automatic sign-in · selecting saved Linux account");
                 }
@@ -5073,13 +5215,7 @@ impl RdpView {
                         let Some(v) = weak.upgrade() else {
                             return glib::ControlFlow::Break;
                         };
-                        if !v.auto_gdm.borrow().armed
-                            || v.assist_epoch.load(Ordering::Acquire) != epoch
-                            || !v.auto_ready(&p, &transport, generation)
-                        {
-                            v.auto_gdm_stop(
-                                "Automatic sign-in stopped: credential target or focus changed",
-                            );
+                        if !v.auto_gdm_lookup_ready(&p, &transport, generation, epoch) {
                             return glib::ControlFlow::Break;
                         }
                         match rx.try_recv() {
@@ -5290,6 +5426,9 @@ impl RdpView {
         self.release_keys();
         if let Some(c) = self.connection.borrow_mut().take() {
             c.close();
+            if !c.finished.load(Ordering::Acquire) {
+                self.retiring.borrow_mut().push(c.finished.clone());
+            }
         }
         self.bridge.borrow().epoch.store(0, Ordering::Release);
         self.pending.borrow_mut().take();
@@ -5591,6 +5730,206 @@ mod tests {
         assert!(retry.graphics && retry.reconnect);
     }
     #[test]
+    fn failed_redirect_does_not_reauthenticate_service_or_create_another_greeter() {
+        let mut packet = vec![0, 4, 0, 0];
+        packet.extend_from_slice(&42u32.to_le_bytes());
+        packet.extend_from_slice(&(0x2u32 | 0x4 | 0x10 | 0x4000 | 0x8000).to_le_bytes());
+        for value in [
+            b"12345".to_vec(),
+            vec![b'u', 0, 0, 0],
+            vec![0xa5; 128],
+            vec![b'g', 0, 0, 0],
+        ] {
+            packet.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            packet.extend(value);
+        }
+        let length = packet.len() as u16;
+        packet[2..4].copy_from_slice(&length.to_le_bytes());
+        let mut data = ((packet.len() + 8) as u16).to_le_bytes().to_vec();
+        data.extend_from_slice(&[0x1a, 0, 0, 0, 0, 0]);
+        data.extend(packet);
+        let plan = Arc::new(crate::handover::parse(&data).unwrap().unwrap());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let peer = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                drop(socket); // Fail the redirected authentication transport.
+                // A retry here would be a fresh service login: the token was consumed.
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(1200), listener.accept())
+                        .await
+                        .is_err()
+                );
+            });
+            let profile = Profile {
+                host: "127.0.0.1".into(),
+                port,
+                user: "generated-service".into(),
+                reference: String::new(),
+                ca: None,
+                reconnect: true,
+                desktop_size: (800, 600),
+                graphics: false,
+                clipboard: false,
+                handover: Some(plan),
+            };
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            let result = tokio::time::timeout(
+                Duration::from_secs(3),
+                run(
+                    profile,
+                    "generated".into(),
+                    rx,
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(Mutex::new(State::default())),
+                    Arc::new(AtomicBool::new(true)),
+                ),
+            )
+            .await
+            .expect("failed redirect must stop promptly");
+            assert_eq!(
+                result.unwrap_err(),
+                "GNOME session handover failed; automatic recovery paused. Reconnect to retry"
+            );
+            peer.await.unwrap();
+        });
+    }
+    #[test]
+    fn established_redirect_recovers_after_network_drop_without_reusing_token() {
+        let mut packet = vec![0, 4, 0, 0];
+        packet.extend_from_slice(&42u32.to_le_bytes());
+        packet.extend_from_slice(&(0x2u32 | 0x4 | 0x10 | 0x4000 | 0x8000).to_le_bytes());
+        for value in [
+            b"12345".to_vec(),
+            vec![b'u', 0, 0, 0],
+            vec![0xa5; 128],
+            vec![b'g', 0, 0, 0],
+        ] {
+            packet.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            packet.extend(value);
+        }
+        let length = packet.len() as u16;
+        packet[2..4].copy_from_slice(&length.to_le_bytes());
+        let mut data = ((packet.len() + 8) as u16).to_le_bytes().to_vec();
+        data.extend_from_slice(&[0x1a, 0, 0, 0, 0, 0]);
+        data.extend(packet);
+        let plan = Arc::new(crate::handover::parse(&data).unwrap().unwrap());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            // Inject the observed-first-frame marker at the failing TCP peer.
+            // Exercise the actual worker retry path and require a second TCP
+            // connection, both immediately after activation and after stability.
+            for age in [Duration::ZERO, Duration::from_secs(31)] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let port = listener.local_addr().unwrap().port();
+                let state = Arc::new(Mutex::new(State::default()));
+                let observed = state.clone();
+                let halt = Arc::new(AtomicBool::new(false));
+                let stop = halt.clone();
+                let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+                let peer = tokio::spawn(async move {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    observed.lock().unwrap().connected_since =
+                        Some(std::time::Instant::now() - age);
+                    drop(socket);
+                    let (_replacement, _) =
+                        tokio::time::timeout(Duration::from_secs(3), listener.accept())
+                            .await
+                            .expect("a rendered redirected session must retain network recovery")
+                            .unwrap();
+                    stop.store(true, Ordering::Release);
+                    let _ = finished_rx.await;
+                });
+                let profile = Profile {
+                    host: "127.0.0.1".into(),
+                    port,
+                    user: "generated-service".into(),
+                    reference: String::new(),
+                    ca: None,
+                    reconnect: true,
+                    desktop_size: (800, 600),
+                    graphics: false,
+                    clipboard: false,
+                    handover: Some(plan.clone()),
+                };
+                let (_tx, rx) = tokio::sync::mpsc::channel(1);
+                let result = tokio::time::timeout(
+                    Duration::from_secs(4),
+                    run(
+                        profile,
+                        "generated".into(),
+                        rx,
+                        halt,
+                        state.clone(),
+                        Arc::new(AtomicBool::new(true)),
+                    ),
+                )
+                .await
+                .expect("ordinary network recovery must remain bounded");
+                assert!(result.is_ok());
+                let _ = finished_tx.send(());
+                peer.await.unwrap();
+                assert_eq!(state.lock().unwrap().connection_attempt, 2);
+            }
+        });
+    }
+    #[test]
+    fn cancelled_automatic_sign_in_does_not_start_a_new_transport() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let peer = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                drop(socket);
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(1200), listener.accept())
+                        .await
+                        .is_err()
+                );
+            });
+            let profile = Profile {
+                host: "127.0.0.1".into(),
+                port,
+                user: "generated-service".into(),
+                reference: String::new(),
+                ca: None,
+                reconnect: true,
+                desktop_size: (800, 600),
+                graphics: false,
+                clipboard: false,
+                handover: None,
+            };
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            let result = tokio::time::timeout(
+                Duration::from_secs(3),
+                run(
+                    profile,
+                    "generated".into(),
+                    rx,
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(Mutex::new(State::default())),
+                    Arc::new(AtomicBool::new(false)),
+                ),
+            )
+            .await
+            .expect("cancelled recovery must stop promptly");
+            assert!(result.is_err());
+            peer.await.unwrap();
+        });
+    }
+    #[test]
     fn real_loopback_tls_validation() {
         use std::{
             fs,
@@ -5677,6 +6016,7 @@ mod tests {
                 rx,
                 Arc::new(AtomicBool::new(false)),
                 Arc::new(Mutex::new(State::default())),
+                Arc::new(AtomicBool::new(true)),
             ));
             assert_eq!(
                 result.unwrap_err(),

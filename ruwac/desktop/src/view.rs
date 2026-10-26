@@ -2646,14 +2646,14 @@ impl View {
                                 bg = (0.18, 0.28, 0.48);
                             }
                             if bg != canvas_bg {
-                                cr.set_source_rgb(bg.0, bg.1, bg.2);
-                                cr.rectangle(
+                                crate::terminal_style::background(
+                                    cr,
                                     c as f64 * self.cell_width.get(),
                                     y + r as f64 * self.cell_height.get(),
                                     self.cell_width.get(),
                                     self.cell_height.get(),
+                                    bg,
                                 );
-                                let _ = cr.fill();
                             }
                         }
                         for (c, cell) in cells.iter().enumerate() {

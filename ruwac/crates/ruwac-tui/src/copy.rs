@@ -102,6 +102,8 @@ pub struct Copy {
     pub dropped: usize,
     pub pane: String,
     pub message: String,
+    live_styles: std::collections::BTreeMap<usize, Vec<serde_json::Value>>,
+    styles_captured: bool,
     desired: usize,
     repeat: usize,
     margins: (Option<usize>, Option<usize>),
@@ -129,12 +131,62 @@ impl Copy {
             dropped,
             pane,
             message: String::new(),
+            live_styles: Default::default(),
+            styles_captured: false,
             desired: col,
             repeat: 0,
             margins: (None, None),
             edit: None,
             search: None,
         }
+    }
+    /// History text is immutable; attach styles only to matching live rows.
+    /// Older scrollback has no style metadata and remains plain text.
+    pub fn preserve_live_styles(&mut self, snapshot: &serde_json::Value) {
+        if self.styles_captured {
+            return;
+        }
+        self.styles_captured = true;
+        let Some(pane) = snapshot["panes"].as_array().and_then(|p| {
+            p.iter()
+                .find(|p| p["id"].as_str() == Some(self.pane.as_str()))
+        }) else {
+            return;
+        };
+        let grid = &pane["grid"];
+        let Some(rows) = grid["cells"].as_array() else {
+            return;
+        };
+        if grid["cols"].as_u64() != Some(self.cols as u64) || rows.len() > self.lines.len() {
+            return;
+        }
+        let start = self.lines.len() - rows.len();
+        for (n, row) in rows.iter().enumerate() {
+            let Some(cells) = row.as_array() else {
+                continue;
+            };
+            let text: String = cells
+                .iter()
+                .filter(|c| c[1] != true)
+                .filter_map(|c| c[0].as_str())
+                .collect();
+            if text.trim_end_matches(' ') == self.lines[start + n].text.trim_end_matches(' ') {
+                self.live_styles.insert(start + n, cells.clone());
+            }
+        }
+    }
+    fn style(&self, row: usize, col: usize, selected: bool) -> String {
+        self.live_styles
+            .get(&row)
+            .and_then(|cells| cells.get(col))
+            .map(|cell| format!("\x1b[{}m", super::cell_style(cell, selected)))
+            .unwrap_or_else(|| {
+                if selected {
+                    "\x1b[0;7m".into()
+                } else {
+                    "\x1b[0m".into()
+                }
+            })
     }
     fn snap(&self, row: usize, col: usize, forward: bool) -> usize {
         let mut start = 0;
@@ -516,9 +568,8 @@ impl Copy {
         } else if self.cursor.col >= self.left + columns {
             self.left = self.cursor.col - columns + 1;
         }
-        let mut out = String::from(
-            "\x1b[?25l\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[0m\x1b[H\x1b[2J",
-        );
+        let mut out =
+            String::from("\x1b[?25l\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[0m\x1b[H");
         for row in self.top..(self.top + height).min(self.lines.len()) {
             out.push_str(&format!("\x1b[{};1H", row - self.top + 1));
             let mut col = 0;
@@ -528,7 +579,7 @@ impl Copy {
                     .bounds(row)
                     .is_some_and(|(a, b)| col <= b && col + w > a);
                 if col >= self.left && col + w <= self.left + columns {
-                    out.push_str(if selected { "\x1b[7m" } else { "\x1b[0m" });
+                    out.push_str(&self.style(row, col, selected));
                     out.push_str(&clip(g, w));
                 } else if col < self.left && col + w > self.left {
                     out.push(' ');
@@ -538,12 +589,17 @@ impl Copy {
                     break;
                 }
             }
-            for blank in col.max(self.left)..(self.left + columns).min(self.cols) {
+            for blank in col.max(self.left)..self.left + columns {
                 let selected = self
                     .bounds(row)
                     .is_some_and(|(a, b)| blank >= a && blank <= b);
-                out.push_str(if selected { "\x1b[7m " } else { "\x1b[0m " });
+                out.push_str(&self.style(row, blank, selected));
+                out.push(' ');
             }
+        }
+        // Clear only rows outside the immutable snapshot, never the whole screen.
+        for y in self.lines.len().saturating_sub(self.top).min(height)..height {
+            out.push_str(&format!("\x1b[{};1H\x1b[0m\x1b[K", y + 1));
         }
         let footer = if let Some((query, reverse)) = &self.edit {
             format!("{}{}", if *reverse { '?' } else { '/' }, query)
@@ -560,9 +616,11 @@ impl Copy {
             )
         };
         out.push_str(&format!(
-            "\x1b[{};1H\x1b[0;7m{}\x1b[0m\x1b[K",
+            "\x1b[{};1H{}{}{}\x1b[0m",
             height + 1,
-            clip(&footer, columns)
+            super::STATUS_STYLE,
+            clip(&footer, columns),
+            " ".repeat(columns.saturating_sub(width(&clip(&footer, columns))))
         ));
         if self.edit.is_none() {
             out.push_str(&format!(
@@ -577,6 +635,45 @@ impl Copy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mouse_selection_keeps_live_colours_and_never_erases_the_screen() {
+        use serde_json::json;
+        let mut c = Copy::new(
+            vec![Line {
+                text: "AB".into(),
+                wrapped: false,
+            }],
+            2,
+            Position { row: 0, col: 0 },
+            0,
+            "p".into(),
+        );
+        let cell = |glyph| json!([glyph,false,[23,145,201],[5,9,17],true,false,{"italic":true,"underline":"curly","underline_color":[7,8,9]}]);
+        c.preserve_live_styles(
+            &json!({"panes":[{"id":"p","grid":{"cols":2,"cells":[[cell("A"),cell("B")]]}}]}),
+        );
+        c.mark();
+        for col in 0..2 {
+            c.point(0, col);
+            let out = c.render(3, 8);
+            assert!(out.contains("38;2;23;145;201;48;2;5;9;17"));
+            assert!(out.contains(";1;7;3;4:3;58;2;7;8;9m"));
+            assert!(!out.contains("\x1b[2J"));
+            assert!(out.contains(super::super::STATUS_STYLE));
+            assert!(
+                out.contains("\x1b[2;1H\x1b[0m\x1b[K"),
+                "unused rows cleared"
+            );
+        }
+        assert_eq!(c.selected(100).unwrap(), "AB");
+    }
+    #[test]
+    fn stale_live_styles_are_not_attached_to_different_snapshot_text() {
+        use serde_json::json;
+        let mut c = model();
+        c.preserve_live_styles(&json!({"panes":[{"id":c.pane,"grid":{"cols":c.cols,"cells":[[["different",false,1,4]]]}}]}));
+        assert!(c.live_styles.is_empty());
+    }
     fn model() -> Copy {
         Copy::new(
             vec![

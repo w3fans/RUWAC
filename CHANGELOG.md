@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## v0.4.44 — 2026-10-25 — Stable source release
+
+- Let recognized GDM user-list clicks pass through the automatic sign-in path;
+  manual input remains paused and stale/cancelled clicks are rejected.
+- Ignore credential lookup callbacks from superseded sign-in attempts so they
+  cannot cancel a newer reconnect or overwrite an explicit cancellation.
+- Prevent failed GNOME handovers from silently starting another service login.
+  Cancel transport retries when automatic sign-in stops, and wait for the prior
+  RDP worker to close before an explicit reconnect. Redirect setup uses a short
+  deadline. Desktops that already rendered a frame retain ordinary network
+  recovery; existing remote desktop processes are preserved.
+
+- Reserve Machines search for Alt+M; deliver Ctrl+K to terminal applications such
+  as nano instead of opening the sidebar. Update shortcut labels and help.
+- Preserve matching live-screen colours and text attributes when entering terminal
+  copy/selection mode. Repaint selection without clearing the whole screen, and
+  retain the continuous light-blue status background while selecting.
+- Remove grey seams between GUI terminal cell backgrounds at fractional font
+  widths and display scales without changing text antialiasing.
+- Report bounded, allowlisted diagnostics when GitHub refuses contribution labels,
+  including the request ID and accepted-permission fields when available. Preserve
+  the original HTTP failure, trusted-base execution and existing token permissions;
+  never print arbitrary response bodies or authorization headers.
+- Reconcile the acceptance ledger with delivered v0.4.43 evidence while retaining
+  physical, external-host, endurance and security qualification limits.
+
 ## v0.4.43 — 2026-10-25 — Stable source release
 
 - Add optional GNOME Shell 50 native mouse-selection delivery with desktop

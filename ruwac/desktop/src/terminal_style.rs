@@ -2,6 +2,24 @@
 use gtk::cairo;
 use serde_json::Value;
 
+/// Solid cell tiles must share hard edges, including fractional font metrics.
+/// Antialiased neighbouring fills otherwise expose the canvas between cells.
+pub fn background(
+    cr: &cairo::Context,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    rgb: (f64, f64, f64),
+) {
+    let _ = cr.save();
+    cr.set_antialias(cairo::Antialias::None);
+    cr.set_source_rgb(rgb.0, rgb.1, rgb.2);
+    cr.rectangle(x, y, width, height);
+    let _ = cr.fill();
+    let _ = cr.restore();
+}
+
 pub fn decoration(
     cr: &cairo::Context,
     style: &Value,
@@ -87,6 +105,37 @@ mod tests {
         }
         surface.flush();
         surface.data().unwrap().to_vec()
+    }
+    #[test]
+    fn fractional_cell_backgrounds_are_continuous_at_multiple_scales() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let draw = |tiled: bool| {
+                let mut surface =
+                    cairo::ImageSurface::create(cairo::Format::ARgb32, 192, 40).unwrap();
+                {
+                    let cr = cairo::Context::new(&surface).unwrap();
+                    cr.set_source_rgb(0.1, 0.1, 0.1);
+                    cr.paint().unwrap();
+                    cr.scale(scale, scale);
+                    if tiled {
+                        for n in 0..12 {
+                            background(&cr, n as f64 * 7.7, 0.0, 7.7, 16.0, (0.6, 0.8, 0.9));
+                        }
+                    } else {
+                        background(&cr, 0.0, 0.0, 12.0 * 7.7, 16.0, (0.6, 0.8, 0.9));
+                    }
+                    assert_eq!(
+                        cr.antialias(),
+                        cairo::Antialias::Default,
+                        "text antialiasing must be restored"
+                    );
+                }
+                surface.flush();
+                let pixels = surface.data().unwrap().to_vec();
+                pixels
+            };
+            assert_eq!(draw(true), draw(false), "cell seams at scale {scale}");
+        }
     }
     #[test]
     fn underline_variants_and_strike_draw_distinct_real_pixels() {

@@ -5,6 +5,18 @@ Current behavior was reconciled on 2026-10-20 against v0.4.31 and the
 stabilization candidate's explicit SSH review and update-readiness changes. This is a product requirements ledger and source review, not a claim
 that all supported environments have passed acceptance.
 
+Current evidence reconciliation (2026-10-25): v0.4.43 passed nineteen frozen
+categories, nine public-asset checks and twelve actual-public runtime phases.
+Native GNOME Shell 50 mouse-selection delivery is now implemented through an
+optional companion with explicit account permission and connection approval;
+isolated managed/Unicode/ownership/startup and package checks passed. Actual
+cross-machine application, physical input, Windows, endurance and broader
+distribution/security qualification remain partial. Specific owner confirmations
+and retained intermittent observations are recorded in the
+[current acceptance status](RUWAC_ACCEPTANCE_STATUS.md). Historical findings below
+remain evidence of their dated scope, not declarations that later fixes are absent
+or that every requirement is complete.
+
 ## Purpose
 
 RUWAC is a remote workspace and agent cockpit: quickly reach machines,
@@ -52,7 +64,7 @@ results are distinguished from tests re-executed for the current batch in the
 | Prevent spurious RDP resize/drag jumps | Partial | Overlay chrome and pointer-release/remapping fixes have fixture coverage; every external desktop/window-manager combination is not verified. |
 | RDP clipboard text and PNG/DIB | Partial | Real GDK/CLIPRDR, consecutive transfers, cancellation and focus epochs implemented; real Fedora journey recorded, broader Windows and mixed-external-host coverage remains open. |
 | Three RDP tabs plus terminals clipboard ownership | Partial | Loopback multi-tab ownership tests exist; three real external hosts and physical focus/clipboard-manager timing remain separate. |
-| Terminal desktop copy/paste | Implemented | Selection, Shift+drag, PRIMARY/middle paste and image staging; owner confirmed copy/paste including images, while physical-input coverage is still incomplete. |
+| Terminal desktop copy/paste | Implemented | Selection, Shift+drag, PRIMARY/middle paste and image staging; owner confirmed specific scrolling, tab-selection and fresh-shell image journeys. Optional native GNOME Shell 50 PRIMARY delivery requires desktop permission and per-connection approval; full physical/external coverage remains incomplete. |
 | GNOME service and Linux user credentials | Implemented | Distinct usernames/references, independent Set/Replace/Forget and compatible profile metadata. Passwords remain in Secret Service. |
 | Assisted and automatic GNOME sign-in | Partial | Explicit assisted input and opt-in recognized English GDM flow, input shielding and cancellation; not a general unattended-login protocol or system-wide autologin change. |
 | Machine/profile editor and Save & Connect | Implemented | Basic fields grouped first, advanced sections, endpoint identity, CRUD, favorites, search, groups and SQLite/JSON compatibility. |

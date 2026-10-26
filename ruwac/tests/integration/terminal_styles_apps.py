@@ -11,7 +11,7 @@ for key,name in [('HOME','home'),('XDG_CONFIG_HOME','config'),('XDG_DATA_HOME','
 paint=root/'paint.py';paint.write_text('''import os,tty
 tty.setraw(0)
 for row,(code,label)in enumerate([('0','STYLES_READY'),('3','ITALIC'),('2','DIM'),('8','HIDDEN'),('9','STRIKE'),('4','SINGLE'),('4:2','DOUBLE'),('4:3','CURLY'),('4:4','DOTTED'),('4:5','DASHED')],1):
- os.write(1,(f'\\x1b[{row};1H\\x1b[0;{code};58:2::7:8:9m'+label+' e\\u0301界'+'\\x1b[0m').encode())
+ os.write(1,(f'\\x1b[{row};1H\\x1b[0;{code};38;2;23;145;201;48;2;5;9;17;58:2::7:8:9m'+label+' e\\u0301界'+'\\x1b[0m').encode())
 os.write(1,b"\\x1b[11;1HSTYLES_COMPLETE")
 while os.read(0,1):pass
 ''')
@@ -50,7 +50,13 @@ try:
  assert cells[1][0][6]['italic']and cells[2][0][6]['dim']and cells[3][0][6]['hidden']and cells[4][0][6]['strike']
  assert [cells[row][0][6]['underline']for row in range(5,10)]==['single','double','curly','dotted','dashed'];assert all(cells[row][0][6]['underline_color']==[7,8,9]for row in range(5,10))
  record('STYLES-ACTUAL-PTY-CANONICAL',five_underlines=True,Unicode_combining_wide=True)
- tui=Tui(Path(a.binary),sock,s['session'],root/'tui.bin');eventually(lambda:b'4:3'in tui.data and b'58;2;7;8;9'in tui.data,10);assert b';3'in tui.data and b';2'in tui.data and b';8'in tui.data and b';9'in tui.data;tui.finish('term');tui=None
+ tui=Tui(Path(a.binary),sock,s['session'],root/'tui.bin');eventually(lambda:b'4:3'in tui.data and b'58;2;7;8;9'in tui.data,10);assert b';3'in tui.data and b';2'in tui.data and b';8'in tui.data and b';9'in tui.data;# Real TUI mouse selection must preserve styled live rows without a blank frame.
+ before=len(tui.data);tui.send(b'\x1b[<0;1;2M\x1b[<32;5;2M');eventually(lambda:b'COPY 'in tui.data[before:])
+ selected=bytes(tui.data[before:]);assert b'\x1b[2J'not in selected,'Selection cleared the entire terminal'
+ assert b'38;2;23;145;201;48;2;5;9;17'in selected,'Selection discarded live colours'
+ assert b'4:3'in selected and b'58;2;7;8;9'in selected,'Selection discarded extended attributes'
+ tui.send(b'\x1b[<32;8;2M');time.sleep(.1);assert b'\x1b[2J'not in tui.data[before:]
+ tui.finish('term');tui=None
  record('STYLES-REAL-TUI-EMISSION',actual_client_PTY=True,extended_ANSI=True)
  if a.gui:
   f=(root/'desktop.log').open('wb');logs.append(f);gui=subprocess.Popen([a.gui,'--socket',str(sock),'--session',s['session'],'--fixture-dir',str(root)],env=env,stdout=f,stderr=f);eventually(lambda:r if (r:=command('inspect')).get('drawn') and all(n>0 for n in r['drawn']) else None,15)

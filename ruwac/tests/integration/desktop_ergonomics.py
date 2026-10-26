@@ -72,6 +72,13 @@ try:
  command('chrome',terminal_shortcuts='traditional');eventually(lambda:command('chrome')['terminal_shortcuts']=='traditional')
  time.sleep(.2);command('focus-view',view=1);chord(47);eventually(lambda:outputs[1].read_bytes()==expected*2+b'\x16');mark('traditional-mode-retains-literal-Ctrl-V')
  command('chrome',terminal_shortcuts='desktop');time.sleep(.2)
+ # nano's cut key must reach the PTY; only Alt+M opens Machines.
+ command('focus-view',view=1);before=outputs[1].read_bytes();chord(37)
+ assert not command('sidebar-shell')['shown'],'Ctrl+K opened Machines'
+ eventually(lambda:outputs[1].read_bytes()==before+b'\x0b');mark('Ctrl-K-reaches-PTY-without-opening-Machines')
+ key(56,True);key(50,True);key(50,False);key(56,False)
+ eventually(lambda:command('sidebar-shell')['shown']);assert outputs[1].read_bytes()==before+b'\x0b'
+ key(1,True);key(1,False);eventually(lambda:not command('sidebar-shell')['shown']);mark('Alt-M-opens-Machines-and-Escape-closes-overlay-without-PTY-input')
  # Full-screen mouse applications (including Codex) own their wheel input.
  command('focus-view',view=3);eventually(lambda:'APP_MOUSE_READY'in rpc('pane.capture',{'pane':rows[3]['pane']})['text'])
  def check_app_wheel(label,offset=False):
