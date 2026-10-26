@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v0.4.45 — 2026-10-26 — Stable source release
+
+- Pass Ctrl+Shift+T and Ctrl+Shift+R to the focused application while Map keys is enabled, including applications inside RDP desktops.
+- Route PNG-only clipboard paste in local Codex terminal panes through the guarded draft attachment path in both terminal shortcut modes. Preserve focus, target and image validation checks, including compatibility with older persistent engines; never submit the draft automatically.
+
 ## v0.4.44 — 2026-10-25 — Stable source release
 
 - Let recognized GDM user-list clicks pass through the automatic sign-in path;

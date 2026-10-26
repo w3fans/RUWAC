@@ -88,7 +88,8 @@ pub fn try_paste(view: &Rc<View>) -> bool {
     use std::sync::atomic::Ordering;
     let pane = view.target.borrow().clone();
     let Some(profile) = target_profile(view, &pane) else {
-        return false;
+        let stage = CONFIGURATION.with(|c| c.borrow().as_ref().and_then(|c| c.stage.clone()));
+        return crate::image_attach::try_clipboard_paste(view, stage);
     };
     let clipboard = view.area.display().clipboard();
     if !image_only(&clipboard) {

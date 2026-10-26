@@ -16,6 +16,11 @@ pub fn new_tab(key: gdk::Key, mods: gdk::ModifierType) -> Option<bool> {
     }
 }
 
+/// Application tab chords belong to the focused child while keys are mapped.
+pub fn local_new_tab(key: gdk::Key, mods: gdk::ModifierType, map_keys: bool) -> Option<bool> {
+    if map_keys { None } else { new_tab(key, mods) }
+}
+
 /// Quick host menus remain available even while keys are mapped to a remote.
 pub fn host_menu(key: gdk::Key, mods: gdk::ModifierType) -> Option<bool> {
     if (mods - gdk::ModifierType::LOCK_MASK) != gdk::ModifierType::ALT_MASK {
@@ -209,6 +214,23 @@ mod menu_tests {
             gdk::ModifierType::ALT_MASK | gdk::ModifierType::SHIFT_MASK,
         ] {
             assert_eq!(host_menu(gdk::Key::m, mods), None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod mapped_tab_tests {
+    use super::*;
+    #[test]
+    fn mapped_tab_chords_are_not_host_actions() {
+        let mods = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK;
+        for key in [gdk::Key::t, gdk::Key::T, gdk::Key::r, gdk::Key::R] {
+            assert_eq!(local_new_tab(key, mods, true), None);
+            assert_eq!(
+                local_new_tab(key, mods | gdk::ModifierType::LOCK_MASK, true),
+                None
+            );
+            assert!(local_new_tab(key, mods, false).is_some());
         }
     }
 }
