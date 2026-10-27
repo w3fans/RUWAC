@@ -4,50 +4,157 @@ A Rust remote workspace with persistent terminals: one daemon owns PTYs; replace
 
 Implemented: persistent daemon-owned children, independent attached-client focus, nested horizontal/vertical splits, zoom, paged scrollback, private Unix IPC and a separate compiled GTK desktop. The desktop supports keyboard marking/search, real GDK clipboard transport, private PNG staging and an embedded IronRDP client. Targeted real Windows authentication/framebuffer and Fedora GNOME service/login/display tests pass; saved mixed layouts can preserve a live Fedora RDP transport. Local and authenticated SSH Codex PNG draft attachment is implemented. Physical input, broader external clipboard, broader interoperability and qualified Fedora packaging remain open; see the completion matrix for exact acceptance scope. Private ended-history recovery after daemon loss is implemented with the limits below.
 
-Build with Rust/Cargo in your chosen build workspace. Keep build output and generated evidence outside the source tree:
+## Start here
+
+RUWAC combines a terminal multiplexer with a native Linux remote-work desktop.
+Use the CLI over SSH, the GTK desktop for saved machines and RDP, or both against
+one persistent terminal daemon. Closing a frontend detaches it; your terminal
+programs keep running until they exit or you explicitly stop them.
+
+- **Try it:** [download a release](https://github.com/w3fans/RUWAC/releases/latest),
+  then follow [Fedora testing RPMs](#fedora-testing-rpms) or the
+  [source installation](#install-and-open-the-workspace).
+- **Learn the controls:** [first terminal session](#first-terminal-session),
+  [desktop navigation](#desktop-navigation-and-diagnostics),
+  [RDP and saved machines](#native-machine-and-rdp-controls), and
+  [image paste](#pasting-images-into-ssh-terminals).
+- **Develop it:** [build and test](#build-and-test-from-source),
+  [repository map](#repository-map), and [contribution guide](CONTRIBUTING.md).
+- **Get help:** [report a problem](#feedback-and-bug-reports), read the
+  [security policy](SECURITY.md), or [support development](https://idz.si/bs/ruwac-donate.html).
+
+### Release and support status
+
+RUWAC is an **engineering preview**. Release assets include upstream Fedora 44
+x86_64 testing packages and bundles; these are not official Fedora repository
+packages. Other distributions can try the source build, but are not covered by
+that package qualification. A version number or passing fixture is not a claim
+of production security or universal RDP interoperability.
+
+The desktop inherits the unresolved
+[RSA timing advisory RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html).
+The advisory check remains failing and unsuppressed; see
+[the dependency assessment](spec/RUWAC_DEPENDENCY_SECURITY.md).
+The headless workspace keeps its own lockfile and does not depend on IronRDP,
+GTK or RSA. Read [acceptance status](spec/RUWAC_ACCEPTANCE_STATUS.md) for the
+scope of tests and remaining limitations.
+
+Updates preserve terminal processes and saved configuration. Reopen the GUI to
+load updated code; RDP connections reconnect after reopening. Already running
+programs and daemons keep the code and environment they started with.
+
+## First terminal session
+
+After installation, start a named session:
+
+```sh
+ruwac -S demo
+```
+
+Run your normal shell commands. Press **Ctrl+A, then d** to detach, list sessions
+with `ruwac -ls`, and return with `ruwac -r demo`. Typing `exit` in the last shell
+ends the session. The GUI opens with `ruwac gui`; use **New term**, **Machines**
+(**Alt+M**) and **New RDP** to open your workspace. GUI prefix shortcuts use
+**Ctrl+Alt+A** by default; terminal applications keep ordinary Ctrl+A.
+
+## Build and test from source
+
+Clone the repository and work on a branch:
+
+```sh
+git clone https://github.com/w3fans/RUWAC.git
+cd RUWAC
+git switch -c my-change
+```
+
+Install a current Rust toolchain with Cargo, rustfmt and Clippy, plus Python 3.
+The Fedora desktop build also needs native development libraries. The following
+is the package set used by the Fedora quality workflow; skip desktop libraries
+when working only on the headless core:
+
+```sh
+sudo dnf install git cargo rust rustfmt clippy gcc gcc-c++ pkgconf-pkg-config \
+  gtk4-devel libadwaita-devel webkitgtk6.0-devel openssl-devel libssh2-devel \
+  sqlite-devel python3
+```
+
+Build output and test evidence should live outside the checkout. Start with the
+independent core (no graphical login is required):
 
 ```sh
 export CARGO_TARGET_DIR="$(mktemp -d)"
-cargo build --locked --release --manifest-path ruwac/Cargo.toml
-cargo test --locked --workspace --manifest-path ruwac/Cargo.toml
 export EVIDENCE_DIR="$(mktemp -d)"
-PYTHONDONTWRITEBYTECODE=1 python3 ruwac/tests/integration/spike.py \
-  --binary "$CARGO_TARGET_DIR/release/ruwac" --evidence "$EVIDENCE_DIR"
+cargo build --locked --manifest-path ruwac/Cargo.toml
+cargo test --locked --workspace --manifest-path ruwac/Cargo.toml
+python3 ruwac/tests/integration/spike.py \
+  --binary "$CARGO_TARGET_DIR/debug/ruwac" --evidence "$EVIDENCE_DIR"
 ```
 
-Create and enter a persistent named session with one command. The daemon starts automatically when needed:
+For the desktop, use the same target directory:
 
 ```sh
-R="$CARGO_TARGET_DIR/release/ruwac"
-"$R" -S development
+cargo build --locked --manifest-path ruwac/desktop/Cargo.toml
+cargo test --locked --manifest-path ruwac/desktop/Cargo.toml
+"$CARGO_TARGET_DIR/debug/ruwac" gui
 ```
 
-Use Ctrl-A then `d` to detach, `ruwac -r development` to reattach, and `ruwac -ls` to list sessions. `ruwac -dmS development` creates a detached session. Multiple connections can attach to the same session with independent window and pane focus.
+The GUI command locates the sibling `ruwac-desktop` binary. Run it from your
+actual graphical login for desktop clipboard access. Compilation and unit tests
+do not replace real RDP, clipboard or physical keyboard testing.
 
-Exiting an attached shell removes its completed window, including the final window and session. `ruwac -wipe` clears older dead windows and sessions; `ruwac -wipe NAME` limits cleanup to an exact session name or ID. Windows containing live processes remain intact. `-S` and `-R` start a fresh shell when the matching old session has ended; `-r` explains when a session is dead instead of opening an unusable terminal. Explicit `attach --session ID` can still inspect retained, unattached history before cleanup.
+To try terminal changes without attaching to your normal daemon, use a separate
+socket in a private runtime directory:
 
-New CLI sessions and TUI windows/splits explicitly load your selected login shell, including with a preserved older daemon. Existing shells retain their startup flags. For `--host` named creation, update the endpoint RUWAC CLI too: it resolves the remote shell over verified SSH, rather than using your local shell path. Raw `rpc` and JSON `request` parameters remain literal for custom commands and automation.
+```sh
+export RUWAC_SOCKET="$(mktemp -d)/demo.sock"
+"$CARGO_TARGET_DIR/debug/ruwac" -S development
+# After detaching, return to this same daemon:
+"$CARGO_TARGET_DIR/debug/ruwac" -r development
+```
 
-New local terminals also receive the creating CLI or GUI's desktop environment,
-including its display and clipboard connection settings. Missing settings remove
-stale daemon values. This works with preserved older daemons; it does not change
-already running shells or applications. A new window created by an already
-attached older client retains that client's behavior until it is reopened.
-Remote `--host` launches do not forward your local desktop settings.
+Keep that directory while its daemon is in use. Save your work and end test
+shells before cleaning it up; do not remove another session's socket or kill
+unrelated RUWAC processes. See [CONTRIBUTING.md](CONTRIBUTING.md) for format,
+Clippy, integration and privacy checks. Public Cargo builds do not require the
+maintainer's private release tools.
 
-The default socket is beneath your private runtime directory. `RUWAC_SOCKET` or `--socket PATH` selects an explicit socket; its parent must be owned by you with mode 0700. Use the same socket in each terminal.
+## Repository map
 
-Ctrl-A then `c/n/p/d/a` creates/cycles/detaches/sends literal Ctrl-A. Double Ctrl-A forwards the literal prefix; Ctrl-A then o selects the previous window on a matching daemon. Ctrl-A `S` splits horizontally and `|` vertically; `Tab` changes pane; `0–9` selects windows. `[` opens interactive canonical keyboard copy/search in both clients; `]` pastes the independent internal buffer. `z` zooms, `"` opens the window chooser, `:` opens commands and `?` shows configured shortcuts. PTYs survive final-client detach. Each attached client keeps its own selected window, pane and zoom. Shared PTYs and split ratios remain canonical. The session uses the minimum attached rows and columns; each pane uses the minimum dimensions of its visible rectangles. Unattached explicit selection sets the default for future attachments without redirecting current clients. Existing daemons retain the behavior of their running version until deliberately replaced. `rpc daemon.stop` stops the selected daemon and its owned panes.
+| Path | Purpose |
+| --- | --- |
+| `ruwac/crates/ruwac-core` | Session, window and pane state |
+| `ruwac/crates/ruwac-daemon` | Persistent daemon and request handling |
+| `ruwac/crates/ruwac-pty`, `ruwac-term` | PTYs and terminal emulation (both under `ruwac/crates/`) |
+| `ruwac/crates/ruwac-cli`, `ruwac-tui` | Commands and terminal frontend (both under `ruwac/crates/`) |
+| `ruwac/crates/ruwac-protocol`, `ruwac-clipboard` | Shared protocol and clipboard helpers (both under `ruwac/crates/`) |
+| `ruwac/desktop` | Separate GTK/libadwaita workspace, RDP, SSH and Files |
+| `ruwac/tests/integration` | PTY, remote connection and desktop acceptance drivers |
+| `scripts` | Source inventory, installation, package and verification tools |
+| `spec`, `docs` | Architecture, requirements, acceptance and development plans |
+| `.github/workflows` | Contributor checks and release automation |
 
-A pane reports its own process exit after draining ready final output. Background programs retaining the terminal cannot change its ended history afterward; continuous post-exit draining is capped at 8 MiB. Closing and reopening standard streams does not itself end a live program. The PTY regression tests require Python 3 as a test fixture; the installed headless engine does not.
+## Feedback and bug reports
 
-Unix PTYs are required. The tested toolchain is Fedora Rust 1.98.1. Cargo.lock pins registry checksums. Prereleases describe a prototype, not production or desktop acceptance. Tagged source prereleases preserve operational implementation and engineering history. RUWAC’s original source is licensed under Apache-2.0; see [LICENSE](LICENSE). Dependencies retain their own licenses. Binary packaging remains subject to dependency notice and packaging validation.
+Open a [GitHub issue](https://github.com/w3fans/RUWAC/issues) with the version
+(`ruwac -v`), distribution, desktop/session type (Wayland or X11), steps to
+reproduce, expected behavior and actual behavior. For remote problems, include
+the client/server versions and whether the problem is in a terminal or RDP tab.
+Mention whether the GUI was reopened after updating. Sanitized screenshots and
+a small reproduction help; remove credentials, host details and clipboard data.
+Report security vulnerabilities through [SECURITY.md](SECURITY.md).
 
-See [architecture decisions](architecture/00-RUWAC-DECISION.md), [protocol](architecture/02-PROTOCOL-V0.md), [acceptance](architecture/03-ACCEPTANCE-MATRIX.md) and [benchmarks](architecture/04-BENCHMARKS.md).
+For a contribution, fork the repository, create a focused branch, run the relevant
+checks and open a pull request explaining the change and test results. First-time
+contributors may need a maintainer to approve GitHub Actions. Maintainers review
+and release changes; contributors do not need production credentials or release
+access. See [CONTRIBUTING.md](CONTRIBUTING.md) and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
+The sections below provide the detailed feature and compatibility reference.
 
 ## Native engineering prerelease
 
-The retained headless core has named target-specific commands and an optional compiled Rust GTK4/libadwaita client, with real GDK text clipboard transport and private PNG staging. See [the implementation and evidence report](spec/RUWAC_INTEGRATION_SPIKE.md), [ADR-001](spec/RUWAC_ARCHITECTURE_ADR.md), and [acceptance limits](spec/RUWAC_ACCEPTANCE_STATUS.md). External-host RDP, physical PRIMARY acceptance, image attachment and RPM packaging remain open. The first machine sidebar and authenticated loopback RDP/CLIPRDR integration are implemented. This milestone is distributed as a source prerelease with the acceptance limits listed below.
+The retained headless core has named target-specific commands and an optional compiled Rust GTK4/libadwaita client, with real GDK text clipboard transport and private PNG staging. See [the implementation and evidence report](spec/RUWAC_INTEGRATION_SPIKE.md), [ADR-001](spec/RUWAC_ARCHITECTURE_ADR.md), and [acceptance limits](spec/RUWAC_ACCEPTANCE_STATUS.md). Targeted authenticated RDP, image attachment and upstream testing-package acceptance are implemented; broader external-host interoperability, physical PRIMARY testing and official Fedora packaging qualification remain open. See the linked acceptance records for the exact tested scope.
 
 
 The desktop is a separate Cargo workspace. Build it with `cargo build --locked --release --manifest-path ruwac/desktop/Cargo.toml`, using the same external CARGO_TARGET_DIR as the core. `ruwac gui` starts the sibling `ruwac-desktop`; Python GI is retained as a test oracle. Native dependencies are optional; only the desktop workspace includes IronRDP. After updating, close and reopen the desktop to load its new code: an already running GUI keeps its previous version. Daemon-owned terminal sessions remain available to reattach; RDP desktops reconnect after reopening. See the current engineering reports before treating fixture success as desktop acceptance.

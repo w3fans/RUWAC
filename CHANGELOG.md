@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v0.4.48 — 2026-10-27 — Stable source release
+
+- Refresh About / Support with native grouped information, project links and an optional QR expander, matching the desktop preferences style.
+- Add a newcomer README guide covering first use, source builds, isolated development sessions, repository structure and contribution/feedback steps.
+
 ## v0.4.47 — 2026-10-26 — Stable source release
 
 - Reduce terminal echo delay with a short faster refresh window after typing,

@@ -7,42 +7,91 @@ pub fn present(parent: &adw::ApplicationWindow) -> gtk::Window {
         .title("About RUWAC")
         .transient_for(parent)
         .modal(true)
-        .default_width(460)
-        .default_height(590)
+        .default_width(640)
+        .default_height(740)
         .build();
     window.set_widget_name("ruwac-about");
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
-    content.set_margin_top(24);
-    content.set_margin_bottom(24);
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let header = adw::HeaderBar::new();
+    header.add_css_class("flat");
+    header.set_title_widget(Some(&gtk::Label::new(Some("About RUWAC"))));
+    window.set_titlebar(Some(&header));
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 24);
+    content.set_margin_top(12);
+    content.set_margin_bottom(32);
     content.set_margin_start(24);
     content.set_margin_end(24);
+    let identity = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let icon = gtk::Image::from_icon_name("utilities-terminal-symbolic");
+    icon.set_pixel_size(48);
+    identity.append(&icon);
     let title = gtk::Label::new(Some("RUWAC"));
     title.add_css_class("title-1");
-    content.append(&title);
-    let description = gtk::Label::new(Some("Remote Unified Workspace & Agent Cockpit"));
-    description.set_wrap(true);
-    content.append(&description);
-    let info = adw::PreferencesGroup::new();
+    identity.append(&title);
+    let tagline = gtk::Label::new(Some("Your remote work, together"));
+    tagline.add_css_class("dim-label");
+    identity.append(&tagline);
+    content.append(&identity);
+
+    let info = adw::PreferencesGroup::builder().title("About").build();
     for (name, value) in [
+        (
+            "Description",
+            "Persistent terminals, SSH agents and RDP desktops in one workspace. Detach and return to your terminal work, organize saved machines, and move between local and remote tools.",
+        ),
+        ("Author", "Denis Zvegelj, 2026"),
+        ("License", "Apache License 2.0"),
         ("Installed version", env!("CARGO_PKG_VERSION")),
-        ("Author", "Denis Zvegelj"),
-        ("License", "Apache-2.0"),
     ] {
-        info.add(
-            &adw::ActionRow::builder()
-                .title(name)
-                .subtitle(value)
-                .build(),
-        );
+        let row = adw::ActionRow::builder()
+            .title(name)
+            .subtitle(value)
+            .build();
+        row.set_subtitle_lines(0);
+        info.add(&row);
     }
     content.append(&info);
-    content.append(&gtk::LinkButton::with_label(
-        WEBSITE,
-        "Source code and issue tracker",
-    ));
-    let support = gtk::Label::new(Some("Support further development"));
-    support.add_css_class("heading");
-    content.append(&support);
+    let links = adw::PreferencesGroup::builder().title("Project").build();
+    for (title, subtitle, url, label) in [
+        (
+            "Source and contributions",
+            "Explore the code, build RUWAC or help improve it.",
+            WEBSITE,
+            "GitHub",
+        ),
+        (
+            "Feedback and bug reports",
+            "Tell us what happened and which version you used.",
+            "https://github.com/w3fans/RUWAC/issues",
+            "Report an issue",
+        ),
+    ] {
+        let row = adw::ActionRow::builder()
+            .title(title)
+            .subtitle(subtitle)
+            .build();
+        let button = gtk::LinkButton::with_label(url, label);
+        button.set_valign(gtk::Align::Center);
+        row.add_suffix(&button);
+        row.set_activatable_widget(Some(&button));
+        links.add(&row);
+    }
+    content.append(&links);
+    let support = adw::PreferencesGroup::builder().title("Support").build();
+    let support_row = adw::ActionRow::builder()
+        .title("Support further development")
+        .subtitle("If RUWAC is useful to you, you can support its development on idz.si. Donations are optional.")
+        .build();
+    support_row.set_subtitle_lines(0);
+    let donation = gtk::LinkButton::with_label(DONATION_URL, "Open donation page");
+    donation.set_valign(gtk::Align::Center);
+    support_row.add_suffix(&donation);
+    support_row.set_activatable_widget(Some(&donation));
+    support.add(&support_row);
+    let scan = adw::ExpanderRow::builder()
+        .title("Open on another device")
+        .subtitle("Scan the QR code for RUWAC’s support page")
+        .build();
     let qr = gtk::DrawingArea::builder()
         .content_width(196)
         .content_height(196)
@@ -70,25 +119,30 @@ pub fn present(parent: &adw::ApplicationWindow) -> gtk::Window {
         }
         let _ = c.fill();
     });
-    content.append(&qr);
-    content.append(&gtk::LinkButton::with_label(
-        DONATION_URL,
-        "Open donation page",
+    qr.set_margin_top(16);
+    qr.set_margin_bottom(16);
+    scan.add_row(&qr);
+    support.add(&scan);
+    content.append(&support);
+    let notice = gtk::Label::new(Some(
+        "Engineering preview · See the project’s Security policy for known limitations.",
     ));
-    let close = gtk::Button::with_label("Close");
-    close.set_halign(gtk::Align::End);
-    let weak = window.downgrade();
-    close.connect_clicked(move |_| {
-        if let Some(w) = weak.upgrade() {
-            w.close();
-        }
-    });
-    content.append(&close);
-    let scroll = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
+    notice.set_wrap(true);
+    notice.set_justify(gtk::Justification::Center);
+    notice.add_css_class("dim-label");
+    notice.add_css_class("caption");
+    content.append(&notice);
+    let clamp = adw::Clamp::builder()
+        .maximum_size(620)
         .child(&content)
         .build();
-    window.set_child(Some(&scroll));
+    let scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&clamp)
+        .build();
+    page.append(&scroll);
+    window.set_child(Some(&page));
     window.present();
     window
 }
