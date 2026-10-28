@@ -350,6 +350,26 @@ Native windows, the overlay sidebar and GNOME dual-credential storage are docume
 
 RUWAC agent connections check and display the remote CLI version and executable path on every attachment. Enable “Check and update RUWAC on agent connection” in the machine properties to check verified published releases and update an existing per-user installation as well as installing a missing CLI. If an update check fails, the connection reports the failure and tries the installed CLI. Existing engines and sessions keep running; a newer CLI does not replace them. Per-user installations use `ruwac update --check` / `ruwac update --install`; `ruwac-rpm-update` belongs to system RPM installations.
 
+Terminal-only installations also support opt-in automatic updates:
+
+```sh
+ruwac update -a on       # enable verified automatic installation
+ruwac update -a status   # inspect the setting
+ruwac update -a off      # disable it
+```
+
+Run this on each machine. System RPM installations require administrator
+configuration; per-user installations use a user timer and retain their installed
+CLI/desktop components. Updating files preserves live daemons and programs, so a
+session can still be served by an older engine. It does not gain new engine
+features until its sessions have ended and that engine is replaced.
+
+Right-click **New term** or a terminal for **Add terminal machine…**; the Agents
+menu offers **Add agent machine…**. Enter an SSH alias such as `kbl` and save or
+connect. No RDP endpoint is required. OpenSSH supplies unspecified user, port and
+keys; configure them later in Machines → Edit. Category choices include existing
+group paths and allow a new path. **Copy machine…** is at the top of its editor.
+
 Fedora 44 updates: use Main menu → Updates or `ruwac update --check` and `ruwac update --install`. Automatic checks announce newer stable GitHub releases; per-user installations support source builds or explicitly selected testing bundles, retaining active sessions and the previous version. Bundle updates require `gh` to verify signed build provenance before installation. System installations use the release RPMs and DNF. See [prerequisites, bootstrap and rollback](spec/RUWAC_UPDATES.md).
 
 The native Files view supports SFTP and verified staged rsync copies of files and folders. See [SSH file transfers](spec/RUWAC_FILES.md) for authentication, replacement and cancellation behavior.

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.4.49 — 2026-10-28 — Stable source release
+
+- Put Copy machine at the top of machine properties and offer existing categories alongside an editable category path. Up/Down changes the focused connection dropdown; Tab moves between fields.
+- Add host-only SSH machine creation to terminal context menus, New term's right-click menu and the Agents menu. Save an alias and connect without configuring RDP; unspecified SSH login, port and keys follow OpenSSH settings.
+- Restore safe scrollback against preserved older daemons without restarting their applications. Legacy unpinned history is checked for output/resize races; the v0.1.x text-only format is explicitly limited to the newest 500 rows.
+- Document terminal-only automatic updates in terminal help and the README (`ruwac update -a on|off|status`), including preservation of installed components and running sessions.
+
 ## v0.4.48 — 2026-10-27 — Stable source release
 
 - Refresh About / Support with native grouped information, project links and an optional QR expander, matching the desktop preferences style.

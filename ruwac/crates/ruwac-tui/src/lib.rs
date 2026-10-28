@@ -974,12 +974,78 @@ enum Mode {
     },
     Help(usize),
 }
+fn history_rows(page: &Value, legacy: bool) -> io::Result<Vec<copy::Line>> {
+    if legacy {
+        let flags = page["wrapped"]
+            .as_array()
+            .filter(|a| a.len() == 1)
+            .ok_or_else(|| io::Error::other("Invalid legacy history row"))?;
+        let wrapped = flags[0]
+            .as_bool()
+            .ok_or_else(|| io::Error::other("Invalid legacy wrap flag"))?;
+        let text = page["text"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("Missing legacy text"))?;
+        let text = if wrapped {
+            text
+        } else {
+            text.strip_suffix('\n')
+                .ok_or_else(|| io::Error::other("Missing history newline"))?
+        };
+        if text.chars().any(char::is_control) {
+            return Err(io::Error::other("History row controls rejected"));
+        }
+        return Ok(vec![copy::Line {
+            text: text.into(),
+            wrapped,
+        }]);
+    }
+    page["rows"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("Canonical history rows unavailable"))?
+        .iter()
+        .map(|row| {
+            let text = row["text"]
+                .as_str()
+                .filter(|t| !t.chars().any(char::is_control))
+                .ok_or_else(|| io::Error::other("Invalid canonical row"))?;
+            let wrapped = row["wrapped"]
+                .as_bool()
+                .ok_or_else(|| io::Error::other("Canonical wrap flag missing"))?;
+            Ok(copy::Line {
+                text: text.into(),
+                wrapped,
+            })
+        })
+        .collect()
+}
+
 fn history(s: &mut UnixStream, pane: &str) -> io::Result<copy::Copy> {
-    let metadata = call(s, "pane.history.freeze", json!({"pane":pane}))?;
-    let pin = metadata["snapshot"]
-        .as_str()
-        .ok_or_else(|| io::Error::other("History snapshot ID missing"))?
-        .to_owned();
+    let metadata = match call(s, "pane.history.freeze", json!({"pane":pane})) {
+        Ok(metadata) if metadata["snapshot"].as_str().is_some() => metadata,
+        Ok(_) => return Err(io::Error::other("History snapshot ID missing")),
+        Err(e)
+            if serde_json::from_str::<Value>(&e.to_string())
+                .ok()
+                .is_some_and(|v| v["code"] == "METHOD_NOT_FOUND") =>
+        {
+            // Preserved older engines expose epoch-checked canonical history,
+            // but cannot pin it. Never restart them or combine changing pages.
+            let mut page = call(s, "pane.history", json!({"pane":pane,"offset":0,"lines":1}))?;
+            let render = call(s, "client.render", json!({}))?;
+            let panes = call(s, "pane.list", json!({"session":render["session"]}))?;
+            let geometry = panes
+                .as_array()
+                .and_then(|rows| rows.iter().find(|p| p["id"] == pane))
+                .ok_or_else(|| io::Error::other("History pane geometry unavailable"))?;
+            page["cols"] = geometry["cols"].clone();
+            page["cursor_row"] = json!(page["total_lines"].as_u64().unwrap_or(1).saturating_sub(1));
+            page["cursor_col"] = json!(0);
+            page
+        }
+        Err(e) => return Err(e),
+    };
+    let pin = metadata["snapshot"].as_str().map(str::to_owned);
     let result = (|| -> io::Result<copy::Copy> {
         let total = metadata["total_lines"]
             .as_u64()
@@ -994,38 +1060,27 @@ fn history(s: &mut UnixStream, pane: &str) -> io::Result<copy::Copy> {
         // Long-lived sessions keep the newest lines in view: at most 50,000
         // lines and 8 MiB, dropping the oldest instead of refusing.
         let mut lines = std::collections::VecDeque::new();
-        let mut offset = total.saturating_sub(50_000);
+        // v0.1.x has no canonical rows: one row per response is the only
+        // unambiguous way to retain Unicode, wide-character padding and wraps.
+        let legacy_rows = pin.is_none() && metadata.get("rows").is_none();
+        let mut offset = total.saturating_sub(if legacy_rows { 500 } else { 50_000 });
         // Index in the full history of the first line kept.
         let mut first = offset;
         let mut bytes = 0;
         while offset < total {
-            let page = call(
-                s,
-                "pane.history",
-                json!({"pane":pane,"snapshot":pin,"offset":offset,"lines":500}),
-            )?;
+            let mut params = json!({"pane":pane,"offset":offset,"lines":if legacy_rows {1}else{500},"epoch":metadata["epoch"]});
+            if let Some(pin) = &pin {
+                params["snapshot"] = json!(pin);
+            }
+            let page = call(s, "pane.history", params)?;
             if page["epoch"] != metadata["epoch"] || page["total_lines"] != metadata["total_lines"]
             {
                 return Err(io::Error::other("Inconsistent history snapshot rejected"));
             }
-            let rows = page["rows"].as_array().ok_or_else(|| {
-                io::Error::other("Canonical history rows unavailable; use a matching daemon")
-            })?;
-            for row in rows {
-                let text = row["text"]
-                    .as_str()
-                    .ok_or_else(|| io::Error::other("Invalid canonical row"))?;
-                if text.chars().any(char::is_control) {
-                    return Err(io::Error::other("Canonical row controls rejected"));
-                }
-                bytes += text.len() + 1;
-                let wrapped = row["wrapped"]
-                    .as_bool()
-                    .ok_or_else(|| io::Error::other("Canonical wrap flag missing"))?;
-                lines.push_back(copy::Line {
-                    text: text.into(),
-                    wrapped,
-                });
+            let rows = history_rows(&page, legacy_rows)?;
+            for row in &rows {
+                bytes += row.text.len() + 1;
+                lines.push_back(row.clone());
                 while bytes > 8 * 1024 * 1024 {
                     match lines.pop_front() {
                         Some(old) => {
@@ -1042,7 +1097,7 @@ fn history(s: &mut UnixStream, pane: &str) -> io::Result<copy::Copy> {
             }
             offset = next;
         }
-        Ok(copy::Copy::new(
+        let mut copied = copy::Copy::new(
             lines.into(),
             cols,
             copy::Position {
@@ -1051,9 +1106,31 @@ fn history(s: &mut UnixStream, pane: &str) -> io::Result<copy::Copy> {
             },
             metadata["dropped_lines"].as_u64().unwrap_or(0) as usize,
             pane.into(),
-        ))
+        );
+        if legacy_rows {
+            copied.message = "Legacy daemon: newest 500 rows · Esc returns to terminal".into();
+        }
+        Ok(copied)
     })();
-    let release = call(s, "pane.history.release", json!({"snapshot":pin}));
+    let release = if let Some(pin) = pin {
+        call(s, "pane.history.release", json!({"snapshot":pin})).map(|_| ())
+    } else {
+        // One final epoch check prevents accepting an output/resize race after
+        // the last unpinned page. The collected client copy is immutable.
+        call(
+            s,
+            "pane.history",
+            json!({"pane":pane,"epoch":metadata["epoch"],"offset":0,"lines":1}),
+        )
+        .and_then(|page| {
+            if page["epoch"] == metadata["epoch"] && page["total_lines"] == metadata["total_lines"]
+            {
+                Ok(())
+            } else {
+                Err(io::Error::other("History changed; retry scrollback"))
+            }
+        })
+    };
     match result {
         Ok(value) => {
             release?;
@@ -1329,7 +1406,7 @@ fn draw_mode(
             }
             Mode::Help(offset) => {
                 let text = format!(
-                    "RUWAC Screen controls (prefix {})\nc new window; n/p next/previous; double prefix forwards to nested terminal; o previous window\na literal configured prefix; d detach; 0–9 select window\nS horizontal split; | vertical split; Tab change pane; z zoom\n[ copy/search; ] internal paste; \" window chooser; : command\nCopy: arrows/hjkl; g/G and Home/End; 0/^/$; w/b/e\nPage Up/Down or Ctrl+B/F; Ctrl+U/D half page; H/M/L viewport\nSpace or Enter first mark; move then mark again to copy\n/ forward search; ? reverse; n/N repeat; searches wrap\nv rectangular selection; c/C left/right margins; Esc cancel\nCounts before movement; Unicode graphemes stay intact\nInternal copy buffer is separate from desktop clipboard\nCopy snapshot: newest 8 MiB/50,000 rows; selection cap 256 KiB\nCommands: new, next, prev, other, select N, rename NAME\nsplit horizontal/vertical, zoom, copy, paste, windows, help, detach\nRUWAC_SHORTCUTS prefix: <Control>a through <Control>z\nRUWAC_KEYMAP remaps one prefix key to an implemented key\nCtrl/arrow escape sequences go to applications outside modals\nModal paste/mouse cannot reach a child; search/prompt paste is text\nEsc/Enter close help; arrows/Page Up/Down scroll",
+                    "RUWAC Screen controls (prefix {})\nc new window; n/p next/previous; double prefix forwards to nested terminal; o previous window\na literal configured prefix; d detach; 0–9 select window\nS horizontal split; | vertical split; Tab change pane; z zoom\n[ copy/search; ] internal paste; \" window chooser; : command\nCopy: arrows/hjkl; g/G and Home/End; 0/^/$; w/b/e\nPage Up/Down or Ctrl+B/F; Ctrl+U/D half page; H/M/L viewport\nSpace or Enter first mark; move then mark again to copy\n/ forward search; ? reverse; n/N repeat; searches wrap\nv rectangular selection; c/C left/right margins; Esc cancel\nCounts before movement; Unicode graphemes stay intact\nInternal copy buffer is separate from desktop clipboard\nAuto-update (from shell): ruwac update -a on|off|status\nUpdates preserve running daemons and applications\nCopy snapshot: newest 8 MiB/50,000 rows; selection cap 256 KiB\nCommands: new, next, prev, other, select N, rename NAME\nsplit horizontal/vertical, zoom, copy, paste, windows, help, detach\nRUWAC_SHORTCUTS prefix: <Control>a through <Control>z\nRUWAC_KEYMAP remaps one prefix key to an implemented key\nCtrl/arrow escape sequences go to applications outside modals\nModal paste/mouse cannot reach a child; search/prompt paste is text\nEsc/Enter close help; arrows/Page Up/Down scroll",
                     config.label()
                 );
                 let lines: Vec<_> = text.lines().collect();
@@ -2524,5 +2601,73 @@ mod modified_navigation_tests {
             assert_eq!(keys.len(), 1);
             assert_eq!(keys[0].bytes().as_bytes(), sequence);
         }
+    }
+}
+
+#[cfg(test)]
+mod legacy_history_tests {
+    use super::*;
+    #[test]
+    fn legacy_single_row_keeps_unicode_wrap_and_rejects_controls() {
+        let row = history_rows(&json!({"text":"界e\u{301} ","wrapped":[true]}), true).unwrap();
+        assert_eq!(row[0].text, "界e\u{301} ");
+        assert!(row[0].wrapped);
+        assert!(history_rows(&json!({"text":"a\nb\n","wrapped":[false]}), true).is_err());
+        assert!(history_rows(&json!({"text":"a","wrapped":[false]}), true).is_err());
+        assert!(history_rows(&json!({"text":"a\n","wrapped":[false,false]}), true).is_err());
+    }
+    fn legacy_copy(changed: bool, denied: bool) -> io::Result<copy::Copy> {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut zeros = 0;
+            while let Ok(q) = ruwac_protocol::read_frame(&mut server) {
+                let result = match q["method"].as_str().unwrap() {
+                    "pane.history.freeze" => {
+                        write_frame(&mut server,&json!({"version":0,"id":q["id"],"error":{"code":if denied {"DENIED"}else{"METHOD_NOT_FOUND"},"message":"test"}})).unwrap();
+                        continue;
+                    }
+                    "client.render" => json!({"session":"session_test","session_name":"test"}),
+                    "pane.list" => json!([{"id":"pane_test","cols":80}]),
+                    "pane.history" => {
+                        assert_eq!(q["params"]["lines"], 1);
+                        let offset = q["params"]["offset"].as_u64().unwrap();
+                        if offset == 0 {
+                            zeros += 1;
+                        }
+                        json!({"epoch":if changed && zeros==3 {2}else{1},"total_lines":3,"next_offset":offset+1,
+                            "text":match offset {0=>"first\n",1=>"界e\u{301}",_=>"last\n"},"wrapped":[offset==1]})
+                    }
+                    other => panic!("Unexpected legacy call: {other}"),
+                };
+                write_frame(
+                    &mut server,
+                    &json!({"version":0,"id":q["id"],"result":result}),
+                )
+                .unwrap();
+            }
+        });
+        let result = history(&mut client, "pane_test");
+        drop(client);
+        worker.join().unwrap();
+        result
+    }
+    #[test]
+    fn old_daemon_copy_works_without_freeze_or_canonical_rows() {
+        let copied = legacy_copy(false, false).unwrap();
+        assert_eq!(copied.lines.len(), 3);
+        assert_eq!(copied.lines[1].text, "界e\u{301}");
+        assert!(copied.lines[1].wrapped);
+        assert!(copied.message.contains("Legacy daemon"));
+    }
+    #[test]
+    fn legacy_copy_rejects_output_race_and_never_falls_back_after_denial() {
+        assert!(legacy_copy(true, false).is_err());
+        assert!(
+            legacy_copy(false, true)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("DENIED")
+        );
     }
 }

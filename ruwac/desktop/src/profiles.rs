@@ -974,11 +974,6 @@ fn resolve(profile: &Profile, groups: &[Group], accounts: &[Profile]) -> Result<
             return Err("Group credentials require connection inheritance".into());
         }
     }
-    if p.protocol == "SSH" && p.username.is_empty() {
-        p.username = gtk::glib::user_name()
-            .into_string()
-            .map_err(|_| "Local account name is not UTF-8")?;
-    }
     p.validate()?;
     Ok(p)
 }
@@ -1754,6 +1749,243 @@ fn shortcut_button(
     b
 }
 
+/// A host alias is sufficient: OpenSSH owns default user, port and keys.
+fn quick_ssh_profile(host: &str, agent: u32) -> Result<Profile, String> {
+    let host = host.trim();
+    if host.is_empty() || host.chars().any(char::is_whitespace) {
+        return Err("Enter one SSH host or config alias, for example kbl".into());
+    }
+    let mut p: Profile = serde_json::from_value(serde_json::json!({
+        "name":host,"server":host,"protocol":"SSH","group":"","username":"",
+        "secret_reference":"","favorite":false,"last_used":0,"tags":[]
+    }))
+    .map_err(|e| e.to_string())?;
+    p.identify();
+    match agent {
+        1 => p.preferences.codex_command = "codex resume --all".into(),
+        2 => p.preferences.claude_command = "claude --resume".into(),
+        3 => p.preferences.kimi_command = "kimi --session".into(),
+        _ => (),
+    }
+    p.validate()?;
+    Ok(p)
+}
+
+fn quick_ssh_dialog(
+    button: &gtk::Button,
+    store: Rc<RefCell<Store>>,
+    status: gtk::Label,
+    open: ConnectionOpener,
+    launch: AgentLauncher,
+    agents: bool,
+) {
+    let parent = button.root().and_downcast::<gtk::Window>();
+    let dialog = gtk::Dialog::builder()
+        .title(if agents {
+            "Add agent machine"
+        } else {
+            "Add terminal machine"
+        })
+        .modal(true)
+        .default_width(420)
+        .build();
+    dialog.set_transient_for(parent.as_ref());
+    dialog.set_widget_name("quick-ssh-machine");
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Save", gtk::ResponseType::Accept);
+    dialog.add_button("Save & Connect", gtk::ResponseType::Other(5));
+    dialog.set_default_response(gtk::ResponseType::Other(5));
+    let host = gtk::Entry::builder()
+        .placeholder_text("SSH host or alias, e.g. kbl")
+        .activates_default(true)
+        .hexpand(true)
+        .build();
+    host.set_widget_name("quick-ssh-host");
+    let kind = gtk::DropDown::from_strings(&["Terminal", "Codex", "Claude", "Kimi"]);
+    kind.set_widget_name("quick-ssh-agent");
+    kind.set_selected(u32::from(agents));
+    dropdown_arrows(&kind);
+    let hint = gtk::Label::new(Some(
+        "Uses your SSH configuration. Change login, port, keys and category later in Machines → Edit.",
+    ));
+    hint.set_wrap(true);
+    let info = gtk::Label::new(None);
+    info.set_wrap(true);
+    for w in [
+        host.upcast_ref::<gtk::Widget>(),
+        kind.upcast_ref(),
+        hint.upcast_ref(),
+        info.upcast_ref(),
+    ] {
+        w.set_margin_start(12);
+        w.set_margin_end(12);
+        w.set_margin_top(8);
+        dialog.content_area().append(w);
+    }
+    dialog.connect_response(move |d, response| {
+        if response != gtk::ResponseType::Accept && response != gtk::ResponseType::Other(5) {
+            d.close();
+            return;
+        }
+        let p = match quick_ssh_profile(&host.text(), kind.selected()) {
+            Ok(p) => p,
+            Err(e) => {
+                info.set_text(&e);
+                return;
+            }
+        };
+        let id = p.id.clone();
+        let mut library = store.borrow_mut();
+        if library.items.len() >= 1000 {
+            info.set_text("Profile limit reached");
+            return;
+        }
+        library.items.push(p);
+        if let Err(e) = library.save() {
+            library.items.pop();
+            info.set_text(&e);
+            return;
+        }
+        drop(library);
+        status.set_text("SSH machine saved; edit its settings in Machines");
+        refresh_widgets(parent.as_ref());
+        let (store, status, open, launch, kind) = (
+            store.clone(),
+            status.clone(),
+            open.clone(),
+            launch.clone(),
+            kind.selected(),
+        );
+        let connect = response == gtk::ResponseType::Other(5);
+        let anchor = gtk::Button::new();
+        // Launch only after releasing the modal dialog's focus.
+        d.close();
+        if connect {
+            gtk::glib::idle_add_local_once(move || {
+                shortcut_action(
+                    &anchor,
+                    &store,
+                    &status,
+                    &open,
+                    &launch,
+                    &id,
+                    match kind {
+                        1 => 0,
+                        2 => 1,
+                        3 => 5,
+                        _ => 3,
+                    },
+                )
+            });
+        }
+    });
+    dialog.present();
+}
+
+/// Closed GTK dropdowns otherwise use arrows for spatial focus traversal.
+/// Keep Tab for traversal; arrows change this control, including its bounds.
+fn dropdown_arrows(dropdown: &gtk::DropDown) {
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let weak = dropdown.downgrade();
+    keys.connect_key_pressed(move |_, key, _, mods| {
+        if !mods.intersects(
+            gtk::gdk::ModifierType::CONTROL_MASK
+                | gtk::gdk::ModifierType::ALT_MASK
+                | gtk::gdk::ModifierType::SHIFT_MASK,
+        ) && matches!(key, gtk::gdk::Key::Up | gtk::gdk::Key::Down)
+        {
+            if let Some(d) = weak.upgrade() {
+                let count = d.model().map_or(0, |m| m.n_items());
+                if count > 0 {
+                    let n = d.selected().min(count - 1);
+                    d.set_selected(if key == gtk::gdk::Key::Up {
+                        n.saturating_sub(1)
+                    } else {
+                        (n + 1).min(count - 1)
+                    });
+                }
+            }
+            gtk::glib::Propagation::Stop
+        } else {
+            gtk::glib::Propagation::Proceed
+        }
+    });
+    dropdown.add_controller(keys);
+}
+
+/// Editable category with existing paths available from a dropdown.
+fn category_picker(entry: &gtk::Entry, store: &Store) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    row.append(entry);
+    let mut paths = store
+        .groups
+        .iter()
+        .map(|g| g.path.clone())
+        .chain(store.items.iter().map(|p| p.group.clone()))
+        .collect::<Vec<_>>();
+    paths.push(String::new());
+    paths.sort();
+    paths.dedup();
+    // GtkDropDown's single selection may auto-select an item instead of
+    // retaining INVALID_LIST_POSITION. Give typed values a real neutral row.
+    let labels = std::iter::once("New / typed category")
+        .chain(paths.iter().map(|p| {
+            if p.is_empty() {
+                "Ungrouped"
+            } else {
+                p.as_str()
+            }
+        }))
+        .collect::<Vec<_>>();
+    let choice = gtk::DropDown::from_strings(&labels);
+    choice.set_widget_name("machine-category-choice");
+    choice.set_selected(
+        paths
+            .iter()
+            .position(|p| p == entry.text().as_str())
+            .map_or(0, |i| i as u32 + 1),
+    );
+    dropdown_arrows(&choice);
+    // GtkEntry::set_text emits intermediate delete/insert changes. Prevent
+    // those changes from recursively driving the dropdown back and forth.
+    let syncing = Rc::new(Cell::new(false));
+    let entry_sync = syncing.clone();
+    let known = paths.clone();
+    let weak_choice = choice.downgrade();
+    entry.connect_changed(move |field| {
+        if entry_sync.replace(true) {
+            return;
+        }
+        if let Some(choice) = weak_choice.upgrade() {
+            let selected = known
+                .iter()
+                .position(|path| path == field.text().as_str())
+                .map_or(0, |i| i as u32 + 1);
+            if choice.selected() != selected {
+                choice.set_selected(selected);
+            }
+        }
+        entry_sync.set(false);
+    });
+    let field = entry.clone();
+    choice.connect_selected_notify(move |d| {
+        if syncing.replace(true) {
+            return;
+        }
+        if let Some(path) = d
+            .selected()
+            .checked_sub(1)
+            .and_then(|i| paths.get(i as usize))
+        {
+            field.set_text(path);
+        }
+        syncing.set(false);
+    });
+    row.append(&choice);
+    row
+}
+
 fn shortcut_menu(
     store: &Rc<RefCell<Store>>,
     status: &gtk::Label,
@@ -1763,6 +1995,24 @@ fn shortcut_menu(
 ) -> gtk::Box {
     let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
     body.set_widget_name("host-shortcuts-list");
+    let add = gtk::Button::with_label(if agents_only {
+        "Add agent machine…"
+    } else {
+        "Add terminal machine…"
+    });
+    add.set_widget_name("saved-host-add");
+    let (s, st, op, la) = (store.clone(), status.clone(), open.clone(), launch.clone());
+    add.connect_clicked(move |b| {
+        quick_ssh_dialog(
+            b,
+            s.clone(),
+            st.clone(),
+            op.clone(),
+            la.clone(),
+            agents_only,
+        )
+    });
+    body.append(&add);
     let items = store.borrow().items.clone();
     let mut saved = items
         .iter()
@@ -2841,6 +3091,44 @@ pub fn sidebar(
 mod tests {
     use super::*;
     #[test]
+    fn quick_host_profiles_are_ssh_only_and_preserve_openssh_defaults() {
+        let p = quick_ssh_profile(" kbl ", 0).unwrap();
+        assert_eq!(p.server, "kbl");
+        assert_eq!(p.name, "kbl");
+        assert_eq!(p.protocol, "SSH");
+        assert!(p.username.is_empty());
+        assert!(!p.id.is_empty());
+        assert!(!p.machine_id.is_empty());
+        let resolved = resolve(&p, &[], &[]).unwrap();
+        let argv = ssh_argv(&resolved).unwrap();
+        assert!(!argv.iter().any(|s| s == "-l" || s == "-p" || s == "-i"));
+        assert_eq!(argv.last().unwrap(), "kbl");
+        assert_eq!(
+            quick_ssh_profile("kbl", 1)
+                .unwrap()
+                .preferences
+                .codex_command,
+            "codex resume --all"
+        );
+        assert_eq!(
+            quick_ssh_profile("kbl", 2)
+                .unwrap()
+                .preferences
+                .claude_command,
+            "claude --resume"
+        );
+        assert_eq!(
+            quick_ssh_profile("kbl", 3)
+                .unwrap()
+                .preferences
+                .kimi_command,
+            "kimi --session"
+        );
+        for host in ["", "-oProxyCommand=bad", "kbl extra", "a\nb"] {
+            assert!(quick_ssh_profile(host, 0).is_err(), "{host}");
+        }
+    }
+    #[test]
     fn ssh_config_port_and_hostname_are_used_without_explicit_port() {
         let g = "user generated-user\nhostname host.example.net\nport 2222\nidentityfile ~/.ssh/id_ed25519\n";
         assert_eq!(
@@ -3544,6 +3832,14 @@ fn editor_seed(
         .margin_end(16)
         .build();
     form.set_widget_name("machine-editor-form");
+    if existing.is_some() {
+        let copy = gtk::Button::with_label("Copy machine…");
+        copy.set_widget_name("machine-copy");
+        copy.set_tooltip_text(Some("Save a copy with new machine and endpoint identities"));
+        let d = dialog.clone();
+        copy.connect_clicked(move |_| d.response(gtk::ResponseType::Other(1)));
+        form.append(&copy);
+    }
     form_row(&form, "Machine name", &fields[0]);
     form_row(&form, "Host / address and port", &fields[3]);
     form_row(&form, "Connection type", &protocol);
@@ -3580,7 +3876,11 @@ fn editor_seed(
         .build();
     gnome.append(&gnome_reference);
     form.append(&gnome);
-    form_row(&form, "Group / nested path", &fields[1]);
+    form_row(
+        &form,
+        "Category / nested path",
+        &category_picker(&fields[1], &store.borrow()),
+    );
     let advanced = gtk::Box::new(gtk::Orientation::Vertical, 12);
     for i in [5, 8, 10, 12, 6, 7, 2] {
         form_row(&advanced, vals[i].0, &fields[i]);
@@ -3677,7 +3977,6 @@ fn editor_seed(
     }
     if existing.is_some() {
         for (label, response) in [
-            ("Duplicate machine", 1),
             ("Add endpoint", 3),
             ("Delete endpoint…", 2),
             ("Delete machine…", 4),
@@ -3690,10 +3989,7 @@ fn editor_seed(
     }
     let agents = gtk::Box::new(gtk::Orientation::Vertical, 6);
     let key_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    fields[4].set_placeholder_text(Some(&format!(
-        "Default: {}",
-        gtk::glib::user_name().to_string_lossy()
-    )));
+    fields[4].set_placeholder_text(Some("Default: SSH configuration or current account"));
     fields[11].set_hexpand(true);
     fields[11].set_placeholder_text(Some("Use your SSH configuration, or choose a key"));
     key_row.append(&fields[11]);
@@ -4097,6 +4393,9 @@ fn editor_seed(
     info.set_xalign(0.0);
     form.append(&info);
     sc.set_child(Some(&form));
+    for d in [&protocol, &display, &clipboard, &rdp_mode, &login, &backend] {
+        dropdown_arrows(d);
+    }
     dialog.connect_response(move|d,response|{
         if response==gtk::ResponseType::Other(2) || response==gtk::ResponseType::Other(4) {
             let machine=response==gtk::ResponseType::Other(4);if store.borrow().items.iter().any(|p|(p.id==original.id||(machine&&p.machine_id==original.machine_id))&&store.borrow().active.contains_key(&p.id)){info.set_text("This profile is used by an opened tab. Close all of its connection tabs before deleting it.");return;}
@@ -4109,8 +4408,8 @@ fn editor_seed(
         if response==gtk::ResponseType::Other(3){p.name=original.name.clone();p.group=original.group.clone();p.id=ruwac_protocol::id("endpoint");p.secret_reference=p.id.clone();if !p.preferences.gnome_secret_reference.is_empty(){p.preferences.gnome_secret_reference=format!("{}.gnome",p.id);}}
         if let Err(e)=p.validate(){info.set_text(&e);return;}
         let saved_id=p.id.clone();let mut s=store.borrow_mut();let old=s.items.clone();
-        if let Some(i)=s.items.iter().position(|x|x.id==p.id){for item in &mut s.items{if item.machine_id==p.machine_id{item.name=p.name.clone();item.group=p.group.clone();item.tags=p.tags.clone();}}s.items[i]=p;}else{if s.items.len()>=1000{info.set_text("Profile limit reached");return;}let new_machine=p.machine_id.clone();s.items.push(p);
-            if response==gtk::ResponseType::Other(1){for endpoint in old.iter().filter(|x|x.machine_id==original.machine_id&&x.id!=original.id){if s.items.len()>=1000{s.items=old.clone();info.set_text("Profile limit reached");return;}let mut copy=endpoint.clone();copy.id=ruwac_protocol::id("endpoint");copy.secret_reference=copy.id.clone();if !copy.preferences.gnome_secret_reference.is_empty(){copy.preferences.gnome_secret_reference=format!("{}.gnome",copy.id);}copy.machine_id=new_machine.clone();copy.name.push_str(" (copy)");s.items.push(copy);}}
+        if let Some(i)=s.items.iter().position(|x|x.id==p.id){for item in &mut s.items{if item.machine_id==p.machine_id{item.name=p.name.clone();item.group=p.group.clone();item.tags=p.tags.clone();}}s.items[i]=p;}else{if s.items.len()>=1000{info.set_text("Profile limit reached");return;}let new_machine=p.machine_id.clone();let new_name=p.name.clone();let new_group=p.group.clone();let new_tags=p.tags.clone();s.items.push(p);
+            if response==gtk::ResponseType::Other(1){for endpoint in old.iter().filter(|x|x.machine_id==original.machine_id&&x.id!=original.id){if s.items.len()>=1000{s.items=old.clone();info.set_text("Profile limit reached");return;}let mut copy=endpoint.clone();copy.id=ruwac_protocol::id("endpoint");copy.secret_reference=copy.id.clone();if !copy.preferences.gnome_secret_reference.is_empty(){copy.preferences.gnome_secret_reference=format!("{}.gnome",copy.id);}copy.machine_id=new_machine.clone();copy.name=new_name.clone();copy.group=new_group.clone();copy.tags=new_tags.clone();s.items.push(copy);}}
         }
         if !linked_login { if let Some(saved)=s.items.iter().find(|x|x.id==saved_id).cloned() {
             for sibling in s.items.iter_mut().filter(|x|x.machine_id==saved.machine_id) {
