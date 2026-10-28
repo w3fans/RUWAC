@@ -584,6 +584,14 @@ use the tab menu or Shift+right-click for RUWAC's menu. **Select text…** opens
 native scrollback, where ordinary mouse selection works without holding Shift.
 SSH terminal output is selected in exactly the same way as local output.
 
+When running a nested `ruwac -r` or `ruwac -S` session, use **Ctrl+A, then [**
+to open that session's history, then select with the mouse **without Shift**.
+Hold the pointer at the top or bottom edge to extend the selection through
+history; the wheel also scrolls while selecting. Shift+drag instead selects the
+outer terminal's screen, which cannot provide the nested session's history.
+Escape leaves the inner copy view. For a terminal opened directly in the GUI,
+use **Ctrl+Alt+A, then [** or **Select text…** to open its history.
+
 To middle-click a local RUWAC terminal selection into a remote RUWAC terminal,
 configure the Linux selection-sharing route above and enable **Middle-click
 pastes local terminal selections into remote RUWAC** on its RDP endpoint. In the

@@ -773,20 +773,54 @@ fn cell_style(cell: &Value, selected: bool) -> String {
     }
     st
 }
-fn draw(v: &Value, status: &str) -> io::Result<()> {
+#[derive(Default)]
+struct DrawCache {
+    geometry: Option<Value>,
+    rows: std::collections::HashMap<String, Vec<Value>>,
+}
+impl DrawCache {
+    fn clear(&mut self) {
+        self.geometry = None;
+        self.rows.clear();
+    }
+    fn begin(&mut self, frame: &Value, screen: (u16, u16), cleared: bool) -> bool {
+        let panes: Vec<_> = frame["panes"].as_array().into_iter().flatten()
+            .map(|p| json!({"id":p["id"],"rect":p["rect"],"rows":p["grid"]["rows"],"cols":p["grid"]["cols"]})).collect();
+        let geometry = json!({"session":frame["session"],"window":frame["window"],"screen":screen,"panes":panes});
+        let full = cleared || self.geometry.as_ref() != Some(&geometry);
+        if full {
+            self.rows.clear();
+            self.geometry = Some(geometry);
+        }
+        full
+    }
+    fn changed(&mut self, pane: &str, row: usize, cells: &Value) -> bool {
+        if !self.rows.contains_key(pane) {
+            self.rows.insert(pane.into(), Vec::new());
+        }
+        let rows = self.rows.get_mut(pane).unwrap();
+        if rows.get(row) == Some(cells) {
+            return false;
+        }
+        if rows.len() <= row {
+            rows.resize(row + 1, Value::Null);
+        }
+        rows[row] = cells.clone();
+        true
+    }
+}
+fn draw(v: &Value, status: &str, cache: &mut DrawCache) -> io::Result<()> {
+    let cleared = CLEAR.swap(false, Ordering::Relaxed);
+    let (screen_rows, screen_cols) = terminal_dimensions();
+    let full = cache.begin(v, (screen_rows, screen_cols), cleared);
     let mut out = format!(
         "\x1b]2;RUWAC {}\x07\x1b[?25l\x1b[0m\x1b[H{}",
         window_identity(v).chars().take(160).collect::<String>(),
-        if CLEAR.swap(false, Ordering::Relaxed) {
-            "\x1b[2J"
-        } else {
-            ""
-        }
+        if cleared { "\x1b[2J" } else { "" }
     );
 
-    let (screen_rows, screen_cols) = terminal_dimensions();
-    // Panes repaint every cell they own; erase only what lies outside them,
-    // before drawing, so frames replace each other without a blank flash.
+    // Geometry/mode changes repaint completely. Ordinary typing only replaces
+    // changed rows, avoiding full-screen ANSI/SSH traffic for a single glyph.
     let rects: Vec<(u64, u64, u64, u64)> = v["panes"]
         .as_array()
         .into_iter()
@@ -808,7 +842,7 @@ fn draw(v: &Value, status: &str) -> io::Result<()> {
             .map(|&(x, _, w, _)| x + w)
             .max()
             .unwrap_or(0);
-        if right < u64::from(screen_cols) {
+        if full && right < u64::from(screen_cols) {
             out.push_str(&format!("\x1b[{};{}H\x1b[0m\x1b[K", row + 1, right + 1));
         }
     }
@@ -830,6 +864,9 @@ fn draw(v: &Value, status: &str) -> io::Result<()> {
             }
             if let Some(rows) = g["cells"].as_array() {
                 for (r, cells) in rows.iter().enumerate() {
+                    if !cache.changed(p["id"].as_str().unwrap_or(""), r, cells) {
+                        continue;
+                    }
                     out.push_str(&format!("\x1b[{};{}H", offset + r as u64 + 1, left + 1));
                     let mut style = String::new();
                     for cell in cells.as_array().unwrap() {
@@ -1350,10 +1387,12 @@ fn draw_mode(
     size: (u16, u16),
     status: &str,
     config: &Config,
+    cache: &mut DrawCache,
 ) -> io::Result<()> {
     if matches!(mode, Mode::Live) {
-        return draw(snapshot, &format!("{} · {}", config.label(), status));
+        return draw(snapshot, &format!("{} · {}", config.label(), status), cache);
     }
+    cache.clear();
     let height = size.0 as usize;
     let columns = size.1 as usize;
     let mut out = if let Mode::Copy(copy) = mode {
@@ -1563,14 +1602,24 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
     let mut prefix = false;
     let mut mode = Mode::Live;
     let mut snapshot = call(&mut s, "client.render", json!({}))?;
-    status_commands::refresh(&mut snapshot, |m, p| call(&mut s, m, p));
+    let mut labels = status_commands::Labels::default();
+    labels.refresh(&mut snapshot, |m, p| call(&mut s, m, p));
     let mut running_windows = HashSet::new();
     observe_running_window(&snapshot, &mut running_windows);
     let mut status = String::new();
-    draw_mode(&mut mode, &snapshot, size, &status, &config)?;
+    let mut draw_cache = DrawCache::default();
+    draw_mode(
+        &mut mode,
+        &snapshot,
+        size,
+        &status,
+        &config,
+        &mut draw_cache,
+    )?;
     let mut rendered = Instant::now();
     let mut commands_refreshed = Instant::now();
     let mut input_at = Instant::now();
+    let mut copy_drag: Option<(usize, usize, Instant)> = None;
     while !STOP.load(Ordering::Relaxed) {
         // Briefly poll faster after input so local echo is not delayed by the
         // ordinary output refresh cadence. Quiet terminals keep their old rate.
@@ -1644,10 +1693,16 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
                             0 if !release => {
                                 c.point(row, col);
                                 c.mark();
+                                copy_drag = Some((row, col, Instant::now()));
                             }
                             0 | 32 => {
                                 c.point(row, col);
+                                if let Some((last_row, last_col, _)) = copy_drag.as_mut() {
+                                    *last_row = row;
+                                    *last_col = col;
+                                }
                                 if release && c.anchor.is_some() {
+                                    copy_drag = None;
                                     let text = c.selected(MAX_TEXT).map_err(io::Error::other)?;
                                     let bytes = text.len();
                                     offer_selection(&text);
@@ -2195,8 +2250,19 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
         if STOP.load(Ordering::Relaxed) {
             break;
         }
+        if let Mode::Copy(copy) = &mut mode {
+            if let Some((row, col, at)) = copy_drag.as_mut() {
+                if at.elapsed() >= Duration::from_millis(35) {
+                    dirty |= copy.drag_scroll(*row, *col, size.0 as usize);
+                    *at = Instant::now();
+                }
+            }
+        } else {
+            copy_drag = None;
+        }
         let new_screen_size = terminal_dimensions();
         if new_screen_size != screen_size {
+            copy_drag = None;
             screen_size = new_screen_size;
             CLEAR.store(true, Ordering::Relaxed);
             dirty = true;
@@ -2317,11 +2383,18 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
         }
         if matches!(mode, Mode::Live) && commands_refreshed.elapsed() >= Duration::from_millis(500)
         {
-            dirty |= status_commands::refresh(&mut snapshot, |m, p| call(&mut s, m, p));
+            dirty |= labels.refresh(&mut snapshot, |m, p| call(&mut s, m, p));
             commands_refreshed = Instant::now();
         }
         if dirty {
-            draw_mode(&mut mode, &snapshot, size, &status, &config)?;
+            draw_mode(
+                &mut mode,
+                &snapshot,
+                size,
+                &status,
+                &config,
+                &mut draw_cache,
+            )?;
         }
     }
     let _ = call(&mut s, "session.detach", json!({}));
@@ -2331,6 +2404,37 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn incremental_rows_compare_text_and_every_cell_attribute() {
+        let mut cache = DrawCache::default();
+        let row = json!([["x",false,1,2,false,false,{"italic":true}]]);
+        assert!(cache.changed("pane", 0, &row));
+        assert!(!cache.changed("pane", 0, &row));
+        let mut newer = row.clone();
+        newer[0][0] = json!("y");
+        assert!(cache.changed("pane", 0, &newer));
+        newer[0][6]["italic"] = json!(false);
+        assert!(cache.changed("pane", 0, &newer));
+        assert!(!cache.changed("pane", 0, &newer));
+    }
+    #[test]
+    fn incremental_rows_reset_for_geometry_modes_and_explicit_clear() {
+        let mut cache = DrawCache::default();
+        let mut frame = json!({"session":"session","window":"window","panes":[{"id":"pane","rect":{"x":0,"y":0,"cols":80,"rows":23},"grid":{"cols":80,"rows":23}}]});
+        let row = json!([["x", false]]);
+        assert!(cache.begin(&frame, (24, 80), false));
+        assert!(cache.changed("pane", 0, &row));
+        assert!(!cache.begin(&frame, (24, 80), false));
+        assert!(!cache.changed("pane", 0, &row));
+        frame["panes"][0]["rect"]["x"] = json!(1);
+        assert!(cache.begin(&frame, (24, 80), false));
+        assert!(cache.changed("pane", 0, &row));
+        assert!(cache.begin(&frame, (24, 80), true));
+        assert!(cache.changed("pane", 0, &row));
+        cache.clear(); // Copy/help/chooser paints must not survive into live mode.
+        assert!(cache.begin(&frame, (24, 80), false));
+        assert!(cache.changed("pane", 0, &row));
+    }
     #[test]
     fn desktop_selection_answers_decode_and_base64_round_trips() {
         for text in ["", "a", "ab", "abc", "Že界\n tail"] {

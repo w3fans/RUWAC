@@ -448,6 +448,16 @@ pub struct Worker {
     stop: Arc<AtomicBool>,
     bytes: Arc<AtomicUsize>,
     visible: Arc<AtomicBool>,
+    wake_reader: Option<UnixStream>,
+}
+
+fn notify_view(wake: &Option<UnixStream>) {
+    use std::io::Write;
+    if let Some(stream) = wake {
+        // Latest state is already bounded/coalesced. A full wake socket needs
+        // no additional byte; never block terminal I/O on the GTK main loop.
+        let _ = (&*stream).write(&[1]);
+    }
 }
 /// Two render frames show the same content (revision numbers aside). The
 /// revision counts changes in every session of the daemon.
@@ -499,6 +509,13 @@ impl Worker {
         Self::spawn(path, session, true)
     }
     fn spawn(path: std::path::PathBuf, session: String, ensure_daemon: bool) -> Self {
+        let (wake_reader, wake_writer) = UnixStream::pair()
+            .ok()
+            .filter(|(read, write)| {
+                read.set_nonblocking(true).is_ok() && write.set_nonblocking(true).is_ok()
+            })
+            .map(|(read, write)| (Some(read), Some(write)))
+            .unwrap_or_default();
         let (tx, rx) = mpsc::sync_channel::<Command>(128);
         let state = Arc::new(Mutex::new(State::default()));
         let stop = Arc::new(AtomicBool::new(false));
@@ -564,11 +581,13 @@ impl Worker {
                 let mut active = Instant::now();
                 let mut typed = Instant::now() - Duration::from_secs(1);
                 while !halt.load(Ordering::Relaxed) {
+                    let mut delivered = false;
                     for _ in 0..16 {
                         let Some(cmd) = early.pop_front().or_else(|| rx.try_recv().ok()) else {
                             break;
                         };
                         let size = cmd.bytes();
+                        delivered = true;
                         if matches!(&cmd, Command::Rpc(method, _) if method == "client.input") {
                             typed = Instant::now();
                         }
@@ -775,6 +794,9 @@ impl Worker {
                             Err(e) => s.error = Some(format!("Input/command delivery failed: {e}")),
                         };
                     }
+                    if delivered {
+                        notify_view(&wake_writer);
+                    }
                     let mut frame = rpc.call(
                         "client.render",
                         revision.map(|r| json!({"revision":r})).unwrap_or(json!({})),
@@ -811,6 +833,8 @@ impl Worker {
                                 s.coalesced += 1;
                             }
                             s.frame = Some(frame);
+                            drop(s);
+                            notify_view(&wake_writer);
                         }
                     }
                     // Tabs out of view poll slowly; a quiet screen polls at 10 Hz.
@@ -845,6 +869,7 @@ impl Worker {
                 }
             }
             halt.store(true, Ordering::Relaxed);
+            notify_view(&wake_writer);
         });
         Self {
             tx,
@@ -852,7 +877,11 @@ impl Worker {
             stop,
             bytes,
             visible,
+            wake_reader,
         }
+    }
+    pub fn take_wake_reader(&mut self) -> Option<UnixStream> {
+        self.wake_reader.take()
     }
     /// Whether the view is on screen (polls fast) or hidden (polls slowly).
     pub fn set_visible(&self, visible: bool) {

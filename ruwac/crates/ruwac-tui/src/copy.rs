@@ -329,6 +329,24 @@ impl Copy {
         let bottom = (top + height - 1).min(self.lines.len().saturating_sub(1));
         self.cursor.row = self.cursor.row.clamp(top, bottom.max(top));
     }
+    /// A held mouse drag at a copy-view edge moves only this immutable view.
+    pub fn drag_scroll(&mut self, row: usize, col: usize, height: usize) -> bool {
+        let height = height.max(1);
+        let delta = if row == 0 {
+            -2
+        } else if row >= height - 1 {
+            2
+        } else {
+            return false;
+        };
+        let previous = self.top;
+        self.scroll(delta, height);
+        if self.top == previous {
+            return false;
+        }
+        self.point(row.min(height - 1), col);
+        true
+    }
     /// True when the newest line is visible.
     pub fn at_bottom(&self, height: usize) -> bool {
         self.top + height.max(1) >= self.lines.len()
@@ -570,6 +588,7 @@ impl Copy {
         }
         let mut out =
             String::from("\x1b[?25l\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[0m\x1b[H");
+        let mut style = String::new();
         for row in self.top..(self.top + height).min(self.lines.len()) {
             out.push_str(&format!("\x1b[{};1H", row - self.top + 1));
             let mut col = 0;
@@ -579,9 +598,18 @@ impl Copy {
                     .bounds(row)
                     .is_some_and(|(a, b)| col <= b && col + w > a);
                 if col >= self.left && col + w <= self.left + columns {
-                    out.push_str(&self.style(row, col, selected));
+                    let next = self.style(row, col, selected);
+                    if next != style {
+                        out.push_str(&next);
+                        style = next;
+                    }
                     out.push_str(&clip(g, w));
                 } else if col < self.left && col + w > self.left {
+                    let next = self.style(row, col, selected);
+                    if next != style {
+                        out.push_str(&next);
+                        style = next;
+                    }
                     out.push(' ');
                 }
                 col += w;
@@ -593,7 +621,11 @@ impl Copy {
                 let selected = self
                     .bounds(row)
                     .is_some_and(|(a, b)| blank >= a && blank <= b);
-                out.push_str(&self.style(row, blank, selected));
+                let next = self.style(row, blank, selected);
+                if next != style {
+                    out.push_str(&next);
+                    style = next;
+                }
                 out.push(' ');
             }
         }
@@ -635,6 +667,57 @@ impl Copy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn held_edge_drag_scrolls_history_without_moving_the_anchor() {
+        let mut c = Copy::new(
+            (0..100)
+                .map(|n| Line {
+                    text: format!("line {n:03}"),
+                    wrapped: false,
+                })
+                .collect(),
+            20,
+            Position { row: 99, col: 0 },
+            0,
+            "pane".into(),
+        );
+        c.align_bottom(10);
+        c.point(5, 3);
+        c.mark();
+        let anchor = c.anchor;
+        assert!(c.drag_scroll(0, 2, 10));
+        assert_eq!(c.top, 88);
+        assert_eq!(c.anchor, anchor);
+        assert!(!c.drag_scroll(4, 2, 10));
+        while c.drag_scroll(0, 2, 10) {}
+        assert_eq!(c.top, 0);
+        assert_eq!(c.anchor, anchor);
+        assert!(!c.drag_scroll(0, 2, 10));
+        assert!(c.selected(10000).unwrap().lines().count() > 10);
+    }
+    #[test]
+    fn uniform_copy_frame_has_bounded_transport_overhead() {
+        let mut c = Copy::new(
+            (0..64)
+                .map(|_| Line {
+                    text: "a".repeat(200),
+                    wrapped: false,
+                })
+                .collect(),
+            200,
+            Position { row: 63, col: 0 },
+            0,
+            "pane".into(),
+        );
+        c.align_bottom(60);
+        let frame = c.render(60, 200);
+        assert!(
+            frame.len() < 16000,
+            "Uniform12000cell frame expanded to{}bytes",
+            frame.len()
+        );
+        assert!(!frame.contains("\x1b[2J"));
+    }
     #[test]
     fn mouse_selection_keeps_live_colours_and_never_erases_the_screen() {
         use serde_json::json;

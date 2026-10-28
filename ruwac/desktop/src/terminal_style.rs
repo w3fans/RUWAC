@@ -1,6 +1,74 @@
 //! Optional canonical attributes after the six legacy render-cell fields.
 use gtk::cairo;
+use gtk::prelude::*;
 use serde_json::Value;
+use std::collections::{HashMap, VecDeque};
+
+/// Shape each distinct terminal glyph once, rather than once per cell/frame.
+/// Colours and decorations remain Cairo operations outside the cached layout.
+#[derive(Default)]
+pub struct GlyphCache {
+    typography: Option<(String, u8, u32, i32)>,
+    entries: [HashMap<String, (gtk::pango::Layout, i32)>; 4],
+    order: VecDeque<(usize, String)>,
+}
+impl GlyphCache {
+    pub fn prepare(&mut self, area: &gtk::DrawingArea, font: &str, size: u8) {
+        let typography = (
+            font.to_owned(),
+            size,
+            area.pango_context().serial(),
+            area.scale_factor(),
+        );
+        if self.typography.as_ref() != Some(&typography) {
+            for entries in &mut self.entries {
+                entries.clear();
+            }
+            self.order.clear();
+            self.typography = Some(typography);
+        }
+    }
+    pub fn get(
+        &mut self,
+        area: &gtk::DrawingArea,
+        bold: bool,
+        italic: bool,
+        glyph: &str,
+    ) -> (gtk::pango::Layout, i32) {
+        let slot = usize::from(bold) + 2 * usize::from(italic);
+        if let Some(shaped) = self.entries[slot].get(glyph) {
+            return shaped.clone();
+        }
+        let (font, size, _, _) = self.typography.as_ref().expect("prepared glyph cache");
+        let layout = area.create_pango_layout(None);
+        let style = match (bold, italic) {
+            (true, true) => " Bold Italic",
+            (true, false) => " Bold",
+            (false, true) => " Italic",
+            _ => "",
+        };
+        layout.set_font_description(Some(&gtk::pango::FontDescription::from_string(&format!(
+            "{font}{style} {size}"
+        ))));
+        let attributes = gtk::pango::AttrList::new();
+        attributes.insert(gtk::pango::AttrFontFeatures::new("liga=0, calt=0"));
+        layout.set_attributes(Some(&attributes));
+        layout.set_text(glyph);
+        let shaped = (layout.clone(), layout.pixel_size().1);
+        // Bound both native layout count and retained input bytes. Unusually
+        // long combining sequences still render, but are never kept in cache.
+        if glyph.len() <= 256 {
+            if self.order.len() == 512 {
+                if let Some((slot, old)) = self.order.pop_front() {
+                    self.entries[slot].remove(&old);
+                }
+            }
+            self.order.push_back((slot, glyph.to_owned()));
+            self.entries[slot].insert(glyph.to_owned(), shaped.clone());
+        }
+        shaped
+    }
+}
 
 /// Solid cell tiles must share hard edges, including fractional font metrics.
 /// Antialiased neighbouring fills otherwise expose the canvas between cells.

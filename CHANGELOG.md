@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## v0.4.50 — 2026-10-28 — Stable source release
+
+- Extend terminal mouse selection through history with edge dragging and wheel
+  scrolling while retaining its anchor. The attached CLI's copy view supports
+  held-edge dragging too; its own history opens with Ctrl+A then [.
+- Keep a selection's starting-screen colours while output changes, and cancel
+  pending selection snapshots when typing or changing panes.
+- Reduce ordinary attached-client redraw traffic by repainting changed rows;
+  retain complete repainting after geometry and copy-mode changes. Coalesce
+  copy-view colour sequences, reuse bounded GUI glyph layouts, avoid cloning
+  screen grids for input mode checks, and wake the GUI when worker output arrives.
+- Show a verified Codex process behind generic Node launchers in window labels;
+  suppress runtime-version labels when no application can be verified. Limit
+  optional process probes to one per refresh and cache them by process identity
+  so background agent windows do not add a request burst to the input loop.
+
 ## v0.4.49 — 2026-10-28 — Stable source release
 
 - Put Copy machine at the top of machine properties and offer existing categories alongside an editable category path. Up/Down changes the focused connection dropdown; Tab moves between fields.

@@ -67,7 +67,12 @@ try:
  w=rpc('window.create',{'session':s['session'],'name':'Real fzf','argv':[sys.executable,str(chooser),str(root),fzf]});owned.append(w['pid']);eventually(lambda:'RUWAC FZF REAL'in rpc('pane.capture',{'pane':w['pane']})['text'],20)
  assert frame(s['session'])['alternate_screen'];assert 'PARENT-BEFORE-FZF'in rpc('pane.capture',{'pane':w['pane'],'buffer':'primary'})['text'];child=int((root/'fzf-pid').read_text());assert Path(f'/proc/{child}/comm').read_text().strip()=='fzf'
  if a.gui:
-  command('switch',view=0,pane=w['pane'],text='Živjo')
+  # Select the window through the real navigation path. Merely assigning a
+  # target pane in the fixture leaves the GUI client's selected window behind;
+  # an asynchronous render can then correctly restore the previous target.
+  command('command',text='select 1')
+  eventually(lambda:command('inspect').get('target')==w['pane'],15)
+  command('switch',view=0,text='Živjo')
   eventually(lambda:'1/3'in rpc('pane.capture',{'pane':w['pane']})['text'],15)
   command('key',key='j',mods=8);command('key',key='k',mods=8);command('key',key='Return')
  else:

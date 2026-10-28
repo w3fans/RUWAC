@@ -55,11 +55,42 @@ fn selection_changed(old: &Value, new: &Value, a: (usize, usize), z: (usize, usi
         || old["alternate_screen"] != new["alternate_screen"]
         || selection_text(old, a, z) != selection_text(new, a, z)
 }
+fn pinned_selection_changed(
+    old: &Value,
+    new: &Value,
+    a: (usize, usize),
+    z: (usize, usize),
+    dragging: bool,
+    offset: usize,
+) -> bool {
+    old["rows"] != new["rows"]
+        || old["cols"] != new["cols"]
+        || old["alternate_screen"] != new["alternate_screen"]
+        // A completed live-screen selection follows the existing replacement
+        // rule. Only an active drag or a deliberately scrolled history view
+        // retains its frozen snapshot while the application changes beneath it.
+        || (!dragging && offset == 0 && selection_changed(old, new, a, z))
+}
 #[cfg(test)]
 mod selection_tests {
     use super::*;
     fn grid(lines: &[&str], wrapped: &[bool]) -> Value {
         json!({"cells":lines.iter().map(|s|s.chars().map(|c|json!([c.to_string(),false])).collect::<Vec<_>>()).collect::<Vec<_>>(),"wrapped":wrapped})
+    }
+    #[test]
+    fn pinned_drag_and_history_survive_output_but_completed_live_selection_expires() {
+        let mut old = grid(&["selected", "tail"], &[false, false]);
+        old["rows"] = json!(2);
+        old["cols"] = json!(8);
+        let mut newer = old.clone();
+        newer["cells"][0][0][0] = json!("X");
+        let a = (0, 0);
+        let z = (0, 7);
+        assert!(!pinned_selection_changed(&old, &newer, a, z, true, 0));
+        assert!(!pinned_selection_changed(&old, &newer, a, z, false, 10));
+        assert!(pinned_selection_changed(&old, &newer, a, z, false, 0));
+        newer["cols"] = json!(9);
+        assert!(pinned_selection_changed(&old, &newer, a, z, true, 10));
     }
     #[test]
     fn inline_history_preserves_live_geometry_and_unicode_without_mutating_daemon_grid() {
@@ -171,6 +202,8 @@ pub struct View {
     pub frame: RefCell<Option<Value>>,
     pub target: RefCell<String>,
     pub drawn: Cell<u64>,
+    glyphs: RefCell<crate::terminal_style::GlyphCache>,
+    wake_task: RefCell<Option<glib::JoinHandle<()>>>,
     pub prefix: Cell<bool>,
     pub detached: Cell<bool>,
     pub finished: Cell<bool>,
@@ -183,6 +216,10 @@ pub struct View {
     window_index: Cell<Option<usize>>,
     pub warning: RefCell<Option<String>>,
     selection: RefCell<Option<((usize, usize), (usize, usize))>>,
+    history_selection: RefCell<Option<((usize, usize), (usize, usize))>>,
+    selection_dragging: Cell<bool>,
+    selection_seed: RefCell<Option<Value>>,
+    selection_scroll_at: Cell<std::time::Instant>,
     primary_provider: RefCell<Option<gdk::ContentProvider>>,
     link_click: Cell<bool>,
     /// Last handled OSC 52 PRIMARY (offer, request) serials of the target pane.
@@ -314,6 +351,8 @@ impl View {
         root.append(&overlay);
         let worker = RefCell::new(Worker::start(socket.clone(), session.clone()));
         let v = Rc::new(Self {
+            glyphs: RefCell::new(crate::terminal_style::GlyphCache::default()),
+            wake_task: RefCell::new(None),
             desktop_shortcuts: Cell::new(true),
             copy_on_select: Cell::new(false),
             history_pending: Cell::new(false),
@@ -352,6 +391,10 @@ impl View {
             window_index: Cell::new(None),
             warning: RefCell::new(None),
             selection: RefCell::new(None),
+            history_selection: RefCell::new(None),
+            selection_dragging: Cell::new(false),
+            selection_seed: RefCell::new(None),
+            selection_scroll_at: Cell::new(std::time::Instant::now()),
             primary_provider: RefCell::new(None),
             link_click: Cell::new(false),
             selection_serials: Cell::new((0, 0)),
@@ -393,7 +436,7 @@ impl View {
                 .is_some_and(|ours| clipboard.content().as_ref() != Some(ours));
             if lost {
                 v.primary_provider.borrow_mut().take();
-                v.selection.borrow_mut().take();
+                v.clear_selection();
                 let buffer = v.copy.buffer();
                 buffer.place_cursor(&buffer.end_iter());
                 v.area.queue_draw();
@@ -526,7 +569,23 @@ impl View {
                 }
                 v.focus_at(x, y);
                 if let Some((_, r, c)) = v.point(x, y) {
+                    v.clear_selection();
                     *v.selection.borrow_mut() = Some(((r, c), (r, c)));
+                    v.selection_dragging.set(true);
+                    v.mouse_position.set((x, y));
+                    if let Some(grid) = v.grid() {
+                        if v.history_lines.borrow().is_empty() {
+                            *v.selection_seed.borrow_mut() = Some(grid);
+                            v.history_inline.set(true);
+                            v.request_history(false);
+                        } else {
+                            let height = grid["rows"].as_u64().unwrap_or(24) as usize;
+                            let mut history = v.history_lines.borrow_mut();
+                            history.pin();
+                            let a = history.point(height, v.history_offset.get(), r, c);
+                            *v.history_selection.borrow_mut() = Some((a, a));
+                        }
+                    }
                     v.area.queue_draw();
                 }
             }
@@ -535,10 +594,12 @@ impl View {
         drag.connect_drag_update(move |g, dx, dy| {
             if let Some(v) = w.upgrade() {
                 let (x, y) = v.drag_start.get();
+                v.mouse_position.set((x + dx, y + dy));
                 if v.divider.borrow().is_some() {
                     return;
                 }
-                if v.mouse_enabled()
+                if !v.selection_dragging.get()
+                    && v.mouse_enabled()
                     && !g
                         .current_event_state()
                         .contains(gdk::ModifierType::SHIFT_MASK)
@@ -546,14 +607,7 @@ impl View {
                     // Motion reports are emitted once by the motion controller.
                     return;
                 }
-                if let Some((pane, r, c)) = v.point(x + dx, y + dy) {
-                    if pane == *v.target.borrow() {
-                        if let Some(selection) = v.selection.borrow_mut().as_mut() {
-                            selection.1 = (r, c);
-                        }
-                        v.area.queue_draw();
-                    }
-                }
+                v.extend_selection();
             }
         });
         let w = Rc::downgrade(&v);
@@ -571,7 +625,9 @@ impl View {
                     }
                     return;
                 }
-                if !v.mouse_enabled()
+                let local_drag = v.selection_dragging.replace(false);
+                if local_drag
+                    || !v.mouse_enabled()
                     || g.current_event_state()
                         .contains(gdk::ModifierType::SHIFT_MASK)
                 {
@@ -579,6 +635,12 @@ impl View {
                     if v.copy_on_select.get() {
                         v.copy_clipboard(false);
                     }
+                }
+                if v.selection_seed.borrow_mut().take().is_some() {
+                    v.history_request
+                        .set(v.history_request.get().saturating_add(1));
+                    v.history_pending.set(false);
+                    v.history_inline.set(false);
                 }
             }
         });
@@ -595,7 +657,7 @@ impl View {
             if let Some(v) = w.upgrade() {
                 v.mouse_position.set((x, y));
                 let mods = g.current_event_state();
-                if mods.contains(gdk::ModifierType::SHIFT_MASK) {
+                if mods.contains(gdk::ModifierType::SHIFT_MASK) || v.selection_dragging.get() {
                     return;
                 }
                 if let Some(grid) = v.grid() {
@@ -613,6 +675,7 @@ impl View {
         focus.connect_leave(move |_| {
             if let Some(v) = w.upgrade() {
                 v.cancel_image_paste();
+                v.selection_dragging.set(false);
                 v.release_mouse();
                 if v.prefix.replace(false) {
                     v.input(&v.literal_prefix());
@@ -624,7 +687,8 @@ impl View {
         let w = Rc::downgrade(&v);
         wheel.connect_scroll(move |g, dx, dy| {
             if let Some(v) = w.upgrade() {
-                if v.mouse_enabled()
+                if !v.selection_dragging.get()
+                    && v.mouse_enabled()
                     && !g
                         .current_event_state()
                         .contains(gdk::ModifierType::SHIFT_MASK)
@@ -658,7 +722,8 @@ impl View {
                         }
                         v.wheel_delta.set((ax, ay));
                     }
-                } else if v.grid().is_some_and(|g| g["alternate_screen"] == true)
+                } else if !v.selection_dragging.get()
+                    && v.grid().is_some_and(|g| g["alternate_screen"] == true)
                     && !g
                         .current_event_state()
                         .contains(gdk::ModifierType::SHIFT_MASK)
@@ -679,7 +744,133 @@ impl View {
         v.area.add_controller(wheel);
         let w = Rc::downgrade(&v);
         v.area.connect_resize(move|_,width,height|if let Some(v)=w.upgrade(){if width>0&&height>0{v.command("client.resize",json!({"rows":((height as f64/v.cell_height.get())as i32).clamp(4,u16::MAX as i32),"cols":((width as f64/v.cell_width.get())as i32).clamp(10,u16::MAX as i32)}));}});
+        v.bind_worker_wake();
         v
+    }
+    fn bind_worker_wake(self: &Rc<Self>) {
+        if let Some(task) = self.wake_task.borrow_mut().take() {
+            task.abort();
+        }
+        let Some(reader) = self.worker.borrow_mut().take_wake_reader() else {
+            return;
+        };
+        let Ok(socket) = gtk::gio::Socket::from_fd(reader.into()) else {
+            return; // Existing periodic update remains a fallback.
+        };
+        socket.set_blocking(false);
+        let weak = Rc::downgrade(self);
+        let task = glib::MainContext::default().spawn_local(async move {
+            loop {
+                let condition = gtk::gio::prelude::SocketExtManual::create_source_future(
+                    &socket,
+                    glib::IOCondition::IN | glib::IOCondition::HUP | glib::IOCondition::ERR,
+                    None::<&gtk::gio::Cancellable>,
+                    glib::Priority::DEFAULT,
+                )
+                .await;
+                let mut ended =
+                    condition.intersects(glib::IOCondition::HUP | glib::IOCondition::ERR);
+                for _ in 0..16 {
+                    let mut bytes = [0u8; 256];
+                    match socket.receive(&mut bytes, None::<&gtk::gio::Cancellable>) {
+                        Ok(0) => {
+                            ended = true;
+                            break;
+                        }
+                        Ok(_) => (),
+                        Err(error) if error.matches(gtk::gio::IOErrorEnum::WouldBlock) => break,
+                        Err(_) => {
+                            ended = true;
+                            break;
+                        }
+                    }
+                }
+                let Some(view) = weak.upgrade() else {
+                    break;
+                };
+                view.update();
+                if ended {
+                    view.wake_task.borrow_mut().take();
+                    break;
+                }
+            }
+        });
+        *self.wake_task.borrow_mut() = Some(task);
+    }
+    fn clear_selection(&self) {
+        self.selection.borrow_mut().take();
+        self.history_selection.borrow_mut().take();
+        self.selection_seed.borrow_mut().take();
+        self.selection_dragging.set(false);
+        let mut history = self.history_lines.borrow_mut();
+        if history.is_frozen() && self.history_offset.get() == 0 {
+            history.clear();
+        } else {
+            history.unfreeze();
+        }
+    }
+    fn selection_geometry(&self) -> Option<(f64, f64, usize, usize)> {
+        let frame = self.frame.borrow();
+        let pane = frame.as_ref()?["panes"]
+            .as_array()?
+            .iter()
+            .find(|p| p["id"].as_str() == Some(self.target.borrow().as_str()))?;
+        Some((
+            pane["rect"]["x"].as_f64()? * self.cell_width.get(),
+            pane["rect"]["y"].as_f64()? * self.cell_height.get(),
+            pane["grid"]["rows"].as_u64()? as usize,
+            pane["grid"]["cols"].as_u64()? as usize,
+        ))
+    }
+    fn extend_selection(&self) {
+        if !self.selection_dragging.get() {
+            return;
+        }
+        let Some((x, y, rows, cols)) = self.selection_geometry() else {
+            return;
+        };
+        let (px, py) = self.mouse_position.get();
+        let row = ((py - y) / self.cell_height.get()).floor().max(0.0) as usize;
+        let col = ((px - x) / self.cell_width.get()).floor().max(0.0) as usize;
+        let (row, col) = (
+            row.min(rows.saturating_sub(1)),
+            col.min(cols.saturating_sub(1)),
+        );
+        if let Some(selection) = self.history_selection.borrow_mut().as_mut() {
+            selection.1 =
+                self.history_lines
+                    .borrow()
+                    .point(rows, self.history_offset.get(), row, col);
+        }
+        if let Some(selection) = self.selection.borrow_mut().as_mut() {
+            selection.1 = (row, col);
+        }
+        self.area.queue_draw();
+    }
+    fn selection_autoscroll(&self) {
+        if !self.selection_dragging.get()
+            || self.history_selection.borrow().is_none()
+            || self.selection_scroll_at.get().elapsed() < std::time::Duration::from_millis(35)
+        {
+            return;
+        }
+        let Some((_, y, rows, _)) = self.selection_geometry() else {
+            return;
+        };
+        let (_, py) = self.mouse_position.get();
+        let bottom = y + rows as f64 * self.cell_height.get();
+        let delta = if py < y {
+            ((y - py) / self.cell_height.get()).ceil().clamp(1.0, 8.0) as isize
+        } else if py >= bottom {
+            -((py - bottom) / self.cell_height.get())
+                .ceil()
+                .clamp(1.0, 8.0) as isize
+        } else {
+            return;
+        };
+        self.selection_scroll_at.set(std::time::Instant::now());
+        self.shift_history(delta);
+        self.extend_selection();
     }
     fn scroll_history(&self, dy: f64) {
         let (_, previous) = self.wheel_delta.get();
@@ -689,17 +880,32 @@ impl View {
         if lines == 0 {
             return;
         }
-        let offset = self.history_offset.get().saturating_add_signed(-lines);
+        self.shift_history(-lines);
+        self.extend_selection();
+    }
+    fn shift_history(&self, lines: isize) {
+        let mut offset = self.history_offset.get().saturating_add_signed(lines);
+        if let Some((_, _, height, _)) = self.selection_geometry() {
+            let history = self.history_lines.borrow();
+            if history.len() > 0 {
+                offset = offset.min(history.len().saturating_sub(height));
+            }
+        }
         if offset == self.history_offset.get() {
             return;
         }
         self.history_offset.set(offset);
-        *self.selection.borrow_mut() = None;
+        if !self.selection_dragging.get() && self.history_selection.borrow().is_none() {
+            self.clear_selection();
+        }
         if offset > 0 && self.history_lines.borrow().is_empty() && !self.history_pending.get() {
             self.history_inline.set(true);
             self.request_history(false);
         }
-        if offset == 0 {
+        if offset == 0
+            && !self.selection_dragging.get()
+            && self.history_selection.borrow().is_none()
+        {
             self.cancel_inline_history();
         }
         let _ = self.grid();
@@ -725,7 +931,9 @@ impl View {
         }
     }
     fn cancel_inline_history(&self) {
-        if self.history_inline.replace(false) {
+        let inline = self.history_inline.replace(false);
+        let pending = self.history_pending.replace(false);
+        if inline || pending {
             self.history_request
                 .set(self.history_request.get().saturating_add(1));
             self.history_pending.set(false);
@@ -791,7 +999,7 @@ impl View {
         }
         self.release_mouse();
         self.navigation.set(true);
-        *self.selection.borrow_mut() = None;
+        self.clear_selection();
         self.command(method, params);
     }
     fn split(&self, vertical: bool) {
@@ -1223,6 +1431,7 @@ impl View {
     }
     fn set_target(&self, target: String) {
         if *self.target.borrow() != target {
+            self.clear_selection();
             self.history_request
                 .set(self.history_request.get().saturating_add(1));
             self.history_pending.set(false);
@@ -1334,8 +1543,9 @@ impl View {
         }
     }
     pub fn input(&self, text: &str) {
+        self.clear_selection();
+        self.cancel_inline_history();
         if self.history_offset.replace(0) > 0 {
-            self.cancel_inline_history();
             self.area.queue_draw();
         }
         self.typed.set(true);
@@ -1354,6 +1564,7 @@ impl View {
         );
     }
     pub fn paste(&self, text: String) {
+        self.clear_selection();
         self.history_offset.set(0);
         self.cancel_inline_history();
         self.area.queue_draw();
@@ -1376,7 +1587,7 @@ impl View {
         }
     }
     /// Replace a disconnected worker, starting the daemon when it is absent.
-    pub fn reconnect(&self) {
+    pub fn reconnect(self: &Rc<Self>) {
         self.cancel_image_paste();
         if self.detached.get() || self.finished.get() {
             return;
@@ -1393,6 +1604,7 @@ impl View {
             .worker
             .replace(Worker::restart(self.socket.clone(), self.session.clone()));
         old.close();
+        self.bind_worker_wake();
         if self.area.width() > 0 && self.area.height() > 0 {
             self.command("client.resize",json!({"rows":((self.area.height()as f64/self.cell_height.get())as i32).clamp(4,u16::MAX as i32),"cols":((self.area.width()as f64/self.cell_width.get())as i32).clamp(10,u16::MAX as i32)}));
         }
@@ -1411,6 +1623,7 @@ impl View {
         }
     }
     pub fn update(self: &Rc<Self>) {
+        self.selection_autoscroll();
         let worker = self.worker.borrow();
         worker.set_visible(self.area.is_mapped());
         let mut s = worker.state.lock().unwrap();
@@ -1545,11 +1758,23 @@ impl View {
                 let incoming = panes
                     .iter()
                     .find(|p| p["id"].as_str() == Some(target.as_str()));
+                let pinned = self.history_selection.borrow().is_some();
                 let stale = self.grid().zip(incoming).is_none_or(|(old, new)| {
-                    selection_changed(&old, &self.viewport_grid(&new["grid"]), a, z)
+                    if pinned {
+                        pinned_selection_changed(
+                            &old,
+                            &new["grid"],
+                            a,
+                            z,
+                            self.selection_dragging.get(),
+                            self.history_offset.get(),
+                        )
+                    } else {
+                        selection_changed(&old, &self.viewport_grid(&new["grid"]), a, z)
+                    }
                 });
                 if stale {
-                    self.selection.borrow_mut().take();
+                    self.clear_selection();
                 }
             }
             let serials = {
@@ -1646,9 +1871,32 @@ impl View {
                     return;
                 }
                 if self.history_inline.replace(false) {
-                    self.history_lines
-                        .borrow_mut()
-                        .set(v["text"].as_str().unwrap_or(""));
+                    let seed = self.selection_seed.borrow_mut().take();
+                    let selection = *self.selection.borrow();
+                    if let (true, Some(seed), Some((a, _))) =
+                        (self.selection_dragging.get(), seed, selection)
+                    {
+                        let text = v["text"].as_str().unwrap_or("");
+                        let height = seed["rows"].as_u64().unwrap_or(24) as usize;
+                        self.history_lines.borrow_mut().freeze(text, &seed);
+                        let frozen = self.history_lines.borrow_mut().grid(&seed, 0).0;
+                        if selection_changed(&seed, &frozen, a, a) {
+                            self.clear_selection();
+                            self.history_lines.borrow_mut().clear();
+                            self.history_offset.set(0);
+                            self.warn(
+                                "Output changed before selection loaded; try selecting again",
+                            );
+                            return;
+                        }
+                        let anchor = self.history_lines.borrow().point(height, 0, a.0, a.1);
+                        *self.history_selection.borrow_mut() = Some((anchor, anchor));
+                        self.extend_selection();
+                    } else {
+                        self.history_lines
+                            .borrow_mut()
+                            .set(v["text"].as_str().unwrap_or(""));
+                    }
                     let _ = self.grid();
                     self.area.queue_draw();
                     return;
@@ -1736,7 +1984,7 @@ impl View {
 
             if p != *self.target.borrow() {
                 self.release_mouse();
-                *self.selection.borrow_mut() = None;
+                self.clear_selection();
             }
             self.set_target(p.clone());
             self.command("pane.select", json!({"pane":p}));
@@ -1786,8 +2034,20 @@ impl View {
         self.history_offset.set(offset);
         grid
     }
+    fn grid_flag(&self, name: &str) -> bool {
+        self.frame
+            .borrow()
+            .as_ref()
+            .and_then(|frame| frame["panes"].as_array())
+            .and_then(|panes| {
+                panes
+                    .iter()
+                    .find(|pane| pane["id"].as_str() == Some(self.target.borrow().as_str()))
+            })
+            .is_some_and(|pane| pane["grid"][name] == true)
+    }
     fn mouse_enabled(&self) -> bool {
-        self.grid().is_some_and(|g| g["mouse"] == true)
+        self.grid_flag("mouse")
     }
     pub fn mouse(&self, button: u32, x: f64, y: f64, release: bool) {
         self.mouse_with_mods(button, x, y, release, gdk::ModifierType::empty());
@@ -1887,7 +2147,13 @@ impl View {
                 }
             }
         }
-        if self.mouse_enabled() && !mods.contains(gdk::ModifierType::SHIFT_MASK) {
+        if self.mouse_enabled()
+            && !self.selection_dragging.get()
+            && !mods.contains(gdk::ModifierType::SHIFT_MASK)
+        {
+            if release && self.pressed.get() != Some(button.saturating_sub(1)) {
+                return; // A canceled local selection never pressed the app button.
+            }
             self.pressed.set(if release {
                 None
             } else {
@@ -2084,6 +2350,9 @@ impl View {
         body
     }
     pub fn selected(&self) -> String {
+        if let Some((a, z)) = *self.history_selection.borrow() {
+            return self.history_lines.borrow().selected(a, z);
+        }
         if self.stack.visible_child_name().as_deref() == Some("copy") {
             let b = self.copy.buffer();
             return b
@@ -2400,11 +2669,7 @@ impl View {
             }
             return;
         }
-        let navigation = navigation_key(
-            key,
-            mods,
-            self.grid().is_some_and(|g| g["application_cursor"] == true),
-        );
+        let navigation = navigation_key(key, mods, self.grid_flag("application_cursor"));
         let is_navigation = navigation.is_some();
         let mut text = navigation.unwrap_or_else(|| match key {
             gdk::Key::Return | gdk::Key::KP_Enter => "\r".into(),
@@ -2446,7 +2711,7 @@ impl View {
         if self.prefix.replace(false) {
             self.input(&self.literal_prefix());
         }
-        *self.selection.borrow_mut() = None;
+        self.clear_selection();
         self.detached.set(true);
         self.worker.borrow().close();
         self.broker.borrow_mut().disconnect(&self.session);
@@ -2566,32 +2831,9 @@ impl View {
         let Some(panes) = frame["panes"].as_array() else {
             return;
         };
-        let layout = area.create_pango_layout(None);
-        let normal = gtk::pango::FontDescription::from_string(&format!(
-            "{} {}",
-            self.font.borrow(),
-            self.font_size.get()
-        ));
-        let bold = gtk::pango::FontDescription::from_string(&format!(
-            "{} Bold {}",
-            self.font.borrow(),
-            self.font_size.get()
-        ));
-        let italic = gtk::pango::FontDescription::from_string(&format!(
-            "{} Italic {}",
-            self.font.borrow(),
-            self.font_size.get()
-        ));
-        let bold_italic = gtk::pango::FontDescription::from_string(&format!(
-            "{} Bold Italic {}",
-            self.font.borrow(),
-            self.font_size.get()
-        ));
-        let attributes = gtk::pango::AttrList::new();
-        attributes.insert(gtk::pango::AttrFontFeatures::new("liga=0, calt=0"));
-        layout.set_attributes(Some(&attributes));
-        let mut last_glyph = String::new();
-        let mut last_font = None;
+        let font = self.font.borrow();
+        let mut glyphs = self.glyphs.borrow_mut();
+        glyphs.prepare(area, &font, self.font_size.get());
         for p in panes {
             let _ = cr.save();
             cr.translate(
@@ -2599,10 +2841,25 @@ impl View {
                 p["rect"]["y"].as_f64().unwrap_or(0.0) * self.cell_height.get(),
             );
             let y = 0.0;
-            let viewport = (self.history_offset.get() > 0
+            let viewport = ((self.history_offset.get() > 0
+                || self.history_lines.borrow().is_frozen())
                 && p["id"].as_str() == Some(self.target.borrow().as_str()))
             .then(|| self.viewport_grid(&p["grid"]));
             let g = viewport.as_ref().unwrap_or(&p["grid"]);
+            let selected = if p["id"].as_str() == Some(self.target.borrow().as_str()) {
+                if let Some((a, z)) = *self.history_selection.borrow() {
+                    self.history_lines.borrow().visible_selection(
+                        a,
+                        z,
+                        g["rows"].as_u64().unwrap_or(24) as usize,
+                        self.history_offset.get(),
+                    )
+                } else {
+                    *self.selection.borrow()
+                }
+            } else {
+                None
+            };
             if panes.len() > 1 {
                 cr.set_source_rgb(0.30, 0.38, 0.48);
                 cr.rectangle(
@@ -2621,12 +2878,10 @@ impl View {
                             if cell[5] == true {
                                 bg = color(&cell[2], true);
                             }
-                            if p["id"].as_str() == Some(self.target.borrow().as_str())
-                                && self.selection.borrow().is_some_and(|(a, z)| {
-                                    let (lo, hi) = if a <= z { (a, z) } else { (z, a) };
-                                    lo <= (r, c) && (r, c) <= hi
-                                })
-                            {
+                            if selected.is_some_and(|(a, z)| {
+                                let (lo, hi) = if a <= z { (a, z) } else { (z, a) };
+                                lo <= (r, c) && (r, c) <= hi
+                            }) {
                                 bg = (0.18, 0.28, 0.48);
                             }
                             if bg != canvas_bg {
@@ -2652,28 +2907,17 @@ impl View {
                                 }
                                 let glyph = cell[0].as_str().unwrap_or("");
                                 if !matches!(glyph, "" | " ") {
-                                    let font_key = (cell[4] == true, cell[6]["italic"] == true);
-                                    if last_font != Some(font_key) {
-                                        layout.set_font_description(Some(match font_key {
-                                            (true, true) => &bold_italic,
-                                            (true, false) => &bold,
-                                            (false, true) => &italic,
-                                            _ => &normal,
-                                        }));
-                                        last_font = Some(font_key);
-                                    }
-                                    if glyph != last_glyph {
-                                        layout.set_text(glyph);
-                                        last_glyph.clear();
-                                        last_glyph.push_str(glyph);
-                                    }
+                                    let (layout, glyph_height) = glyphs.get(
+                                        area,
+                                        cell[4] == true,
+                                        cell[6]["italic"] == true,
+                                        glyph,
+                                    );
                                     cr.set_source_rgb(fg.0, fg.1, fg.2);
                                     cr.move_to(
                                         c as f64 * self.cell_width.get(),
                                         y + r as f64 * self.cell_height.get()
-                                            + (self.cell_height.get()
-                                                - layout.pixel_size().1 as f64)
-                                                / 2.,
+                                            + (self.cell_height.get() - glyph_height as f64) / 2.,
                                     );
                                     pangocairo::functions::show_layout(cr, &layout);
                                 }
@@ -2816,6 +3060,9 @@ mod palette_tests {
 
 impl Drop for View {
     fn drop(&mut self) {
+        if let Some(task) = self.wake_task.borrow_mut().take() {
+            task.abort();
+        }
         if let Some(handler) = self.primary_handler.borrow_mut().take() {
             self.area.display().primary_clipboard().disconnect(handler);
         }
