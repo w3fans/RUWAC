@@ -68,6 +68,9 @@ impl Session {
     }
 }
 struct Client {
+    // Last full projection, excluding the daemon-wide output revision. Other
+    // sessions can advance that revision without changing this client's view.
+    render_stamp: Option<(u64, Value)>,
     paste: Option<paste::Upload>,
     scope: String,
     session: String,
@@ -721,6 +724,7 @@ impl State {
                 self.clients.insert(
                     client.into(),
                     Client {
+                        render_stamp: None,
                         paste: None,
                         scope: id("display"),
                         session: s.clone(),
@@ -1268,10 +1272,36 @@ impl State {
                         &mut rects,
                     );
                 }
+                // This is deliberately metadata-only: no cell matrix is built
+                // or retained for a quiet view when a hidden pane emits output.
+                // Include every field of the projected frame and each visible
+                // terminal's epoch, foreground identity and selection serials.
+                let stamp = json!({
+                    "session":s.id,"session_name":s.name,"window":w.id,
+                    "window_index":s.windows.iter().position(|id|id==&w.id),
+                    "windows":s.windows.iter().filter_map(|id|self.windows.get(id)).enumerate().map(|(index,w)|json!({"id":w.id,"index":index,"name":w.name})).collect::<Vec<_>>(),
+                    "name":w.name,"rows":s.rows,"cols":s.cols,"active_pane":active,
+                    "layout":w.layout.json(),"zoom":zoom,
+                    "panes":rects.iter().filter_map(|(id,r)|self.panes.get(id).map(|p|json!({
+                        "id":p.id,"epoch":p.term.history_epoch,"foreground":p.foreground,
+                        "selection":p.term.selection_serials(),"ended":p.ended,
+                        "restored":p.pty.is_none(),"exit_code":p.exit_code.or_else(||p.pty.as_ref().and_then(Pty::exit_code)),
+                        "rect":{"x":r.x,"y":r.y,"rows":r.rows,"cols":r.cols}
+                    }))).collect::<Vec<_>>()
+                });
+                if c.render_stamp.as_ref().is_some_and(|(base, previous)| {
+                    v.get("revision")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|requested| {
+                            requested >= *base && requested <= self.revision && previous == &stamp
+                        })
+                }) {
+                    return Ok(json!({"revision":self.revision,"unchanged":true}));
+                }
                 let panes=rects.iter().filter_map(|(id,r)|self.panes.get(id).map(|p|json!({"id":p.id,"grid":p.term.snapshot(),"selection_offer":p.term.selection_serials().0,"selection_request":p.term.selection_serials().1,"ended":p.ended,"restored":p.pty.is_none(),"exit_code":p.exit_code.or_else(||p.pty.as_ref().and_then(Pty::exit_code)),"rect":{"x":r.x,"y":r.y,"rows":r.rows,"cols":r.cols}}))).collect::<Vec<_>>();
-                Ok(
-                    json!({"revision":self.revision,"session":s.id,"session_name":s.name,"window":w.id,"window_index":s.windows.iter().position(|id|id==&w.id),"windows":s.windows.iter().filter_map(|id|self.windows.get(id)).enumerate().map(|(index,w)|json!({"id":w.id,"index":index,"name":w.name})).collect::<Vec<_>>(),"name":w.name,"rows":s.rows,"cols":s.cols,"active_pane":active,"layout":w.layout.json(),"zoom":zoom,"panes":panes}),
-                )
+                let frame = json!({"revision":self.revision,"session":s.id,"session_name":s.name,"window":w.id,"window_index":s.windows.iter().position(|id|id==&w.id),"windows":s.windows.iter().filter_map(|id|self.windows.get(id)).enumerate().map(|(index,w)|json!({"id":w.id,"index":index,"name":w.name})).collect::<Vec<_>>(),"name":w.name,"rows":s.rows,"cols":s.cols,"active_pane":active,"layout":w.layout.json(),"zoom":zoom,"panes":panes});
+                self.clients.get_mut(client).unwrap().render_stamp = Some((self.revision, stamp));
+                Ok(frame)
             }
 
             "client.paste" => self.paste(v, client),

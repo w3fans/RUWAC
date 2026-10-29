@@ -1,25 +1,22 @@
-Automatic GNOME sign-in now sends its recognized user-list click while keeping
-manual input paused. Failed one-use session handover setup stops instead of silently
-starting another service login. Cancelling sign-in also stops transport retries;
-reconnecting waits for the previous connection to close. Late credential lookups
-do not cancel a newer attempt. Redirect setup has a
-10-second limit. Established desktops retain ordinary network recovery, preserving
-existing remote applications.
+RUWAC v0.4.51 avoids rebuilding and transmitting unchanged terminal screens when
+only hidden panes produce output. Visible output, window names, focus, resizing,
+input modes and process exit continue to update. The regression includes multiple
+clients and a workload with 19 panes and four render clients. Checkpoint disk writes
+and broader remote typing latency remain separate work.
 
-Machines search uses Alt+M; Ctrl+K reaches terminal applications such as nano.
-Mouse selection preserves matching live-screen colours and text attributes,
-repaints without erasing the whole terminal, and keeps the light-blue footer.
-Older scrollback without style metadata remains plain text. GUI terminal cell
-backgrounds have continuous edges at fractional font widths and display scales.
+The desktop dependency libz-sys is updated to 1.1.31 for RUSTSEC-2026-0418: its
+compiler probe no longer logs the build environment. Updating cannot remove output
+from an earlier build; builders should remove affected build caches separately.
+The known RSA advisory RUSTSEC-2023-0071 remains disclosed and unsuppressed.
 
-Contribution labeling now reports bounded GitHub error diagnostics while retaining
-trusted-base execution, existing token permissions and the original HTTP failure.
-Recognized error messages, request IDs and accepted permission fields help diagnose
-refusals; arbitrary response bodies and authorization headers are never printed.
-This does not claim to resolve the observed labeling403 before the updated workflow
-has actually run.
+Version 0.4.50 added mouse selection through history with wheel and edge dragging.
+Inside an attached RUWAC session, press Ctrl+A then [ and select without Shift;
+hold the mouse button and use the wheel or top edge to extend into older output.
+Shift selects the outer terminal instead. Older history without colour metadata
+remains plain text.
 
-The acceptance ledger now distinguishes delivered v0.4.43 results from remaining
-physical, external-host, endurance and security qualification. Known
-RUSTSEC-2023-0071 remains unsuppressed; isolated tests are not a complete product
-or platform qualification claim.
+File updates preserve existing daemons and their running programs. The new
+daemon-side performance change takes effect when a new daemon starts; reopening
+only the GUI does not replace an old daemon. Avoid stopping a daemon that still
+owns work you need. Isolated acceptance does not replace physical-input,
+external-host or full platform qualification.

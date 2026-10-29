@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v0.4.51 — 2026-10-29 — Stable source release
+
+- Update libz-sys to 1.1.31 to stop its compiler probe from logging the build
+  environment (RUSTSEC-2026-0418).
+- Avoid rebuilding and transmitting quiet terminal frames when output changes
+  only in hidden panes. Track each client's visible projection while retaining
+  explicit refresh and visible output, focus, resize, status and input-mode updates.
+  This daemon-side change takes effect when a new daemon starts; installed-file
+  updates continue to preserve existing daemons and their running programs.
+
 ## v0.4.50 — 2026-10-28 — Stable source release
 
 - Extend terminal mouse selection through history with edge dragging and wheel
