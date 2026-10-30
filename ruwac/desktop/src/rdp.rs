@@ -659,10 +659,12 @@ impl Connection {
         }
     }
     fn send(&self, events: Vec<FastPathInputEvent>) -> Result<(), String> {
-        // Pointer motion is superseded by the next position. While the link
-        // is slow, drop it to keep room for clicks, keys and control commands.
+        // Only pure pointer positions can be superseded by the next position.
+        // Wheel deltas are intentional input: retain their exact order alongside
+        // clicks/keys in the bounded, generation-checked queue. Queue exhaustion
+        // returns an error rather than silently acknowledging a lost gesture.
         let motion = events.iter().all(
-            |e| matches!(e, FastPathInputEvent::MouseEvent(m) if m.flags == PointerFlags::MOVE || m.flags.intersects(PointerFlags::VERTICAL_WHEEL | PointerFlags::HORIZONTAL_WHEEL)),
+            |e| matches!(e, FastPathInputEvent::MouseEvent(m) if m.flags == PointerFlags::MOVE),
         );
         if motion && (self.tx.capacity() < 32 || !self.backlog.borrow().is_empty()) {
             return Ok(());
@@ -6299,6 +6301,84 @@ mod protocol_conformance;
 #[cfg(test)]
 mod queue_safety_tests {
     use super::*;
+    fn connection() -> (Connection, tokio::sync::mpsc::Receiver<QueuedCommand>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        (
+            Connection {
+                id: "queue-test".into(),
+                tx,
+                stop: Arc::default(),
+                recovery: Arc::default(),
+                finished: Arc::default(),
+                state: Arc::new(Mutex::new(State::default())),
+                backlog: RefCell::default(),
+                budget: Arc::default(),
+                input_epoch: Arc::default(),
+            },
+            rx,
+        )
+    }
+    fn pointer(flags: PointerFlags, units: i16) -> FastPathInputEvent {
+        FastPathInputEvent::MouseEvent(MousePdu {
+            flags,
+            number_of_wheel_rotation_units: units,
+            x_position: 13,
+            y_position: 17,
+        })
+    }
+    #[test]
+    fn saturated_transport_retains_wheels_and_click_order() {
+        let (c, mut rx) = connection();
+        for _ in 0..128 {
+            c.queue(Command::Reply(None)).unwrap();
+        }
+        // Positions may be discarded; horizontal/vertical wheel deltas may not.
+        c.send(vec![pointer(PointerFlags::MOVE, 0)]).unwrap();
+        assert!(c.backlog.borrow().is_empty());
+        let expected = vec![
+            pointer(PointerFlags::VERTICAL_WHEEL, 120),
+            pointer(PointerFlags::HORIZONTAL_WHEEL, -120),
+            pointer(PointerFlags::LEFT_BUTTON | PointerFlags::DOWN, 0),
+            pointer(PointerFlags::VERTICAL_WHEEL, -1),
+            pointer(PointerFlags::LEFT_BUTTON, 0),
+        ];
+        for e in &expected {
+            c.send(vec![e.clone()]).unwrap();
+        }
+        assert_eq!(c.backlog.borrow().len(), expected.len());
+        for _ in 0..128 {
+            assert!(matches!(
+                rx.try_recv().unwrap().command,
+                Command::Reply(None)
+            ));
+        }
+        assert!(!c.flush());
+        for expected in expected {
+            match rx.try_recv().unwrap().command {
+                Command::Input(events, ..) => assert_eq!(events, vec![expected]),
+                _ => panic!("wheel/click input lost or reordered"),
+            }
+        }
+        assert!(rx.try_recv().is_err());
+        assert_eq!(c.budget.lock().unwrap().count, 0);
+    }
+    #[test]
+    fn wheel_queue_exhaustion_is_reported_and_focus_cancels_backlog() {
+        let (c, mut rx) = connection();
+        for _ in 0..4064 {
+            c.send(vec![pointer(PointerFlags::VERTICAL_WHEEL, 1)])
+                .unwrap();
+        }
+        assert!(
+            c.send(vec![pointer(PointerFlags::VERTICAL_WHEEL, 1)])
+                .is_err()
+        );
+        c.invalidate_input();
+        assert!(c.backlog.borrow().is_empty());
+        // Commands already in the transport channel are invalidated as well.
+        let first = rx.try_recv().unwrap();
+        assert!(first.command.stale(c.state.lock().unwrap().generation));
+    }
     #[test]
     fn hard_count_bound_rejects_before_insert_and_reserves_control_capacity() {
         let budget = Arc::default();

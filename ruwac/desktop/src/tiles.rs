@@ -711,23 +711,26 @@ pub fn set_page_loading(page: &adw::TabPage, loading: bool) {
 }
 
 /// Full-colour, shape-distinct indicators, independent of GTK's private tab CSS.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TabStatus {
     Ready,
     Busy,
     Error,
     Offline,
+    ReadyWithWarning,
 }
 pub fn set_page_status(page: &adw::TabPage, status: TabStatus) {
     use gtk::gio::prelude::*;
     thread_local! {
         static ICONS: Vec<gtk::gio::BytesIcon> = [
-            ("#34d399", "M4 8l3 3 5-6"),
-            ("#f5c451", "M8 4v4l3 2"),
-            ("#f0737a", "M8 4v5m0 2v1"),
-            ("#9b9ca3", "M4 8h8"),
-        ].iter().map(|(color,path)| {
-            let svg = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="{color}"/><path d="{path}" stroke="#131416" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>"##);
+            ("#34d399", "M4 8l3 3 5-6", false),
+            ("#f5c451", "M8 4v4l3 2", false),
+            ("#f0737a", "M8 4v5m0 2v1", false),
+            ("#9b9ca3", "M4 8h8", false),
+            ("#34d399", "M4 8l3 3 5-6", true),
+        ].iter().map(|(color,path,warning)| {
+            let badge = if *warning { r##"<circle cx="13" cy="3" r="3" fill="#f5c451" stroke="#131416" stroke-width="1"/>"## } else { "" };
+            let svg = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="{color}"/><path d="{path}" stroke="#131416" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>{badge}</svg>"##);
             gtk::gio::BytesIcon::new(&gtk::glib::Bytes::from_owned(svg.into_bytes()))
         }).collect();
     }

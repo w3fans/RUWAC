@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## v0.4.52 — 2026-10-30 — Stable source release
+
+- Keep a live terminal's green health indicator when an old operation warning
+  remains. Show that warning with a small amber marker; disconnected and starting
+  terminals retain their own states. Warning text stays available in the tooltip.
+- Retain RDP wheel deltas in the bounded, ordered input queue under congestion;
+  only pure pointer movement may be discarded. Preserve focus/transport
+  cancellation and report queue exhaustion instead of silently losing gestures.
+- Defer mouse-selection copying when canonical history is still loading. Bind
+  the copy to the original pane/request, validate its starting viewport, cancel
+  it on typing or focus changes, and report unavailable or timed-out history.
+  Refuse incomplete history prefixes with an explicit 8 MiB limit message.
+- Reject release notes that do not match the controller-allocated tag and its
+  changelog section before local acceptance and GitHub publication. Reconcile
+  the public acceptance ledger with completed v0.4.51 qualification.
+
 ## v0.4.51 — 2026-10-29 — Stable source release
 
 - Update libz-sys to 1.1.31 to stop its compiler probe from logging the build

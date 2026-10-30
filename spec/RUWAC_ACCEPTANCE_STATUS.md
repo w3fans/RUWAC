@@ -1,5 +1,36 @@
 # RUWAC acceptance status
 
+## Released v0.4.51 — reconciled 2026-10-29
+
+Exact commit `dba654e86a738299e51f26a6f32d37ea8e787012` completed all
+19 frozen acceptance categories. Nine downloaded public assets passed checksum,
+provenance and packaging qualification. The downloaded binaries passed 24 runtime
+phases, two actual offline Codex draft-image cases and four companion suites.
+Six scoped installations preserved configurations and then-current live process
+identities. Final fixture and bounded-unit scans on seven hosts were clear.
+
+The new projection regression covers seven cases, including hidden-pane output,
+visible output and explicit/stale refresh. The same hidden-output assertion fails
+against released v0.4.50. A controlled 19-pane/four-client workload measured quiet
+render traffic falling from 4.65 MB/s to 3.4 KB/s; checkpoint writes did not improve.
+Generated Mutter tests additionally exercised held-Shift drag with smooth and
+discrete wheel events in both directions on the released v0.4.50 GUI. This is
+isolated native input, not an owner physical-device or fast-release-delay pass.
+Older canonical history still contains text/wrap metadata rather than full styles.
+
+Hosted [quality/privacy](https://github.com/w3fans/RUWAC/actions/runs/40955489364)
+and [tagged build](https://github.com/w3fans/RUWAC/actions/runs/40955489060)
+passed for this commit. The advisory job failed separately on known RSA0071;
+maintenance and yanked-version warnings remain recorded. libz-sys 1.1.31 fixes
+the newly detected RUSTSEC-2026-0418. No RSA reachability proof, clean security
+qualification, physical gesture matrix, external Windows pass or endurance pass
+is implied. See the [v0.4.51 release](https://github.com/w3fans/RUWAC/releases/tag/v0.4.51).
+
+The [2026-10-29 audit response](RUWAC_AUDIT_RESPONSE_2026-10-29.md)
+tracks remaining findings. Later code changes require their own qualification;
+this receipt does not qualify an unreleased candidate.
+
+
 Public results summarize qualification without publishing host identities, accounts,
 network topology, credential references or operational troubleshooting. Detailed
 receipts and original reports are archived privately outside Git.

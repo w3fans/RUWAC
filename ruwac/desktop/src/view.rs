@@ -14,6 +14,42 @@ use std::{
 thread_local! {
     static HISTORY_STYLE: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
 }
+fn terminal_tab_status(frame: bool, offline: bool, warning: bool) -> crate::tiles::TabStatus {
+    use crate::tiles::TabStatus;
+    if offline {
+        TabStatus::Offline
+    } else if !frame {
+        TabStatus::Busy
+    } else if warning {
+        TabStatus::ReadyWithWarning
+    } else {
+        TabStatus::Ready
+    }
+}
+#[cfg(test)]
+mod tab_health_tests {
+    use super::terminal_tab_status;
+    use crate::tiles::TabStatus;
+    #[test]
+    fn retained_warning_does_not_mark_live_terminal_failed() {
+        assert_eq!(
+            terminal_tab_status(true, false, true),
+            TabStatus::ReadyWithWarning
+        );
+    }
+    #[test]
+    fn disconnected_terminal_stays_offline_even_with_old_warning() {
+        assert_eq!(terminal_tab_status(true, true, true), TabStatus::Offline);
+    }
+    #[test]
+    fn connecting_terminal_stays_busy_even_with_old_warning() {
+        assert_eq!(terminal_tab_status(false, false, true), TabStatus::Busy);
+    }
+    #[test]
+    fn healthy_terminal_without_warning_is_ready() {
+        assert_eq!(terminal_tab_status(true, false, false), TabStatus::Ready);
+    }
+}
 fn selection_text(grid: &Value, mut a: (usize, usize), mut z: (usize, usize)) -> String {
     if a > z {
         std::mem::swap(&mut a, &mut z);
@@ -219,6 +255,9 @@ pub struct View {
     history_selection: RefCell<Option<((usize, usize), (usize, usize))>>,
     selection_dragging: Cell<bool>,
     selection_seed: RefCell<Option<Value>>,
+    /// Mouse-up may precede the canonical snapshot. Keep only one bounded
+    /// copy intent; generation/target checks also guard the snapshot reply.
+    selection_copy_pending: Cell<Option<(u64, bool)>>,
     selection_scroll_at: Cell<std::time::Instant>,
     primary_provider: RefCell<Option<gdk::ContentProvider>>,
     link_click: Cell<bool>,
@@ -356,6 +395,7 @@ impl View {
             desktop_shortcuts: Cell::new(true),
             copy_on_select: Cell::new(false),
             history_pending: Cell::new(false),
+            selection_copy_pending: Cell::new(None),
             history_request: Cell::new(0),
             history_inline: Cell::new(false),
             history_offset: Cell::new(0),
@@ -625,7 +665,40 @@ impl View {
                     }
                     return;
                 }
+                let (x, y) = v.drag_start.get();
+                v.mouse_position.set((x + dx, y + dy));
+                v.extend_selection();
                 let local_drag = v.selection_dragging.replace(false);
+                if local_drag && v.selection_seed.borrow().is_some() && !v.history_pending.get() {
+                    v.clear_selection();
+                    v.cancel_inline_history();
+                    v.warn("Selection history unavailable; nothing was copied. Select again");
+                    v.area.queue_draw();
+                    return;
+                }
+                if local_drag && v.history_pending.get() && v.selection_seed.borrow().is_some() {
+                    let generation = v.history_request.get();
+                    v.selection_copy_pending
+                        .set(Some((generation, v.copy_on_select.get())));
+                    v.status.set_text("Loading selection history…");
+                    let weak = Rc::downgrade(&v);
+                    glib::timeout_add_local_once(std::time::Duration::from_secs(5), move || {
+                        if let Some(v) = weak.upgrade() {
+                            if v.selection_copy_pending
+                                .get()
+                                .is_some_and(|p| p.0 == generation)
+                            {
+                                v.clear_selection();
+                                v.cancel_inline_history();
+                                v.warn(
+                                    "Selection history timed out; nothing was copied. Select again",
+                                );
+                                v.area.queue_draw();
+                            }
+                        }
+                    });
+                    return;
+                }
                 if local_drag
                     || !v.mouse_enabled()
                     || g.current_event_state()
@@ -675,6 +748,10 @@ impl View {
         focus.connect_leave(move |_| {
             if let Some(v) = w.upgrade() {
                 v.cancel_image_paste();
+                if v.selection_copy_pending.get().is_some() {
+                    v.clear_selection();
+                    v.cancel_inline_history();
+                }
                 v.selection_dragging.set(false);
                 v.release_mouse();
                 if v.prefix.replace(false) {
@@ -798,6 +875,12 @@ impl View {
         *self.wake_task.borrow_mut() = Some(task);
     }
     fn clear_selection(&self) {
+        if self.selection_copy_pending.take().is_some() {
+            self.history_request
+                .set(self.history_request.get().saturating_add(1));
+            self.history_pending.set(false);
+            self.history_inline.set(false);
+        }
         self.selection.borrow_mut().take();
         self.history_selection.borrow_mut().take();
         self.selection_seed.borrow_mut().take();
@@ -1611,16 +1694,11 @@ impl View {
         self.focus();
     }
     pub fn tab_status(&self) -> crate::tiles::TabStatus {
-        use crate::tiles::TabStatus;
-        if self.warning.borrow().is_some() {
-            TabStatus::Error
-        } else if self.ended.get() || self.finished.get() || self.dead.is_visible() {
-            TabStatus::Offline
-        } else if self.frame.borrow().is_none() {
-            TabStatus::Busy
-        } else {
-            TabStatus::Ready
-        }
+        terminal_tab_status(
+            self.frame.borrow().is_some(),
+            self.ended.get() || self.finished.get() || self.dead.is_visible(),
+            self.warning.borrow().is_some(),
+        )
     }
     pub fn update(self: &Rc<Self>) {
         self.selection_autoscroll();
@@ -1774,7 +1852,11 @@ impl View {
                     }
                 });
                 if stale {
+                    let deferred = self.selection_copy_pending.get().is_some();
                     self.clear_selection();
+                    if deferred {
+                        self.warn("Output changed before selection loaded; nothing was copied. Select again");
+                    }
                 }
             }
             let serials = {
@@ -1866,21 +1948,43 @@ impl View {
                 }
                 self.history_pending.set(false);
                 if let Some(error) = v["error"].as_str() {
+                    self.clear_selection();
                     self.history_inline.set(false);
                     self.warn(error);
                     return;
                 }
                 if self.history_inline.replace(false) {
+                    if v["truncated"] == true {
+                        // Paging stopped before the active tail. A prefix cannot
+                        // be anchored to the screen where this drag started.
+                        self.clear_selection();
+                        self.history_lines.borrow_mut().clear();
+                        self.history_offset.set(0);
+                        self.warn("Selection history reached its 8 MiB limit; nothing was copied. Use the copy view to inspect the loaded history");
+                        self.area.queue_draw();
+                        return;
+                    }
+                    let pending_copy = self.selection_copy_pending.take();
                     let seed = self.selection_seed.borrow_mut().take();
                     let selection = *self.selection.borrow();
-                    if let (true, Some(seed), Some((a, _))) =
-                        (self.selection_dragging.get(), seed, selection)
-                    {
+                    if let (true, Some(seed), Some((a, _))) = (
+                        self.selection_dragging.get() || pending_copy.is_some(),
+                        seed,
+                        selection,
+                    ) {
                         let text = v["text"].as_str().unwrap_or("");
                         let height = seed["rows"].as_u64().unwrap_or(24) as usize;
                         self.history_lines.borrow_mut().freeze(text, &seed);
                         let frozen = self.history_lines.borrow_mut().grid(&seed, 0).0;
-                        if selection_changed(&seed, &frozen, a, a) {
+                        // A common anchor character (for example a space) is
+                        // insufficient to bind a delayed snapshot to its starting
+                        // screen. Reject a changed viewport instead of selecting
+                        // unrelated history at a coincidentally matching cell.
+                        let end = (
+                            height.saturating_sub(1),
+                            seed["cols"].as_u64().unwrap_or(80).saturating_sub(1) as usize,
+                        );
+                        if selection_changed(&seed, &frozen, (0, 0), end) {
                             self.clear_selection();
                             self.history_lines.borrow_mut().clear();
                             self.history_offset.set(0);
@@ -1891,13 +1995,28 @@ impl View {
                         }
                         let anchor = self.history_lines.borrow().point(height, 0, a.0, a.1);
                         *self.history_selection.borrow_mut() = Some((anchor, anchor));
+                        // Complete the mouse-up extent once, without continuing
+                        // edge autoscroll after the button has been released.
+                        let dragging = self.selection_dragging.replace(true);
                         self.extend_selection();
+                        self.selection_dragging.set(dragging);
+                        if let Some((generation, clipboard)) = pending_copy {
+                            if generation == self.history_request.get() && self.area.has_focus() {
+                                self.copy_clipboard(true);
+                                if clipboard {
+                                    self.copy_clipboard(false);
+                                }
+                            }
+                        }
                     } else {
                         self.history_lines
                             .borrow_mut()
                             .set(v["text"].as_str().unwrap_or(""));
                     }
                     let _ = self.grid();
+                    if v["truncated"] == true {
+                        self.warn("Selection reached its 8 MiB limit; only the loaded history can be selected");
+                    }
                     self.area.queue_draw();
                     return;
                 }
@@ -2369,6 +2488,11 @@ impl View {
         selection_text(&g, a, z)
     }
     pub fn copy_clipboard(&self, primary: bool) {
+        if self.selection_copy_pending.get().is_some() {
+            self.status
+                .set_text("Loading selection history; copy will finish when ready");
+            return;
+        }
         if !self.broker.borrow().desktop_enabled() {
             self.status.set_text("Desktop clipboard disabled");
             return;
