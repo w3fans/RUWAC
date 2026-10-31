@@ -1,26 +1,24 @@
-RUWAC v0.4.52 preserves RDP scrolling under congestion and makes fast terminal
-history selection wait for its matching snapshot. Wheel impulses keep their
-order with clicks and keys; full queues report an error instead of silently
-losing gestures. Pure pointer positions may still be discarded under pressure.
+RUWAC v0.4.53 adds explicit non-sizing terminal viewers. Attach from a smaller
+terminal with `ruwac attach --session SESSION_ID --viewer` (`-O`), locally or
+through the existing authenticated `--host` SSH path. Viewer resize, navigation
+and local zoom preserve the shared PTY dimensions; larger grids are cropped to
+the local terminal, with a visible viewer/cropping indicator.
 
-Mouse-up before history is ready keeps a bounded copy intent. Typing, focus or
-target changes cancel it; an expired or unavailable request reports that nothing
-was copied. A changed starting viewport is rejected, and incomplete history
-prefixes report the 8 MiB limit rather than selecting unrelated text. Inside an
-attached RUWAC session, use Ctrl+A then [ for its own scrollback/copy view.
+Viewer input and copy remain available. Shared pane creation, closure and split
+changes are refused; viewers do not automatically prune ended panes. Older
+daemons refuse this mode before attachment without silently falling back to a
+sizing client. Ordinary CLI and GUI attachments retain their existing minimum
+size policy. With only viewers remaining, the last pane geometry is preserved.
+Controller takeover/release, local pan/fit and GUI viewer controls remain future
+work; this increment does not change recovery storage or migrate sessions.
 
-A retained operation warning no longer makes a working terminal look failed.
-Its health indicator stays green with a small amber warning marker; starting
-and disconnected terminals retain their separate states. The warning text
-remains available in the tab tooltip and controls.
+The desktop dependency lock updates crypto-bigint to 0.7.10 and ctutils to 0.4.7.
+The known RSA advisory RUSTSEC-2023-0071 remains unresolved and unsuppressed.
+Public audit ledgers now distinguish completed v0.4.52 fixes from remaining
+sizing, physical-device, external-host and endurance work.
 
-Release publication now checks that these notes match the controller-allocated
-tag and its unique changelog section. The acceptance ledger records completed
-0.4.51 qualification and distinguishes generated native tests from physical and
-external-host acceptance. Shared multi-client PTY sizing, checkpoint disk writes
-and further remote typing latency work remain open for later increments.
-
-The known RSA advisory RUSTSEC-2023-0071 remains disclosed and unsuppressed.
-This release does not establish complete security, physical-device, external
-Windows or endurance qualification. Installed-file updates preserve existing
-daemons and their running programs. Reopen GUIs to load the new frontend.
+Installed-file updates preserve existing daemons and running programs. Reopen
+the GUI or detach/reattach a CLI frontend to load new client code. Viewer mode
+requires an updated daemon; an older daemon and its sessions stay intact until
+an explicit, appropriate refresh. No complete security or physical qualification
+is implied.

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v0.4.53 — 2026-10-31 — Stable source release
+
+- Add explicit non-sizing terminal viewers with `attach --viewer` (`-O`), locally
+  and over SSH. Keep canonical PTY dimensions through viewer resize, navigation,
+  zoom and reattachment; clip larger grids to the local terminal and show cropping.
+  Refuse unsupported older daemons without a sizing fallback and prevent viewer
+  layout edits or automatic ended-pane cleanup from resizing shared work.
+- Update desktop crypto-bigint to 0.7.10 and ctutils to 0.4.7. The known RSA
+  RUSTSEC-2023-0071 advisory remains unresolved and unsuppressed.
+
 ## v0.4.52 — 2026-10-30 — Stable source release
 
 - Keep a live terminal's green health indicator when an old operation warning

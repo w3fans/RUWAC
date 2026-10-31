@@ -5,7 +5,14 @@ Current behavior was reconciled on 2026-10-20 against v0.4.31 and the
 stabilization candidate's explicit SSH review and update-readiness changes. This is a product requirements ledger and source review, not a claim
 that all supported environments have passed acceptance.
 
-Current evidence reconciliation (2026-10-25): v0.4.43 passed nineteen frozen
+Latest evidence reconciliation (2026-10-31): v0.4.52 is delivered with nineteen
+frozen categories, nine public assets and 25 actual-public runtime phases.
+The explicit non-sizing CLI/SSH viewer and dependency maintenance increment is
+an unreleased candidate; full controller-owned sizing and the remaining external,
+physical and endurance matrix are open. Follow the current acceptance status
+below before interpreting historical findings.
+
+Earlier evidence reconciliation (2026-10-25): v0.4.43 passed nineteen frozen
 categories, nine public-asset checks and twelve actual-public runtime phases.
 Native GNOME Shell 50 mouse-selection delivery is now implemented through an
 optional companion with explicit account permission and connection approval;

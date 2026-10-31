@@ -57,6 +57,31 @@ ends the session. The GUI opens with `ruwac gui`; use **New term**, **Machines**
 (**Alt+M**) and **New RDP** to open your workspace. GUI prefix shortcuts use
 **Ctrl+Alt+A** by default; terminal applications keep ordinary Ctrl+A.
 
+### Attach from a smaller terminal without resizing shared work
+
+List sessions with `ruwac -ls`, then attach using its stable session ID:
+
+```sh
+ruwac attach --session session_ID --viewer
+ruwac --host SSH_HOST attach --session session_ID -O
+```
+
+`-O` is the short form of `--viewer`. A viewer keeps typing, window/pane navigation,
+copy mode and local zoom, while its terminal dimensions do not vote in shared PTY
+sizing. Its status bar says **Viewer** and shows the canonical size and any
+cropping. The first implementation crops to the local terminal; use **Ctrl+A, [**
+for history/copy mode. Local pan/fit and controller takeover remain future work.
+
+A viewer cannot create/close shared panes or windows or change split ratios,
+because those operations can resize other applications. Use an ordinary attachment
+for shared layout changes. Viewer exits retain shared ended history.
+
+Both local and SSH paths require a daemon advertising this capability. An older
+daemon is refused before attachment; there is no automatic ordinary-attach fallback.
+Updating installed files preserves existing daemons, so their running applications
+keep their original code. Ordinary attachments keep the existing minimum-size
+policy. See [viewer sizing](spec/RUWAC_VIEWER_SIZING.md) for scope and limits.
+
 ## Build and test from source
 
 Clone the repository and work on a branch:

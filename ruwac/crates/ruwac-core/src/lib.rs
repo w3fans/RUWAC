@@ -3,6 +3,7 @@ mod jobs;
 mod layout;
 mod paste;
 mod recovery;
+mod viewer;
 use layout::{Layout, Rect};
 pub use recovery::Store;
 use ruwac_protocol::{Error, Request, Result, checked_text, id, target, text};
@@ -73,6 +74,7 @@ struct Client {
     render_stamp: Option<(u64, Value)>,
     paste: Option<paste::Upload>,
     scope: String,
+    non_sizing: bool,
     session: String,
     rows: u16,
     cols: u16,
@@ -257,7 +259,9 @@ pub fn start_with_store(store: Option<Store>) -> std::io::Result<Handle> {
                 Message::Disconnect(c) => {
                     s.histories.retain(|_, pin| pin.owner != c);
                     if let Some(c) = s.clients.remove(&c) {
-                        s.layout(&c.session);
+                        if !c.non_sizing {
+                            s.layout(&c.session);
+                        }
                         s.revision += 1;
                         let _ = rev.send(s.revision);
                     }
@@ -315,6 +319,16 @@ impl State {
         if !r.params.is_object() && !r.params.is_null() {
             return Err(Error::new("INVALID_PARAMS", "params must be an object"));
         }
+        if r.idempotency_key
+            .as_ref()
+            .is_some_and(|k| k.is_empty() || k.len() > 128)
+        {
+            return Err(Error::new(
+                "INVALID_PARAMS",
+                "idempotency key must be 1..128 bytes",
+            ));
+        }
+        self.check_viewer(&r.method, &r.params, client)?;
         if let Some(k) = &r.idempotency_key {
             if k.is_empty() || k.len() > 128 {
                 return Err(Error::new(
@@ -463,10 +477,12 @@ impl State {
             .unwrap_or(window.zoom)
     }
     fn select_client_window(&mut self, client: &str, session: &str, window: &str) {
-        self.sessions
-            .get_mut(session)
-            .unwrap()
-            .select_window(window.into());
+        if !self.is_viewer(client, session) {
+            self.sessions
+                .get_mut(session)
+                .unwrap()
+                .select_window(window.into());
+        }
         if let Some(c) = self
             .clients
             .get_mut(client)
@@ -514,9 +530,19 @@ impl State {
         let sizes: Vec<_> = self
             .clients
             .values()
-            .filter(|c| c.session == s)
+            .filter(|c| c.session == s && !c.non_sizing)
             .map(|c| (c.rows, c.cols))
             .collect();
+        // With only viewers, preserve the last per-pane size, including a
+        // former sizing client's local zoom. Viewers cannot restore defaults.
+        if sizes.is_empty()
+            && self
+                .clients
+                .values()
+                .any(|c| c.session == s && c.non_sizing)
+        {
+            return;
+        }
         let Some(session) = self.sessions.get_mut(s) else {
             return;
         };
@@ -541,7 +567,7 @@ impl State {
             let viewers: Vec<_> = self
                 .clients
                 .values()
-                .filter(|c| c.session == s && c.window == w.id)
+                .filter(|c| c.session == s && c.window == w.id && !c.non_sizing)
                 .collect();
             if viewers.is_empty() {
                 if w.zoom {
@@ -666,7 +692,7 @@ impl State {
                 json!({"name":"ruwac","implementation":"spike","package":env!("CARGO_PKG_VERSION"),"protocol":0}),
             ),
             "capabilities" => Ok(
-                json!({"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"job_metadata":true,"job_metadata_no_argv":true,"structured_agent_state":false,"recovery":self.store.is_some(),"primary_buffer_history":true,"extended_terminal_styles":true,"kitty_keyboard_input":false,"history_checkpoints":"private canonical active and hidden primary tail, 50000 lines or 512 KiB per pane; processes restore ended","desktop_clipboard":false,"primary":false,"graphics":false,"image_attachment":true,"image_attachment_adapters":["codex draft path"],"image_attachment_submits":false,"ssh_transport":"authenticated OpenSSH through CLI --host","shared_focus":false,"independent_client_focus":true,"pane_divider_cells":true,"client_zoom":true,"atomic_paste":true,"max_paste_bytes":paste::MAX_BYTES,"pty_sizing":"minimum session dimensions and minimum visible pane size across attached clients","split":"persistent horizontal/vertical tree, sixteen panes","capture_limit":2000,"history_page_limit":500,"scrollback_default":50000,"max_text_bytes":ruwac_protocol::MAX_TEXT}),
+                json!({"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"job_metadata":true,"job_metadata_no_argv":true,"structured_agent_state":false,"recovery":self.store.is_some(),"primary_buffer_history":true,"extended_terminal_styles":true,"kitty_keyboard_input":false,"history_checkpoints":"private canonical active and hidden primary tail, 50000 lines or 512 KiB per pane; processes restore ended","desktop_clipboard":false,"primary":false,"graphics":false,"image_attachment":true,"image_attachment_adapters":["codex draft path"],"image_attachment_submits":false,"ssh_transport":"authenticated OpenSSH through CLI --host","shared_focus":false,"independent_client_focus":true,"non_sizing_viewer":1,"pane_divider_cells":true,"client_zoom":true,"atomic_paste":true,"max_paste_bytes":paste::MAX_BYTES,"pty_sizing":"minimum sizing-client dimensions and visible pane sizes; explicit non-sizing viewers never vote","split":"persistent horizontal/vertical tree, sixteen panes","capture_limit":2000,"history_page_limit":500,"scrollback_default":50000,"max_text_bytes":ruwac_protocol::MAX_TEXT}),
             ),
             "schema" => Ok(schema()),
             "describe" => Ok(
@@ -718,13 +744,20 @@ impl State {
                     return Err(Error::new("STALE_ID", "session does not exist"));
                 }
                 let (rows, cols) = terminal_dimensions(v)?;
-                if let Some(old) = self.clients.remove(client) {
-                    self.layout(&old.session);
+                let non_sizing = viewer::role(v)?;
+                // Replace atomically: removing the sole old attachment first
+                // must not transiently restore a zoomed pane's shared defaults.
+                let old = self.clients.remove(client);
+                if let Some(old) = &old {
+                    if old.session != s && !old.non_sizing {
+                        self.layout(&old.session);
+                    }
                 }
                 self.clients.insert(
                     client.into(),
                     Client {
                         render_stamp: None,
+                        non_sizing,
                         paste: None,
                         scope: id("display"),
                         session: s.clone(),
@@ -745,12 +778,16 @@ impl State {
                     },
                 );
                 self.layout(&s);
-                Ok(json!({"client":client,"session":s}))
+                Ok(
+                    json!({"client":client,"session":s,"size_role":if non_sizing {"viewer"} else {"legacy"},"canonical_rows":self.sessions[&s].rows,"canonical_cols":self.sessions[&s].cols}),
+                )
             }
             "session.detach" => {
                 self.histories.retain(|_, pin| pin.owner != client);
                 if let Some(c) = self.clients.remove(client) {
-                    self.layout(&c.session);
+                    if !c.non_sizing {
+                        self.layout(&c.session);
+                    }
                 }
                 Ok(json!({"detached":true}))
             }
@@ -929,8 +966,10 @@ impl State {
                 let p = self.pane(v)?;
                 let id = p.id.clone();
                 let w = p.window.clone();
-                self.windows.get_mut(&w).unwrap().active = id.clone();
                 let session = self.windows[&w].session.clone();
+                if !self.is_viewer(client, &session) {
+                    self.windows.get_mut(&w).unwrap().active = id.clone();
+                }
                 if let Some(c) = self
                     .clients
                     .get_mut(client)
@@ -948,7 +987,13 @@ impl State {
                     .get_mut(&id)
                     .ok_or_else(|| Error::new("STALE_ID", "window does not exist"))?;
                 if let Some(zoom) = v.get("zoom").and_then(Value::as_bool) {
-                    w.zoom = zoom;
+                    if !self
+                        .clients
+                        .get(client)
+                        .is_some_and(|c| c.non_sizing && c.session == w.session)
+                    {
+                        w.zoom = zoom;
+                    }
                     if let Some(c) = self
                         .clients
                         .get_mut(client)
@@ -1227,8 +1272,11 @@ impl State {
                 c.rows = rows;
                 c.cols = cols;
                 let s = c.session.clone();
-                self.layout(&s);
-                Ok(json!({"resized":true}))
+                let non_sizing = c.non_sizing;
+                if !non_sizing {
+                    self.layout(&s);
+                }
+                Ok(json!({"resized":!non_sizing,"viewport_resized":non_sizing}))
             }
             "client.render" => {
                 for p in self.panes.values_mut() {
@@ -1281,7 +1329,7 @@ impl State {
                     "window_index":s.windows.iter().position(|id|id==&w.id),
                     "windows":s.windows.iter().filter_map(|id|self.windows.get(id)).enumerate().map(|(index,w)|json!({"id":w.id,"index":index,"name":w.name})).collect::<Vec<_>>(),
                     "name":w.name,"rows":s.rows,"cols":s.cols,"active_pane":active,
-                    "layout":w.layout.json(),"zoom":zoom,
+                    "layout":w.layout.json(),"zoom":zoom,"size_role":if c.non_sizing {"viewer"} else {"legacy"},"viewport":{"rows":c.rows,"cols":c.cols},
                     "panes":rects.iter().filter_map(|(id,r)|self.panes.get(id).map(|p|json!({
                         "id":p.id,"epoch":p.term.history_epoch,"foreground":p.foreground,
                         "selection":p.term.selection_serials(),"ended":p.ended,
@@ -1299,7 +1347,7 @@ impl State {
                     return Ok(json!({"revision":self.revision,"unchanged":true}));
                 }
                 let panes=rects.iter().filter_map(|(id,r)|self.panes.get(id).map(|p|json!({"id":p.id,"grid":p.term.snapshot(),"selection_offer":p.term.selection_serials().0,"selection_request":p.term.selection_serials().1,"ended":p.ended,"restored":p.pty.is_none(),"exit_code":p.exit_code.or_else(||p.pty.as_ref().and_then(Pty::exit_code)),"rect":{"x":r.x,"y":r.y,"rows":r.rows,"cols":r.cols}}))).collect::<Vec<_>>();
-                let frame = json!({"revision":self.revision,"session":s.id,"session_name":s.name,"window":w.id,"window_index":s.windows.iter().position(|id|id==&w.id),"windows":s.windows.iter().filter_map(|id|self.windows.get(id)).enumerate().map(|(index,w)|json!({"id":w.id,"index":index,"name":w.name})).collect::<Vec<_>>(),"name":w.name,"rows":s.rows,"cols":s.cols,"active_pane":active,"layout":w.layout.json(),"zoom":zoom,"panes":panes});
+                let frame = json!({"revision":self.revision,"session":s.id,"session_name":s.name,"window":w.id,"window_index":s.windows.iter().position(|id|id==&w.id),"windows":s.windows.iter().filter_map(|id|self.windows.get(id)).enumerate().map(|(index,w)|json!({"id":w.id,"index":index,"name":w.name})).collect::<Vec<_>>(),"name":w.name,"rows":s.rows,"cols":s.cols,"active_pane":active,"layout":w.layout.json(),"zoom":zoom,"size_role":if c.non_sizing {"viewer"} else {"legacy"},"viewport":{"rows":c.rows,"cols":c.cols},"panes":panes});
                 self.clients.get_mut(client).unwrap().render_stamp = Some((self.revision, stamp));
                 Ok(frame)
             }

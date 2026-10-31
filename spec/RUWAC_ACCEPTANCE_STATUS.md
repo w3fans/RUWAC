@@ -1,5 +1,28 @@
 # RUWAC acceptance status
 
+## Released v0.4.52 — reconciled 2026-10-31
+
+Commit `fca85c5ec0bc5a22a1895d363458fc9e025bb940` completed all 19 frozen
+categories, nine public-asset checks, 25 actual-public runtime phases, nine
+selection-delay/cancellation cases, two offline Codex draft-image cases and four
+companion suites. Six guarded installations preserved configurations and live
+process identities; final fixture and bounded-unit checks on seven hosts passed.
+See the [v0.4.52 release](https://github.com/w3fans/RUWAC/releases/tag/v0.4.52).
+
+This release includes queued RDP wheel impulses, asynchronous history-copy
+intents with context/timeout/size refusal, healthy-terminal advisory indicators
+and exact-version release-note guards. Physical-device, external Windows,
+busy-output/target-change and endurance qualification remain separate. The known
+RSA advisory remains unsuppressed; this is not a clean security qualification.
+
+The next unreleased candidate adds explicit non-sizing CLI/SSH viewers and
+updates crypto-bigint/ctutils. Sixteen real PTY/TUI cases, three authenticated SSH
+cases, published-v0.4.52 compatibility refusal, headless/desktop units and focused
+focus/style/recovery/nesting/projection regressions pass. Its complete frozen
+gate, public artifacts and installation qualification have not run. These
+candidate results do not establish a new delivered release or full controller
+sizing. See [viewer scope](RUWAC_VIEWER_SIZING.md).
+
 ## Released v0.4.51 — reconciled 2026-10-29
 
 Exact commit `dba654e86a738299e51f26a6f32d37ea8e787012` completed all

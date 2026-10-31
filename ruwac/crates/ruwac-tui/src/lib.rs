@@ -432,8 +432,24 @@ fn status_layout(v: &Value, size: (u16, u16), status: &str) -> StatusLayout {
     } else {
         (columns * 2 / 3).min(columns.saturating_sub(10))
     };
+    let role = if v["size_role"] == "viewer" {
+        format!(
+            "Viewer {}×{}{} · ",
+            v["cols"],
+            v["rows"],
+            if v["rows"].as_u64().unwrap_or(0) > size.0 as u64
+                || v["cols"].as_u64().unwrap_or(0) > size.1 as u64
+            {
+                " cropped"
+            } else {
+                ""
+            }
+        )
+    } else {
+        String::new()
+    };
     let prefix = if status.trim().is_empty() {
-        format!("RUWAC {identity}{shared}")
+        format!("{role}RUWAC {identity}{shared}")
     } else {
         // Preserve the actual notice before spending the remaining prefix
         // space on identity; the dedicated window list still shows selection.
@@ -442,7 +458,7 @@ fn status_layout(v: &Value, size: (u16, u16), status: &str) -> StatusLayout {
             &identity,
             prefix_limit.saturating_sub(9 + copy::width(&notice)),
         );
-        format!("RUWAC {identity} · {notice}{shared}")
+        format!("{role}RUWAC {identity} · {notice}{shared}")
     };
     let prefix = elide(&prefix, prefix_limit);
     let mut layout = StatusLayout {
@@ -821,29 +837,49 @@ fn draw(v: &Value, status: &str, cache: &mut DrawCache) -> io::Result<()> {
 
     // Geometry/mode changes repaint completely. Ordinary typing only replaces
     // changed rows, avoiding full-screen ANSI/SSH traffic for a single glyph.
-    let rects: Vec<(u64, u64, u64, u64)> = v["panes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|p| {
-            let r = &p["rect"];
-            (
-                r["x"].as_u64().unwrap_or(0),
-                r["y"].as_u64().unwrap_or(0),
-                r["cols"].as_u64().unwrap_or(0),
-                r["rows"].as_u64().unwrap_or(0),
-            )
-        })
-        .collect();
-    for row in 0..u64::from(screen_rows.saturating_sub(1)) {
-        let right = rects
-            .iter()
-            .filter(|&&(_, y, _, h)| y <= row && row < y + h)
-            .map(|&(x, _, w, _)| x + w)
-            .max()
-            .unwrap_or(0);
-        if full && right < u64::from(screen_cols) {
-            out.push_str(&format!("\x1b[{};{}H\x1b[0m\x1b[K", row + 1, right + 1));
+    if full {
+        let rects: Vec<_> = v["panes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| {
+                let r = &p["rect"];
+                (
+                    r["x"].as_u64().unwrap_or(0),
+                    r["y"].as_u64().unwrap_or(0),
+                    r["cols"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        .min(p["grid"]["cols"].as_u64().unwrap_or(0)),
+                    r["rows"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        .min(p["grid"]["rows"].as_u64().unwrap_or(0)),
+                )
+            })
+            .collect();
+        for row in 0..u64::from(screen_rows.saturating_sub(1)) {
+            let mut covered: Vec<_> = rects
+                .iter()
+                .filter(|&&(_, y, _, h)| y <= row && row < y + h)
+                .map(|&(x, _, w, _)| (x.min(screen_cols as u64), (x + w).min(screen_cols as u64)))
+                .collect();
+            covered.sort_unstable();
+            let mut right = 0;
+            for (left, end) in covered {
+                if left > right {
+                    out.push_str(&format!(
+                        "\x1b[{};{}H\x1b[0m{}",
+                        row + 1,
+                        right + 1,
+                        " ".repeat((left - right) as usize)
+                    ));
+                }
+                right = right.max(end);
+            }
+            if right < u64::from(screen_cols) {
+                out.push_str(&format!("\x1b[{};{}H\x1b[0m\x1b[K", row + 1, right + 1));
+            }
         }
     }
     let active = v["active_pane"].as_str().unwrap_or("");
@@ -864,12 +900,23 @@ fn draw(v: &Value, status: &str, cache: &mut DrawCache) -> io::Result<()> {
             }
             if let Some(rows) = g["cells"].as_array() {
                 for (r, cells) in rows.iter().enumerate() {
+                    let bottom = u64::from(screen_rows.saturating_sub(1))
+                        .min(offset + p["rect"]["rows"].as_u64().unwrap_or(0));
+                    let right =
+                        u64::from(screen_cols).min(left + p["rect"]["cols"].as_u64().unwrap_or(0));
+                    if offset + r as u64 >= bottom || left >= right {
+                        break;
+                    }
                     if !cache.changed(p["id"].as_str().unwrap_or(""), r, cells) {
                         continue;
                     }
                     out.push_str(&format!("\x1b[{};{}H", offset + r as u64 + 1, left + 1));
                     let mut style = String::new();
-                    for cell in cells.as_array().unwrap() {
+                    let cells = cells.as_array().unwrap();
+                    for (col, cell) in cells.iter().enumerate() {
+                        if left + col as u64 >= right {
+                            break;
+                        }
                         if cell[1] == true {
                             continue;
                         }
@@ -878,13 +925,22 @@ fn draw(v: &Value, status: &str, cache: &mut DrawCache) -> io::Result<()> {
                             out.push_str(&format!("\x1b[{st}m"));
                             style = st;
                         }
-                        out.push_str(&safe(cell[0].as_str().unwrap_or(" ")));
+                        if left + col as u64 + 1 == right
+                            && cells.get(col + 1).is_some_and(|next| next[1] == true)
+                        {
+                            out.push(' ');
+                        } else {
+                            out.push_str(&safe(cell[0].as_str().unwrap_or(" ")));
+                        }
                     }
                 }
             }
         }
     }
     for ((row, col), direction) in divider_cells(v) {
+        if row >= u64::from(screen_rows.saturating_sub(1)) || col >= u64::from(screen_cols) {
+            continue;
+        }
         let glyph = match direction {
             1 => "│",
             2 => "─",
@@ -916,7 +972,9 @@ fn draw(v: &Value, status: &str, cache: &mut DrawCache) -> io::Result<()> {
         None => "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l",
     });
     if let Some((r, c)) = cursor {
-        out.push_str(&format!("\x1b[{};{}H\x1b[?25h", r + 1, c + 1));
+        if r < u64::from(screen_rows.saturating_sub(1)) && c < u64::from(screen_cols) {
+            out.push_str(&format!("\x1b[{};{}H\x1b[?25h", r + 1, c + 1));
+        }
     }
     let mut stdout = io::stdout().lock();
     stdout.write_all(out.as_bytes())?;
@@ -1523,6 +1581,14 @@ pub fn attach(socket: &Path, session: &str) -> io::Result<()> {
     attach_with_window(socket, session, None)
 }
 pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) -> io::Result<()> {
+    attach_with_role(socket, session, window, false)
+}
+pub fn attach_with_role(
+    socket: &Path,
+    session: &str,
+    window: Option<&str>,
+    viewer: bool,
+) -> io::Result<()> {
     STOP.store(false, Ordering::Relaxed);
     let config = Config::load()?;
     let mut s = verified_connect(socket)?;
@@ -1552,8 +1618,13 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
         }
         ancestor = parent;
     }
-    let limits =
-        ruwac_protocol::TerminalLimits::advertised(&call(&mut s, "capabilities", json!({}))?);
+    let capabilities = call(&mut s, "capabilities", json!({}))?;
+    let limits = ruwac_protocol::TerminalLimits::advertised(&capabilities);
+    if viewer && capabilities["non_sizing_viewer"] != 1 {
+        return Err(io::Error::other(
+            "This daemon cannot attach a non-sizing viewer; update it or choose an ordinary attachment explicitly",
+        ));
+    }
     if let Some(window) = window {
         if !ruwac_protocol::valid_id(window, "window")
             || !call(&mut s, "window.list", json!({"session":session}))?
@@ -1575,7 +1646,7 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
     call(
         &mut s,
         "session.attach",
-        json!({"session":session,"rows":size.0,"cols":size.1}),
+        json!({"session":session,"rows":size.0,"cols":size.1,"size_role":if viewer {"viewer"} else {"legacy"}}),
     )?;
     if let Some(window) = window {
         call(&mut s, "window.select", json!({"window":window}))?;
@@ -2320,6 +2391,9 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
                             .as_str()
                             .is_some_and(|id| running_windows.remove(id));
                     if completed {
+                        if viewer {
+                            break;
+                        }
                         let pinned = window
                             .is_some_and(|window| snapshot["window"].as_str() == Some(window));
                         let panes = match call(&mut s, "pane.list", json!({"session":session})) {

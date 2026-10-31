@@ -220,15 +220,41 @@ impl Remote {
         Ok(v)
     }
     pub fn attach(&self, session: &str) -> io::Result<()> {
-        if !ruwac_protocol::valid_id(session, "session") {
+        self.attach_with_options(session, None, false)
+    }
+    pub fn attach_with_options(
+        &self,
+        session: &str,
+        window: Option<&str>,
+        viewer: bool,
+    ) -> io::Result<()> {
+        if !ruwac_protocol::valid_id(session, "session")
+            || window.is_some_and(|w| !ruwac_protocol::valid_id(w, "window"))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid session ID",
             ));
         }
-        let status = self
-            .command(true, &["attach", "--session", session])
-            .status()?;
+        if viewer {
+            let caps = self.rpc(&ruwac_protocol::request(
+                "capabilities",
+                serde_json::json!({}),
+            ))?;
+            if caps["result"]["non_sizing_viewer"] != 1 {
+                return Err(io::Error::other(
+                    "Remote daemon cannot attach a non-sizing viewer; update it or choose an ordinary attachment explicitly",
+                ));
+            }
+        }
+        let mut args = vec!["attach", "--session", session];
+        if let Some(window) = window {
+            args.extend(["--window", window]);
+        }
+        if viewer {
+            args.push("--viewer");
+        }
+        let status = self.command(true, &args).status()?;
         if status.success() {
             Ok(())
         } else {

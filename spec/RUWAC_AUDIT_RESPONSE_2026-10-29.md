@@ -1,5 +1,30 @@
 # Linux v0.4.50 audit: implementation ledger
 
+## Current reconciliation — 2026-10-31
+
+The dated table below describes the earlier review, not current delivery.
+Delivered v0.4.52 (`fca85c5ec0bc5a22a1895d363458fc9e025bb940`) qualifies the
+asynchronous selection, ordered wheel, terminal advisory indicator and release
+notes guard increments: 19 frozen categories, 25 public runtime phases and nine
+selection matrix cases passed. See [acceptance status](RUWAC_ACCEPTANCE_STATUS.md).
+Owner physical-device, busy-output/target-change, Windows and endurance cases
+remain open.
+
+P0 now has a scoped operational candidate for explicit non-sizing CLI/SSH
+attachments, preserving ordinary minimum-size behavior and the current recovery
+schema. Sixteen real PTY/TUI cases and three authenticated SSH cases pass,
+including unchanged child/grid/SIGWINCH and actual published-v0.4.52 refusal.
+Controller leases, takeover/release, local pan/fit and default GUI controls remain
+outside this increment; the separate larger audit is not wholesale integrated.
+See [the viewer contract](RUWAC_VIEWER_SIZING.md).
+
+The same candidate updates crypto-bigint to 0.7.10 and ctutils to 0.4.7.
+Headless and 229 desktop unit tests pass. The unsuppressed dependency scan still
+reports RSA0071 and maintenance warnings; this update does not fix RSA. Complete
+frozen and actual-public qualification remain required before a new release.
+
+## Historical review
+
 Reviewed 2026-10-29 against delivered v0.4.51, commit
 `dba654e86a738299e51f26a6f32d37ea8e787012`. The independent audit was
 source-only. Generated tests and owner observations below retain separate scope.

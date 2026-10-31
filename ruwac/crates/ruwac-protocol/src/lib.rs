@@ -111,7 +111,7 @@ pub fn client_call(
         params["max_response_bytes"] = json!(MAX_RENDER_FRAME);
     }
     let mut frame = call(method, params)?;
-    if method != "client.render" || frame["unchanged"] == true {
+    if method != "client.render" || frame["unchanged"] == true || frame["size_role"] == "viewer" {
         return Ok(frame);
     }
     let Some(panes) = frame["panes"].as_array() else {
