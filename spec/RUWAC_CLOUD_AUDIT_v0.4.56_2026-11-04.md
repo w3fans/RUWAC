@@ -1,6 +1,6 @@
 # RUWAC Linux source and documentation audit — v0.4.56 (2026-11-04)
 
-**Basis:** read-only inspection of public GitHub source and workflows at commit `a4be3f60dc12667e2e3bf5c727ba1b8b0ae7de7c`. Source manifest `ruwac/Cargo.toml` declares version `0.4.56`. At observation time, the most recent completed GitHub Release endpoint was `v0.4.55` and the v0.4.56 publication/quality workflows were still running. This is a **source/document audit, not a new compiled, hardware or external-machine acceptance**.
+**Basis:** read-only inspection of public GitHub source and workflows at commit `a4be3f60dc12667e2e3bf5c727ba1b8b0ae7de7c`. Source manifest `ruwac/Cargo.toml` declares version `0.4.56`. The `v0.4.56` GitHub Release was published on 2026-11-03 at 23:57:45 UTC. For the exact v0.4.56 commit, CI quality and privacy jobs completed successfully; the dependency-advisory job failed on the known desktop RSA finding. Publishing source and passing quality/privacy do not equal full security qualification. This is a **source/document audit, not a new compiled, hardware or external-machine acceptance**.
 
 ## Executive assessment
 
