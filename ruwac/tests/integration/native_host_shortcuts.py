@@ -278,6 +278,10 @@ try:
  copied=[x for x in after_copy if x['id']not in old_ids]
  assert copied and all(x['machine_id']not in old_machines and x['name'].endswith(' (copy)')for x in copied)
  assert all(x['secret_reference']==x['id']and x['group']==''for x in copied)
+ # The editor stays open on the copy (Copy machine is a dialog action now).
+ # The copy's editor opens once the original has closed; poll until it exists.
+ def present(name):return next((x for x in command('host-shortcuts')['widgets']if x['name']==name),{})
+ eventually(lambda:str(present('machine-field-0').get('entry','')).endswith(' (copy)')and present('machine-copy').get('visible'))
  checks.append('visible-copy-machine-new-identities-editable-category-and-real-Up-Down-dropdown-selection')
  # Both context routes create SSH-only bookmarks; no installer/network is run.
  before_trace=trace.read_bytes()if trace.exists()else b''

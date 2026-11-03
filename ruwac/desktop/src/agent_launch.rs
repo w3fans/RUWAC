@@ -19,7 +19,41 @@ fn agent_command(agent: u32) -> Result<(&'static str, &'static str), String> {
 /// (which verifies the signed prebuilt package) come from the system's signed
 /// repositories via sudo/dnf, which may ask for the password in the terminal;
 /// then the verified prebuilt per-user install runs unchanged.
+/// The Fedora COPR project that publishes source-built `ruwac` packages.
+pub const COPR_PROJECT: &str = "zvegelj/ruwac";
+
+/// Fedora machines get RUWAC from COPR through DNF: install it when missing
+/// (replacing a per-user copy or GitHub testing RPM), otherwise upgrade it only
+/// when DNF reports a newer build, so routine launches need no password. Other
+/// systems, or a Fedora release COPR does not build for, keep the verified
+/// per-user installation.
+fn copr_function() -> String {
+    format!(
+        "copr_ruwac() {{ \
+           command -v dnf >/dev/null 2>&1 && grep -qx 'ID=fedora' /etc/os-release || return 1; \
+           if grep -qs '\"kind\":\"distribution\"' /usr/share/ruwac/rpm-installation.json; then \
+             dnf -q check-upgrade ruwac >/dev/null 2>&1; [ $? = 100 ] || return 0; \
+             echo 'Updating RUWAC from Fedora COPR {copr} (sudo may ask for your password)'; \
+             packages=ruwac; rpm -q ruwac-desktop >/dev/null 2>&1 && packages='ruwac ruwac-desktop'; \
+             sudo dnf -y upgrade $packages; return; \
+           fi; \
+           echo 'Installing RUWAC from Fedora COPR {copr} (sudo may ask for your password)'; \
+           {{ dnf copr --help >/dev/null 2>&1 || sudo dnf -y install dnf5-plugins; }} || return 1; \
+           sudo dnf -y copr enable {copr} || return 1; \
+           packages=ruwac; rpm -q ruwac-desktop >/dev/null 2>&1 && packages='ruwac ruwac-desktop'; \
+           if rpm -q ruwac >/dev/null 2>&1; then \
+             sudo dnf -y upgrade $packages && \
+             {{ grep -qs '\"kind\":\"distribution\"' /usr/share/ruwac/rpm-installation.json || \
+               sudo dnf -y reinstall $packages; }}; \
+           else sudo dnf -y install ruwac; fi && \
+           grep -qs '\"kind\":\"distribution\"' /usr/share/ruwac/rpm-installation.json || return 1; \
+           /usr/bin/ruwac update >/dev/null 2>&1; return 0; \
+         }}",
+        copr = COPR_PROJECT
+    )
+}
 fn install_ruwac_command(binary: &str) -> String {
+    let copr = copr_function();
     let deps = "missing=''; command -v python3 >/dev/null 2>&1 || missing=\"$missing python3\"; \
                 command -v gh >/dev/null 2>&1 || missing=\"$missing gh\"; \
                 if [ -n \"$missing\" ]; then \
@@ -29,7 +63,7 @@ fn install_ruwac_command(binary: &str) -> String {
                   else echo \"Install$missing with your package manager, then retry.\"; exit 1; fi; \
                 fi";
     format!(
-        "{deps}; python3 -c {} --remote-cli {} --bootstrap --headless --prebuilt",
+        "{copr}; copr_ruwac && exit 0; {deps}; python3 -c {} --remote-cli {} --bootstrap --headless --prebuilt",
         quote(include_str!("../../../scripts/update-user.py")),
         quote(binary)
     )
@@ -449,6 +483,53 @@ mod tests {
         assert!(command.contains("command -v"));
         assert!(!command.contains("|| test -x"));
         assert!(plain.last().unwrap().contains(env!("CARGO_PKG_VERSION")));
+    }
+    #[test]
+    fn fedora_machines_install_ruwac_from_copr_with_dnf() {
+        let command = install_ruwac_command("ruwac");
+        assert!(command.contains(&format!("copr enable {COPR_PROJECT}")));
+        assert!(command.ends_with("--bootstrap --headless --prebuilt"));
+        let fedora = fs::read_to_string("/etc/os-release")
+            .is_ok_and(|text| text.lines().any(|line| line == "ID=fedora"));
+        if !fedora {
+            return;
+        }
+        // Without a distribution package: enable COPR and install with DNF.
+        // The stubs never install anything, so the marker check fails and the
+        // caller falls back to the per-user installer.
+        let dir = std::env::temp_dir().join(format!("ruwac-copr-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("calls");
+        for (name, body) in [("dnf", "exit 0"), ("rpm", "exit 1"), ("sudo", "exit 0")] {
+            let path = dir.join(name);
+            fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\necho \"{name} $*\" >> '{}'\n{body}\n",
+                    log.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("{}; copr_ruwac; echo rc=$?", copr_function()))
+            .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+            .output()
+            .unwrap();
+        let calls = fs::read_to_string(&log).unwrap_or_default();
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            String::from_utf8_lossy(&output.stdout).ends_with("rc=1\n"),
+            "{output:?}"
+        );
+        assert!(
+            calls.contains(&format!("sudo dnf -y copr enable {COPR_PROJECT}")),
+            "{calls}"
+        );
+        assert!(calls.contains("sudo dnf -y install ruwac"), "{calls}");
+        assert!(!calls.contains("upgrade"), "{calls}");
     }
     #[test]
     fn defaults_open_resume_pickers_without_a_prompt() {

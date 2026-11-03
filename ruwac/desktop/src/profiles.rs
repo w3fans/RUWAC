@@ -3328,6 +3328,14 @@ fn editor_seed(
     } else {
         "machine-connection-editor"
     });
+    if existing.is_some() {
+        // A dialog action beside Save; the copy then opens in this editor.
+        let copy = dialog.add_button("Copy machine…", gtk::ResponseType::Other(1));
+        copy.set_widget_name("machine-copy");
+        copy.set_tooltip_text(Some(
+            "Save a copy with new machine and endpoint identities, then edit the copy",
+        ));
+    }
     dialog.add_button("Cancel", gtk::ResponseType::Cancel);
     dialog.add_button("Save", gtk::ResponseType::Accept);
     dialog.add_button("Save & Connect", gtk::ResponseType::Other(5));
@@ -3832,14 +3840,6 @@ fn editor_seed(
         .margin_end(16)
         .build();
     form.set_widget_name("machine-editor-form");
-    if existing.is_some() {
-        let copy = gtk::Button::with_label("Copy machine…");
-        copy.set_widget_name("machine-copy");
-        copy.set_tooltip_text(Some("Save a copy with new machine and endpoint identities"));
-        let d = dialog.clone();
-        copy.connect_clicked(move |_| d.response(gtk::ResponseType::Other(1)));
-        form.append(&copy);
-    }
     form_row(&form, "Machine name", &fields[0]);
     form_row(&form, "Host / address and port", &fields[3]);
     form_row(&form, "Connection type", &protocol);
@@ -4396,6 +4396,25 @@ fn editor_seed(
     for d in [&protocol, &display, &clipboard, &rdp_mode, &login, &backend] {
         dropdown_arrows(d);
     }
+    let reopen = {
+        let (button, store, status, open, agents) = (
+            button.clone(),
+            store.clone(),
+            status.clone(),
+            open.clone(),
+            agent_launcher.clone(),
+        );
+        move |id: String| {
+            editor(
+                &button,
+                store.clone(),
+                Some(id),
+                status.clone(),
+                open.clone(),
+                agents.clone(),
+            )
+        }
+    };
     dialog.connect_response(move|d,response|{
         if response==gtk::ResponseType::Other(2) || response==gtk::ResponseType::Other(4) {
             let machine=response==gtk::ResponseType::Other(4);if store.borrow().items.iter().any(|p|(p.id==original.id||(machine&&p.machine_id==original.machine_id))&&store.borrow().active.contains_key(&p.id)){info.set_text("This profile is used by an opened tab. Close all of its connection tabs before deleting it.");return;}
@@ -4429,7 +4448,9 @@ fn editor_seed(
         // the parent tab while Wayland still owns this dialog's input context.
         gtk::prelude::GtkWindowExt::set_focus(d,None::<&gtk::Widget>);
         refresh_widgets(parent.as_ref().map(|w|w.upcast_ref::<gtk::Widget>()));d.close();
-        if response==gtk::ResponseType::Other(5){let(store,status,open)=(store.clone(),status.clone(),open.clone());gtk::glib::idle_add_local_once(move||{if let Some((profile,sink,lease))=acquire(&store,&status,&saved_id){open(profile,sink,lease);}});}
+        if response==gtk::ResponseType::Other(5){let(store,status,open,saved_id)=(store.clone(),status.clone(),open.clone(),saved_id.clone());gtk::glib::idle_add_local_once(move||{if let Some((profile,sink,lease))=acquire(&store,&status,&saved_id){open(profile,sink,lease);}});}
+        // Keep editing: the saved copy replaces the original in this editor.
+        if response==gtk::ResponseType::Other(1){status.set_text("Machine copied; editing the copy");let reopen=reopen.clone();gtk::glib::idle_add_local_once(move||reopen(saved_id));}
     });
     dialog.present();
 }

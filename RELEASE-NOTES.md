@@ -1,23 +1,23 @@
-RUWAC v0.4.54 lets you paste images into Claude Code and adds from-source
-Fedora/COPR packaging.
+RUWAC v0.4.55 installs RUWAC on remote Fedora machines from COPR and makes
+copying a machine quicker.
 
-With Claude Code running in a local RUWAC terminal, Ctrl+V with an image in the
-clipboard attaches it to the Claude Code draft, as it already did for Codex. It
-appears as `[Image #N]`; nothing is submitted. RUWAC recognizes Claude Code's
-native binary and its npm package, and pastes only once its input box is ready.
-Remote targets need this version of RUWAC on that machine too. "Attach PNG to
-remote agent…" now lists Claude Code panes as well.
+"Install / update remote RUWAC CLI…" and agent launches with automatic RUWAC
+installation now use the Fedora COPR packages (`zvegelj/ruwac`) through DNF on
+Fedora machines. A machine without the package enables COPR and installs it,
+replacing a GitHub testing RPM of the same version and retiring a per-user copy;
+`ruwac-desktop` moves along when it is installed. A machine with the package
+upgrades only when DNF reports a newer build, so routine agent launches ask for
+no password. Other systems, and Fedora releases that COPR does not build for,
+keep the verified per-user installation.
 
-`ruwac/packaging/fedora` builds `ruwac` and `ruwac-desktop` from source with
-vendored crates, for COPR now and Fedora review later. Packages built this way
-are updated only by DNF: `ruwac update` and the desktop update button say so and
-never contact GitHub. With such a package installed, the per-user installer and
-updater no longer install or update a second copy, and the packaged `ruwac
-update` retires a leftover per-user copy's command links, launcher and update
-timer. Its files stay in `~/.local/lib/ruwac`, so running daemons and sessions
-continue. Replacing a GitHub testing RPM with the DNF package also removes that
-RPM's stale update-timer link. The GitHub testing RPMs and per-user bundles are
-otherwise unchanged.
+"Copy machine…" moved from the machine form to the properties dialog's action
+bar, beside Save. It saves the copy with new machine and endpoint identities and
+opens it in the editor.
+
+Install or update a Fedora 44 machine directly with:
+
+    sudo dnf copr enable zvegelj/ruwac
+    sudo dnf install ruwac ruwac-desktop
 
 Installed-file updates preserve existing daemons and running programs. Reopen
 the GUI or detach/reattach a CLI frontend to load new client code. The known RSA

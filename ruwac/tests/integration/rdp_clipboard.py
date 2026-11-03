@@ -468,6 +468,8 @@ try:
   command('gui','profiles',search='R5 renamed');r=command('gui','profile-editor',operation='edit',response='endpoint',fields={'13':0,'3':'127.0.0.1:3389'});siblings=[p for p in r['items'] if p['machine_id']==original['machine_id']];assert len(siblings)==2 and len({p['id'] for p in siblings})==2
   before=len(r['items']);r=command('gui','profile-editor',operation='new',response='cancel',fields={'0':'Cancelled','3':'localhost:22'});assert len(r['items'])==before
   r=command('gui','profile-editor',operation='edit',response='duplicate');assert len(r['items'])==before+2
+  # Copy machine then opens the copy in the editor; close it like a user would.
+  time.sleep(.3);command('gui','profile-editor',operation='apply',response='cancel')
   r=command('gui','profile-editor',operation='edit',response='delete-machine',confirm=True);assert len(r['items'])==before
   stored=root/'config/RUWAC/machines.json';on_disk=json.loads(stored.read_text());assert on_disk['schema']==1 and len(on_disk['items'])==before
   assert (stored.parent/'machines.previous.json').stat().st_mode&0o777==0o600

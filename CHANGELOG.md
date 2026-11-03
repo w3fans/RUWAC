@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## v0.4.55 — 2026-11-03 — Stable source release
+
+- "Copy machine…" is now a button in the machine properties dialog's action
+  bar, beside Save, instead of inside the form. It saves the copy with new
+  machine and endpoint identities and opens that copy in the editor, so you can
+  adjust it right away.
+- Installing and updating RUWAC on remote Fedora machines ("Install / update
+  remote RUWAC CLI…" and agent launches with automatic RUWAC installation) now
+  uses the Fedora COPR packages (`zvegelj/ruwac`) through DNF. Machines without
+  the package enable COPR and install it, replacing a GitHub testing RPM of the
+  same version and retiring a per-user copy; `ruwac-desktop` moves along when
+  installed. Machines with the package upgrade only when DNF reports a newer
+  build, so routine launches ask for no password. Other systems, and Fedora
+  releases COPR does not build for, keep the verified per-user installation.
+
 ## v0.4.54 — 2026-11-03 — Stable source release
 
 - Paste images into Claude Code the way you already can into Codex: with Claude
