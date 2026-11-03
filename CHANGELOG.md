@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.4.56 — 2026-11-04 — Stable source release
+
+- Remote RUWAC updates from Fedora COPR no longer miss a new build or touch other
+  repositories: the update check and installation refresh DNF metadata (a stale
+  cache used to report "Nothing to do" for up to two days), and DNF uses only
+  RUWAC's COPR and Fedora's own repositories, so a third-party repository's
+  signing key is never accepted on your behalf by `dnf -y`.
+
 ## v0.4.55 — 2026-11-03 — Stable source release
 
 - "Copy machine…" is now a button in the machine properties dialog's action

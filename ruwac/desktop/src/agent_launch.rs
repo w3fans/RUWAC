@@ -31,25 +31,29 @@ fn copr_function() -> String {
     format!(
         "copr_ruwac() {{ \
            command -v dnf >/dev/null 2>&1 && grep -qx 'ID=fedora' /etc/os-release || return 1; \
+           repo=copr:copr.fedorainfracloud.org:{owner}:{name}; \
+           repos=\"--repo=$repo --repo=fedora --repo=updates\"; \
            if grep -qs '\"kind\":\"distribution\"' /usr/share/ruwac/rpm-installation.json; then \
-             dnf -q check-upgrade ruwac >/dev/null 2>&1; [ $? = 100 ] || return 0; \
+             dnf -q --refresh check-upgrade --repo=$repo ruwac >/dev/null 2>&1; [ $? = 100 ] || return 0; \
              echo 'Updating RUWAC from Fedora COPR {copr} (sudo may ask for your password)'; \
              packages=ruwac; rpm -q ruwac-desktop >/dev/null 2>&1 && packages='ruwac ruwac-desktop'; \
-             sudo dnf -y upgrade $packages; return; \
+             sudo dnf -y --refresh upgrade $repos $packages; return; \
            fi; \
            echo 'Installing RUWAC from Fedora COPR {copr} (sudo may ask for your password)'; \
            {{ dnf copr --help >/dev/null 2>&1 || sudo dnf -y install dnf5-plugins; }} || return 1; \
            sudo dnf -y copr enable {copr} || return 1; \
            packages=ruwac; rpm -q ruwac-desktop >/dev/null 2>&1 && packages='ruwac ruwac-desktop'; \
            if rpm -q ruwac >/dev/null 2>&1; then \
-             sudo dnf -y upgrade $packages && \
+             sudo dnf -y --refresh upgrade $repos $packages && \
              {{ grep -qs '\"kind\":\"distribution\"' /usr/share/ruwac/rpm-installation.json || \
-               sudo dnf -y reinstall $packages; }}; \
-           else sudo dnf -y install ruwac; fi && \
+               sudo dnf -y reinstall $repos $packages; }}; \
+           else sudo dnf -y --refresh install $repos ruwac; fi && \
            grep -qs '\"kind\":\"distribution\"' /usr/share/ruwac/rpm-installation.json || return 1; \
            /usr/bin/ruwac update >/dev/null 2>&1; return 0; \
          }}",
-        copr = COPR_PROJECT
+        copr = COPR_PROJECT,
+        owner = COPR_PROJECT.split('/').next().unwrap_or_default(),
+        name = COPR_PROJECT.split('/').nth(1).unwrap_or_default()
     )
 }
 fn install_ruwac_command(binary: &str) -> String {
@@ -528,7 +532,15 @@ mod tests {
             calls.contains(&format!("sudo dnf -y copr enable {COPR_PROJECT}")),
             "{calls}"
         );
-        assert!(calls.contains("sudo dnf -y install ruwac"), "{calls}");
+        // Only RUWAC's COPR and Fedora's official repositories are used, with
+        // fresh metadata: third-party repositories' keys are never accepted
+        // on the user's behalf.
+        assert!(
+            calls.contains(
+                "sudo dnf -y --refresh install --repo=copr:copr.fedorainfracloud.org:zvegelj:ruwac --repo=fedora --repo=updates ruwac"
+            ),
+            "{calls}"
+        );
         assert!(!calls.contains("upgrade"), "{calls}");
     }
     #[test]

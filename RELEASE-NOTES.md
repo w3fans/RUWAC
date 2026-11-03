@@ -1,23 +1,15 @@
-RUWAC v0.4.55 installs RUWAC on remote Fedora machines from COPR and makes
-copying a machine quicker.
+RUWAC v0.4.56 makes remote RUWAC updates from Fedora COPR dependable.
 
-"Install / update remote RUWAC CLI…" and agent launches with automatic RUWAC
-installation now use the Fedora COPR packages (`zvegelj/ruwac`) through DNF on
-Fedora machines. A machine without the package enables COPR and installs it,
-replacing a GitHub testing RPM of the same version and retiring a per-user copy;
-`ruwac-desktop` moves along when it is installed. A machine with the package
-upgrades only when DNF reports a newer build, so routine agent launches ask for
-no password. Other systems, and Fedora releases that COPR does not build for,
-keep the verified per-user installation.
+On remote Fedora machines, "Install / update remote RUWAC CLI…" and agent
+launches with automatic RUWAC installation now refresh DNF metadata before
+checking for and installing a new build. Previously a stale DNF cache could
+report "Nothing to do" for up to two days after a release. DNF now uses only
+RUWAC's COPR repository and Fedora's own repositories, so a third-party
+repository's signing key is never accepted on your behalf.
 
-"Copy machine…" moved from the machine form to the properties dialog's action
-bar, beside Save. It saves the copy with new machine and endpoint identities and
-opens it in the editor.
+Update a Fedora machine directly with:
 
-Install or update a Fedora 44 machine directly with:
-
-    sudo dnf copr enable zvegelj/ruwac
-    sudo dnf install ruwac ruwac-desktop
+    sudo dnf upgrade --refresh ruwac ruwac-desktop
 
 Installed-file updates preserve existing daemons and running programs. Reopen
 the GUI or detach/reattach a CLI frontend to load new client code. The known RSA
