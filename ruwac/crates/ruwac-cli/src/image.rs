@@ -52,12 +52,19 @@ pub fn attach_staged(
         "pane.attachImage",
         json!({"pane":pane,"path":staged.path,"foreground_pid":pid}),
     ));
-    if let Err(error) = queued {
-        return Err(io::Error::other(format!(
-            "{error}; staged PNG retained at {}, inspect the draft before retrying",
-            staged.path.display()
-        )));
-    }
+    let adapter = match queued {
+        // Older daemons attach only to Codex and do not name the adapter.
+        Ok(reply) => reply["result"]["adapter"]
+            .as_str()
+            .unwrap_or("codex")
+            .to_owned(),
+        Err(error) => {
+            return Err(io::Error::other(format!(
+                "{error}; staged PNG retained at {}, inspect the draft before retrying",
+                staged.path.display()
+            )));
+        }
+    };
     let end = Instant::now() + Duration::from_secs(3);
     let mut observed = false;
     while Instant::now() < end {
@@ -72,9 +79,9 @@ pub fn attach_staged(
         }
         std::thread::sleep(Duration::from_millis(40));
     }
-    // Keep the staged file: Codex reads it when the user explicitly submits their draft.
+    // Keep the staged file: the agent reads it when the user explicitly submits their draft.
     Ok(
-        json!({"pane":pane,"path":staged.path,"sha256":staged.sha256,"bytes":staged.bytes,"width":staged.width,"height":staged.height,"file_mode":384,"directory_mode":448,"queued":true,"draft_attachment_observed":observed,"consumed":false,"submitted":false,"adapter":"codex"}),
+        json!({"pane":pane,"path":staged.path,"sha256":staged.sha256,"bytes":staged.bytes,"width":staged.width,"height":staged.height,"file_mode":384,"directory_mode":448,"queued":true,"draft_attachment_observed":observed,"consumed":false,"submitted":false,"adapter":adapter}),
     )
 }
 

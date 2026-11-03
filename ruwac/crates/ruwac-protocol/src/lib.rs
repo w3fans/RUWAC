@@ -360,24 +360,28 @@ mod tests {
     }
 }
 
-/// Detect the distribution marker adjacent to this executable's installation.
+/// The packaging marker adjacent to this executable's installation, if any.
 /// Version equality is intentionally unnecessary: an older process survives RPM upgrades.
-pub fn managed_rpm_installation(executable: &std::path::Path) -> bool {
-    let Some(prefix) = executable.parent().and_then(std::path::Path::parent) else {
-        return false;
-    };
+fn installation_kind(executable: &std::path::Path) -> Option<String> {
+    let prefix = executable.parent().and_then(std::path::Path::parent)?;
     let marker = prefix.join("share/ruwac/rpm-installation.json");
-    let Ok(metadata) = marker.metadata() else {
-        return false;
-    };
+    let metadata = marker.metadata().ok()?;
     if !metadata.is_file() || metadata.len() > 8192 {
-        return false;
+        return None;
     }
-    std::fs::read(marker)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .is_some_and(|value| value["kind"] == "fedora-testing-rpm")
+    let value: Value = serde_json::from_slice(&std::fs::read(marker).ok()?).ok()?;
+    value["kind"].as_str().map(str::to_owned)
 }
+/// Upstream testing RPMs from GitHub, updated by RUWAC's verified system updater.
+pub fn managed_rpm_installation(executable: &std::path::Path) -> bool {
+    installation_kind(executable).as_deref() == Some("fedora-testing-rpm")
+}
+/// A distribution package (COPR or Fedora): updates come only from the
+/// system package manager, never from RUWAC's own GitHub updater.
+pub fn distribution_installation(executable: &std::path::Path) -> bool {
+    installation_kind(executable).as_deref() == Some("distribution")
+}
+pub const DISTRIBUTION_UPDATE_HINT: &str = "RUWAC is installed from a distribution package; update it with your package manager: sudo dnf upgrade ruwac ruwac-desktop";
 
 #[cfg(test)]
 mod split_exit_tests {

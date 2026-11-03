@@ -29,30 +29,30 @@ impl State {
             .foreground_group()
             .filter(|g| *g > 0)
             .ok_or_else(|| Error::new("STALE_TARGET", "foreground unavailable"))?;
+        let agent = ruwac_pty::attachment::validate_process(group as u32)
+            .map_err(|e| Error::new("STALE_TARGET", e.to_string()))?;
         let screen = p.term.capture(100);
-        // Codex can paint its empty composer before model/image capabilities are loaded.
-        // Refuse that startup state rather than inserting a literal filename into the draft.
-        let model_ready = ruwac_pty::attachment::model_ready(&screen);
+        // An agent can paint its empty composer before it accepts images (Codex
+        // loads model capabilities first). Refuse that startup state rather
+        // than inserting a literal filename into the draft.
         if v["foreground_pid"].as_i64() != Some(group as i64)
             || w.active != p.id
             || s.active != w.id
-            || !model_ready
+            || !ruwac_pty::attachment::ready(agent, &screen)
             || !p.term.paste()
         {
             return Err(Error::new(
                 "STALE_TARGET",
-                "selected foreground Codex with bracketed paste required",
+                "selected foreground Codex or Claude Code with bracketed paste required",
             ));
         }
-        ruwac_pty::attachment::validate_process(group as u32)
-            .map_err(|e| Error::new("STALE_TARGET", e.to_string()))?;
         if pty.foreground_group() != Some(group) {
             return Err(Error::new("STALE_TARGET", "foreground changed"));
         }
         pty.send(format!("\x1b[200~{path}\x1b[201~").into_bytes())
             .map_err(|e| Error::new("BACKPRESSURE", e))?;
         Ok(
-            json!({"pane":p.id,"queued":true,"attached":false,"submitted":false,"adapter":"codex","foreground_pid":group}),
+            json!({"pane":p.id,"queued":true,"attached":false,"submitted":false,"adapter":agent.name(),"foreground_pid":group}),
         )
     }
 }

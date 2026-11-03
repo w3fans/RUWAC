@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## v0.4.54 — 2026-11-03 — Stable source release
+
+- Paste images into Claude Code the way you already can into Codex: with Claude
+  Code running in a local RUWAC terminal, Ctrl+V with an image in the clipboard
+  attaches it to the Claude Code draft (it appears as `[Image #N]`; nothing is
+  submitted). Claude Code is recognized as its native binary or its npm package,
+  and only once its input box is ready. Remote targets need RUWAC updated on that
+  machine too. "Attach PNG to remote agent…" now lists Claude Code panes as well.
+- Add from-source Fedora/COPR packaging in `ruwac/packaging/fedora`: a spec that
+  builds both packages from source with vendored crates, a script producing the
+  SRPM, a COPR "make srpm" entry point and AppStream metadata. Packages built
+  this way are updated only by DNF: `ruwac update` and the desktop update button
+  say so and never contact GitHub. The GitHub testing RPMs are unchanged.
+- Keep a single RUWAC installation once the DNF package is installed: the
+  per-user installer and updater no longer install, update or check a second
+  copy beside it, and `ruwac update` (from the package) retires a leftover
+  per-user copy by removing only its own command links, launcher and update
+  timer. Its files stay in `~/.local/lib/ruwac`, so a running daemon and its
+  sessions (including Codex/Claude Code) keep working and are reused by the
+  packaged client. Replacing a GitHub testing RPM also removes its stale update
+  timer link.
+
 ## v0.4.53 — 2026-10-31 — Stable source release
 
 - Add explicit non-sizing terminal viewers with `attach --viewer` (`-O`), locally

@@ -381,6 +381,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         if host.is_some() || explicit_socket.is_some() {
             return Err("run updates locally on each machine, without --host or --socket".into());
         }
+        if std::env::current_exe().is_ok_and(|exe| ruwac_protocol::distribution_installation(&exe))
+        {
+            // DNF owns updates. Retire a leftover per-user copy (its command
+            // links, launcher and timer) so it no longer shadows this package;
+            // its running daemon and sessions are untouched.
+            let status = std::process::Command::new("python3")
+                .arg("-c")
+                .arg(include_str!("../../../../scripts/update-user.py"))
+                .args(["--retire-user", "--current", env!("CARGO_PKG_VERSION")])
+                .status()?;
+            if !status.success() {
+                return Err(ruwac_protocol::DISTRIBUTION_UPDATE_HINT.into());
+            }
+            return Ok(());
+        }
         let managed =
             std::env::current_exe().is_ok_and(|exe| ruwac_protocol::managed_rpm_installation(&exe));
         let mut update = std::process::Command::new("python3");

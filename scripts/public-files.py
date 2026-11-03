@@ -32,11 +32,13 @@ VENDOR_FILES |= {
     'ruwac/desktop/vendor/ironrdp-graphics/src/zgfx/test_assets/encoded.3.bin',
     'ruwac/desktop/vendor/ironrdp-graphics/src/zgfx/test_assets/encoded.4.bin',
 }
+# From-source Fedora/COPR packaging (the COPR "make srpm" method reads .copr/Makefile).
+FEDORA_FILES={'.copr/Makefile'}|{'ruwac/packaging/fedora/'+name for name in ['ruwac.spec','make-sources.sh','si.z4.ruwac.metainfo.xml','README.md']}
 GITHUB_FILES={'.github/workflows/release.yml','.github/workflows/quality.yml','.github/workflows/labels.yml','.github/CODEOWNERS','.github/PULL_REQUEST_TEMPLATE.md','.github/ISSUE_TEMPLATE/bug_report.yml','.github/ISSUE_TEMPLATE/feature_request.yml','.github/ISSUE_TEMPLATE/config.yml','.github/scripts/label-pr.py','.github/scripts/test-label-pr.py'}
 FORBIDDEN={'.agents','.codex','.claude','.kimi','.githooks','.vscode','.aws','AGENTS.md','CLAUDE.md','SKILL.md','FIRST-PROMPT.md','OWNER-SPIKE-SPEC.md'}
 def files(root):
  out=[]
- candidates=[root/f for f in ROOT_FILES]
+ candidates=[root/f for f in ROOT_FILES]+[root/'.copr/Makefile']
  for directory in ['architecture','scripts','ruwac','.github','spec']:
   candidates.extend((root/directory).rglob('*'))
  for p in candidates:
@@ -54,6 +56,7 @@ def files(root):
   elif r.parts[0]=='ruwac' and r.parts[1]=='gui' and r.suffix=='.py':out.append(r)
   elif r.parts[0]=='architecture' and len(r.parts)==2 and r.name in ARCH_FILES:out.append(r)
   elif r.as_posix() in GITHUB_FILES:out.append(r)
+  elif r.as_posix() in FEDORA_FILES:out.append(r)
   elif r.as_posix()=='ruwac/tests/fixtures/web_loopback.c':out.append(r)
   elif r.parts[0]=='scripts' and len(r.parts)==2 and r.name in SCRIPT_FILES:out.append(r)
   elif r.parts[0]=='ruwac' and ((r.name in {'Cargo.toml','Cargo.lock'} and len(r.parts)<=4) or (r.suffix=='.rs' and 'src' in r.parts) or (r.suffix=='.py' and r.parts[1]=='tests')):out.append(r)

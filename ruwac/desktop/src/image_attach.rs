@@ -23,7 +23,7 @@ fn target(rpc: &mut Rpc, session: &str, pane: &str, pid: Option<u64>) -> io::Res
     let job = rpc.call("job.query", json!({"pane":pane}))?;
     let current = job["foreground"]["pid"]
         .as_u64()
-        .ok_or_else(|| io::Error::other("Live Codex foreground unavailable"))?;
+        .ok_or_else(|| io::Error::other("Live Codex or Claude Code foreground unavailable"))?;
     if job["session"] != session || job["selected"] != true || pid.is_some_and(|pid| pid != current)
     {
         return Err(io::Error::other("Image attachment target changed"));
@@ -36,13 +36,23 @@ fn target(rpc: &mut Rpc, session: &str, pane: &str, pid: Option<u64>) -> io::Res
         || !selected.is_some_and(|p| p["grid"]["bracketed_paste"] == true && p["ended"] != true)
     {
         return Err(io::Error::other(
-            "Select a live Codex pane with bracketed paste enabled",
+            "Select a live Codex or Claude Code pane with bracketed paste enabled",
         ));
     }
     let screen = rpc.call("pane.capture", json!({"pane":pane,"lines":100}))?;
-    if !guard::model_ready(screen["text"].as_str().unwrap_or("")) {
+    // A local nested RUWAC client hides the agent behind its own PTY; its
+    // footer alone decides whether Ctrl+V may be forwarded.
+    let text = screen["text"].as_str().unwrap_or("");
+    let ready = match u32::try_from(current)
+        .ok()
+        .and_then(guard::foreground_agent)
+    {
+        Some(agent) => guard::ready(agent, text),
+        None => guard::ready(guard::Agent::Codex, text) || guard::ready(guard::Agent::Claude, text),
+    };
+    if !ready {
         return Err(io::Error::other(
-            "Wait until Codex has loaded an image-capable model",
+            "Wait until the agent's input box is ready (Codex loads its model first)",
         ));
     }
     Ok(current)
@@ -61,7 +71,7 @@ pub fn attach(
     let path = path
         .to_str()
         .ok_or_else(|| io::Error::other("Image path is not UTF-8"))?;
-    // A local nested TUI owns another PTY, so its Codex process is not in
+    // A local nested TUI owns another PTY, so its agent process is not in
     // this foreground group. Preserve the user's Ctrl+V instead of treating
     // the visible model footer as permission to inject a path through it.
     if native_clipboard_key && local_ruwac_foreground(pid) {
@@ -176,7 +186,8 @@ fn clipboard_route_inner(
     };
     if !valid(view) {
         done(Err(
-            "Select and focus the intended Codex pane before attaching an image".into(),
+            "Select and focus the intended Codex or Claude Code pane before attaching an image"
+                .into(),
         ));
         return;
     }
@@ -294,7 +305,7 @@ fn clipboard_route_inner(
     );
 }
 
-/// Local Codex image keys use the same guarded route as the explicit button.
+/// Local Codex/Claude Code image keys use the same guarded route as the explicit button.
 /// Screen text is only a routing hint; worker process/file/model checks remain
 /// authoritative before a path can reach a draft. Other programs keep their keys.
 pub fn try_clipboard_paste(
@@ -334,7 +345,7 @@ pub fn try_clipboard_paste(
             && valid_view.upgrade().is_some_and(|v| v.root.is_mapped())
     });
     let weak = std::rc::Rc::downgrade(view);
-    view.warn("Reading clipboard PNG for the selected Codex draft…");
+    view.warn("Reading clipboard PNG for the selected agent draft…");
     clipboard_route_inner(
         view,
         directory,
@@ -351,12 +362,12 @@ pub fn try_clipboard_paste(
             }
             match result {
                 Ok(receipt) if receipt["native_clipboard_key_forwarded"] == true => view
-                    .warn("Ctrl+V forwarded to the nested RUWAC session; check the Codex draft."),
+                    .warn("Ctrl+V forwarded to the nested RUWAC session; check the agent draft."),
                 Ok(receipt)
                     if receipt["draft_attachment_observed"] == true
                         && receipt["focus_current"] == true =>
                 {
-                    view.warn("PNG attached to the Codex draft; submit it in Codex when ready.")
+                    view.warn("PNG attached to the draft; submit it when ready.")
                 }
                 Ok(_) => {
                     view.warn("Image attachment not confirmed; inspect the draft before retrying.")

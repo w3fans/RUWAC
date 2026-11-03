@@ -515,6 +515,60 @@ def update_units(prefix):
     return dict(zip(UNIT_NAMES, (service, timer)))
 
 
+DISTRIBUTION_HINT = ('RUWAC is installed from a distribution package; update it with your package '
+                     'manager: sudo dnf upgrade ruwac ruwac-desktop')
+
+
+def distribution_package():
+    """A COPR/Fedora package owns /usr/bin/ruwac and all updates (DNF)."""
+    marker = Path('/usr/share/ruwac/rpm-installation.json')
+    try:
+        if not Path('/usr/bin/ruwac').is_file() or marker.stat().st_size > 8192:
+            return False
+        return json.loads(marker.read_text()).get('kind') == 'distribution'
+    except (OSError, ValueError):
+        return False
+
+
+def retire_user_installation(prefix):
+    """Hand a per-user installation over to the distribution package.
+
+    Only RUWAC's own command links, launcher, resource links and update timer are
+    removed; ~/.local/lib/ruwac (and so running daemons, their sessions and
+    rollback) is kept. Anything edited or owned by another tool is preserved.
+    """
+    retired, kept = [], []
+    for name in ['ruwac', 'ruwac-desktop']:
+        path = prefix / 'bin' / name
+        if path.is_symlink() and os.readlink(path) == '../lib/ruwac/current/' + name:
+            path.unlink(); retired.append(str(path))
+        elif path.exists() or path.is_symlink():
+            kept.append(str(path))
+    for relative in ['share/man/man1/ruwac.1', 'share/icons/hicolor/scalable/apps/si.z4.ruwac.svg']:
+        path = prefix / relative
+        own = str(prefix / 'lib/ruwac') + '/'
+        if path.is_symlink() and os.path.normpath(os.path.join(path.parent, os.readlink(path))).startswith(own):
+            path.unlink(); retired.append(str(path))
+    launcher = prefix / 'share/applications/si.z4.ruwac.desktop'
+    try:
+        text = launcher.read_text() if launcher.is_file() and not launcher.is_symlink() else None
+    except OSError:
+        text = None
+    if text is not None:
+        if text.startswith('[Desktop Entry]\nType=Application\nName=RUWAC\n') and str(prefix / 'bin/ruwac') in text:
+            launcher.unlink(); retired.append(str(launcher))
+        else:
+            kept.append(str(launcher))
+    if preferences().get('automatic_install'):
+        try:
+            automatic_install_setting(False, prefix)
+            retired.append('automatic per-user updates')
+        except ValueError as error:
+            kept.append(str(error))
+    return {'distribution': 'package-manager', 'available': False, 'skipped': DISTRIBUTION_HINT,
+            'retired': retired, 'kept': kept}
+
+
 def scheduler_directory():
     # The directory can contain other application units: retain existing permissions.
     base = settings_path().parent.parent / 'systemd'
@@ -852,6 +906,7 @@ def main():
     parser.add_argument('-H', '--headless', action='store_true')
     parser.add_argument('-e', '--running-executable', help=argparse.SUPPRESS)
     parser.add_argument('-m', '--managed-rpm', action='store_true', help=argparse.SUPPRESS)
+    modes.add_argument('--retire-user', action='store_true', help='Hand a per-user installation over to the distribution package')
     args = parser.parse_args()
     if not args.bootstrap and args.current == '0.0.0':
         parser.error('--current is required except for bootstrap installation')
@@ -888,7 +943,16 @@ def main():
         print(json.dumps(result))
         return
     prefix = args.prefix.absolute()
-    if args.testing_bundles:
+    if args.retire_user:
+        if not distribution_package():
+            raise ValueError('No distribution package of RUWAC is installed; the per-user installation was kept')
+        result = retire_user_installation(prefix)
+    elif distribution_package() and (
+            args.install or args.install_auto or args.bootstrap or args.check or args.check_auto
+            or args.auto_install == 'on' or args.rollback):
+        # Never install or check a competing per-user copy beside the DNF package.
+        result = {'distribution': 'package-manager', 'available': False, 'skipped': DISTRIBUTION_HINT}
+    elif args.testing_bundles:
         result = {'testing_bundles': testing_bundle_setting({'on': True, 'off': False}.get(args.testing_bundles))}
     elif args.auto_install:
         result = {'automatic_install': automatic_install_setting({'on': True, 'off': False}.get(args.auto_install), prefix)}

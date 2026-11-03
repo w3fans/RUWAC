@@ -4,6 +4,10 @@ import argparse, fcntl, hashlib, json, os, platform, re, shutil, stat, subproces
 from pathlib import Path
 p=argparse.ArgumentParser();p.add_argument('-b', '--build-root',type=Path,required=True);p.add_argument('-d', '--desktop',action='store_true');p.add_argument('-p', '--prefix',type=Path);p.add_argument('-t', '--target-dir',type=Path,help='Cargo target directory for source builds (default: BUILD_ROOT/target)');a=p.parse_args()
 root=a.build_root.resolve();prefix=(a.prefix or Path.home()/'.local').absolute()
+# A COPR/Fedora package owns RUWAC on this machine; never install a competing copy.
+try:distribution=json.loads(Path('/usr/share/ruwac/rpm-installation.json').read_text()).get('kind')=='distribution' and Path('/usr/bin/ruwac').is_file()
+except (OSError,ValueError):distribution=False
+if distribution:raise SystemExit('RUWAC is installed from a distribution package; update it with: sudo dnf upgrade ruwac ruwac-desktop. Run /usr/bin/ruwac update to retire this per-user copy.')
 version=tomllib.loads((root/'ruwac/Cargo.toml').read_text())['workspace']['package']['version']
 if not re.fullmatch(r'(0|[1-9][0-9]*)\.[0-9]\.([0-9]|[1-9][0-9])',version):raise SystemExit('Invalid controller-assigned numeric version')
 bundle=None

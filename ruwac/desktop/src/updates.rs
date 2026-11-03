@@ -102,6 +102,31 @@ pub fn attach(header: &adw::HeaderBar, window: &adw::ApplicationWindow, automati
     button.set_widget_name("ruwac-updates");
     button.set_tooltip_text(Some("Check GitHub for RUWAC updates"));
     header.pack_end(&button);
+    if std::env::current_exe().is_ok_and(|exe| ruwac_protocol::distribution_installation(&exe)) {
+        // Distribution packages never contact GitHub or start RUWAC's updater.
+        button.set_tooltip_text(Some(ruwac_protocol::DISTRIBUTION_UPDATE_HINT));
+        let weak_window = window.downgrade();
+        button.connect_clicked(move |_| {
+            if let Some(window) = weak_window.upgrade() {
+                let dialog = gtk::Window::builder()
+                    .title("RUWAC updates")
+                    .transient_for(&window)
+                    .modal(true)
+                    .default_width(480)
+                    .build();
+                let label = gtk::Label::new(Some(ruwac_protocol::DISTRIBUTION_UPDATE_HINT));
+                label.set_wrap(true);
+                label.set_widget_name("update-status");
+                label.set_margin_top(18);
+                label.set_margin_bottom(18);
+                label.set_margin_start(18);
+                label.set_margin_end(18);
+                dialog.set_child(Some(&label));
+                dialog.present();
+            }
+        });
+        return;
+    }
     let weak_window = window.downgrade();
     button.connect_clicked(move |_| {
         let Some(window) = weak_window.upgrade() else { return };
