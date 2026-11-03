@@ -1,6 +1,6 @@
 # RUWAC cloud-only development plan after v0.4.56 — 2026-11-04
 
-**This plan is for independent GitHub-based PRs, not an instruction to run the owner's local release controller.** Start with [the cloud index](RUWAC_CLOUD_INDEX_2026-11-04.md) and [the source audit](RUWAC_CLOUD_AUDIT_v0.4.56_2026-11-04.md). Recheck `main` and published releases because the baseline was `a4be3f60dc12667e2e3bf5c727ba1b8b0ae7de7c` at source version `0.4.56` while publication was still progressing.
+**This plan is for independent GitHub-based PRs, not an instruction to run the owner's local release controller.** Start with [the cloud index](RUWAC_CLOUD_INDEX_2026-11-04.md) and [the source audit](RUWAC_CLOUD_AUDIT_v0.4.56_2026-11-04.md). Baseline is `a4be3f60dc12667e2e3bf5c727ba1b8b0ae7de7c` at source and published release version `0.4.56` (published 2026-11-03 23:57:45 UTC). Exact-commit quality/privacy passed; dependency advisory failed on the known RSA finding. Recheck before using newer refs.
 
 ## Maintainer constraints — settled decisions
 
