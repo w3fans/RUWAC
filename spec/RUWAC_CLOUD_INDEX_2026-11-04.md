@@ -2,7 +2,7 @@
 
 **Scope:** Linux RUWAC in `w3fans/RUWAC` only. This document is intended for a contributor or a cloud-based coding agent with GitHub access but **no access to the maintainer's machines, private build controller, remote hosts, keys or current sessions**.
 
-**Inspected baseline:** `main` commit `a4be3f60dc12667e2e3bf5c727ba1b8b0ae7de7c`, source version `0.4.56`. When checked, the latest completed GitHub release was `v0.4.55`; v0.4.56 release/CI jobs were still running. Always recheck refs and CI before making release assertions.
+**Inspected baseline:** `main` commit `a4be3f60dc12667e2e3bf5c727ba1b8b0ae7de7c`, source version `0.4.56`. The GitHub `v0.4.56` release was published at 2026-11-03 23:57:45 UTC. Exact-commit CI quality and privacy jobs passed; the unsuppressed desktop dependency-advisory job failed on the known RSA finding. Recheck refs and CI before asserting status for later releases.
 
 ## Reading order and authority
 
