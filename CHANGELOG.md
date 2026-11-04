@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- "Open remote web service…" in the context menu of a terminal opened through
+  a saved SSH machine previews a web app listening on that machine's localhost:
+  enter its port and an optional path (HTTPS optional). It uses that terminal's
+  own verified SSH connection and the same temporary local-loopback forward as
+  Ctrl+click on a `localhost` link, so no `ssh -L`, no new connection and no
+  other machine or network address is involved. It is not offered on local or
+  unverified terminals, and a path cannot point the preview at another host.
+
 ## v0.4.57 — 2026-11-04 — Stable source release
 
 - Pasting an image into Claude Code now also works in sessions whose RUWAC

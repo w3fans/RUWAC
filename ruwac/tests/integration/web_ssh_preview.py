@@ -131,6 +131,32 @@ try:
  assert js('document.cookie === ""',1)is True;mark('separate-remote-previews-do-not-share-cookies')
 
  from urllib.parse import urlsplit
+ # "Open remote web service…": typed port and path on each verified SSH terminal's own machine.
+ local_pid=rpc('pane.list',{'session':row['session']})[0]['pid']
+ assert 'error'in command('web-preview',operation='remote-service',pid=local_pid);mark('remote-web-service-is-offered-only-on-verified-SSH-terminals')
+ for index,(label,context)in enumerate(zip(['a','b'],contexts)):
+  pid=next(p for p in rpc('pane.list',{'session':context['session']})if p['id']==context['pane'])['pid']
+  for fields in [{'remote-service-port':'0'},{'remote-service-port':str(logical_port),'remote-service-path':f'//127.0.0.1:{servers[index][0].server_address[1]}/'},{'remote-service-port':str(logical_port),'remote-service-path':'http://example.invalid/'}]:
+   refused=command('web-preview',operation='remote-service',pid=pid,fields=fields,respond='open')
+   assert refused.get('open')and refused['info'],refused
+  assert command('web-preview')['count']==2 and not any(s.requests and s.requests[-1]['path'].startswith('//')for s,_ in servers)
+  assert 'Generated Web '+label in refused['dialog']['remote-service-summary'],refused
+  opened=command('web-preview',operation='remote-service',pid=pid,fields={'remote-service-port':str(logical_port),'remote-service-path':'redirect'},respond='open')
+  assert 'error'not in opened and not opened.get('open'),opened
+  eventually(lambda:command('web-preview',index=2+index).get('remote')is True,20)
+  eventually(lambda:host(2+index)==label,20)
+  assert command('web-preview',index=2+index)['layout']['endpoint']==profiles[index]['id']
+ mark('remote-web-service-dialog-refuses-bad-ports-and-host-paths-then-opens-through-each-original-SSH-terminal')
+ for index,(server,_)in enumerate(servers[:2]):
+  eventually(lambda:len(server.clients)>=2,10);payload=('service-'+server.label).encode()
+  for stream in list(server.clients):stream.sendall(b'\x81'+bytes([len(payload)])+payload)
+  eventually(lambda:js('String(window.hmrText)',2+index)=='service-'+server.label,10)
+ assert host(0)=='a'and host(1)=='b';mark('remote-web-service-redirect-and-WebSocket-stay-on-the-same-SSH-identity')
+ service_ports=[urlsplit(command('web-preview',index=i)['origin']).port for i in [2,3]]
+ for i in [3,2]:command('web-preview',operation='focus',index=i);command('close-tab',tab=command('inspect')['selected_tab'])
+ eventually(lambda:command('web-preview')['count']==2,10);eventually(lambda:all(closed(port)for port in service_ports),10)
+ assert host(0)=='a'and host(1)=='b';mark('closing-remote-web-service-previews-closes-only-their-forwards')
+
  restore_ports=[urlsplit(command('web-preview',index=i)['origin']).port for i in range(2)]
  command('workspace-close');gui.wait(timeout=10)
  assert all(closed(port)for port in restore_ports)

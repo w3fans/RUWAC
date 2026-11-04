@@ -506,6 +506,98 @@ pub fn open(tabs: &adw::TabView, url: Option<&str>, source: Option<Source>) -> R
     }
     Ok(())
 }
+/// "Open remote web service…" on an already opened, verified SSH terminal: a
+/// port (and optional path) on that machine's own loopback, previewed through
+/// this pane's original SSH transport. No new SSH connection, endpoint or
+/// listener beyond the usual ephemeral local-loopback forward is created.
+pub fn service_dialog(view: &Rc<View>) {
+    let Some(source) = Source::capture(view) else {
+        view.status.set_text(
+            "Remote web services open from a terminal launched through a saved, verified SSH machine",
+        );
+        return;
+    };
+    let Some(tabs) = view
+        .root
+        .ancestor(adw::TabView::static_type())
+        .and_downcast::<adw::TabView>()
+    else {
+        view.status.set_text("Web Preview requires a workspace tab");
+        return;
+    };
+    let dialog = gtk::Dialog::builder()
+        .title("Open remote web service")
+        .modal(true)
+        .default_width(440)
+        .build();
+    dialog.set_transient_for(view.area.root().and_downcast::<gtk::Window>().as_ref());
+    dialog.set_widget_name("remote-service");
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Open", gtk::ResponseType::Accept);
+    dialog.set_default_response(gtk::ResponseType::Accept);
+    let port = gtk::Entry::builder()
+        .placeholder_text("Port on that machine, e.g. 5173")
+        .input_purpose(gtk::InputPurpose::Digits)
+        .activates_default(true)
+        .hexpand(true)
+        .build();
+    port.set_widget_name("remote-service-port");
+    let path = gtk::Entry::builder()
+        .placeholder_text("Optional path, e.g. /app")
+        .activates_default(true)
+        .build();
+    path.set_widget_name("remote-service-path");
+    let https = gtk::CheckButton::with_label("HTTPS");
+    https.set_widget_name("remote-service-https");
+    let summary = gtk::Label::new(Some(&format!(
+        "Opens localhost on {} through this terminal's verified SSH connection (process {}). \
+         The service is forwarded only to this computer's loopback while the preview is open; \
+         no other machine or network address is used.",
+        source.label, source.pid
+    )));
+    summary.set_widget_name("remote-service-summary");
+    summary.set_wrap(true);
+    summary.set_xalign(0.0);
+    let info = gtk::Label::new(None);
+    info.set_widget_name("remote-service-info");
+    info.set_wrap(true);
+    for w in [
+        summary.upcast_ref::<gtk::Widget>(),
+        port.upcast_ref(),
+        path.upcast_ref(),
+        https.upcast_ref(),
+        info.upcast_ref(),
+    ] {
+        w.set_margin_start(12);
+        w.set_margin_end(12);
+        w.set_margin_top(8);
+        dialog.content_area().append(w);
+    }
+    let focus = port.clone();
+    dialog.connect_response(move |d, response| {
+        if response != gtk::ResponseType::Accept {
+            d.close();
+            return;
+        }
+        let uri = match web_route::service_url(&port.text(), &path.text(), https.is_active()) {
+            Ok(uri) => uri,
+            Err(e) => {
+                info.set_text(&e);
+                return;
+            }
+        };
+        if !source.valid() {
+            info.set_text("This terminal's SSH connection or saved machine changed; open a current SSH terminal first");
+            return;
+        }
+        match open(&tabs, Some(uri.as_str()), Some(source.clone())) {
+            Ok(()) => d.close(),
+            Err(e) => info.set_text(&e),
+        }
+    });
+    dialog.present();
+    focus.grab_focus();
+}
 fn register(endpoint: Option<String>) -> Result<Rc<Web>, String> {
     VIEWS.with(|views| {
         let mut views = views.borrow_mut();
@@ -562,6 +654,76 @@ pub fn fixture(tabs: &adw::TabView, q: &serde_json::Value) -> serde_json::Value 
         if let Err(e) = open(tabs, Some(uri), None) {
             return json!({"error":e});
         }
+    }
+    if q["operation"] == "remote-service" {
+        // Drives the real dialog of the terminal whose foreground SSH pane has this PID.
+        let pid = q["pid"].as_u64().unwrap_or(0);
+        let view = TERMINALS.with(|v| {
+            v.borrow()
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .and_then(|views| {
+                    views
+                        .borrow()
+                        .iter()
+                        .find(|view| Source::capture(view).is_some_and(|s| u64::from(s.pid) == pid))
+                        .cloned()
+                })
+        });
+        let Some(view) = view else {
+            return json!({"error":"No verified SSH terminal with that process"});
+        };
+        service_dialog(&view);
+        let mut result = json!({"status": view.status.text().as_str()});
+        for top in gtk::Window::list_toplevels() {
+            let Some(dialog) = top.downcast_ref::<gtk::Dialog>() else {
+                continue;
+            };
+            if dialog.widget_name() != "remote-service" {
+                continue;
+            }
+            let texts = RefCell::new(serde_json::Map::new());
+            crate::chrome::walk(dialog.upcast_ref(), &|w| {
+                let name = w.widget_name().to_string();
+                if let Some(e) = w.downcast_ref::<gtk::Entry>() {
+                    if let Some(value) = q["fields"][&name].as_str() {
+                        e.set_text(value);
+                    }
+                }
+                if let Some(c) = w.downcast_ref::<gtk::CheckButton>() {
+                    if let Some(value) = q["fields"][&name].as_bool() {
+                        c.set_active(value);
+                    }
+                }
+                if let Some(l) = w.downcast_ref::<gtk::Label>() {
+                    if name.starts_with("remote-service-") {
+                        texts.borrow_mut().insert(name, json!(l.text().as_str()));
+                    }
+                }
+            });
+            if q["respond"] == "open" {
+                dialog.response(gtk::ResponseType::Accept);
+            }
+            if q["respond"] == "cancel" {
+                dialog.response(gtk::ResponseType::Cancel);
+            }
+            let texts = texts.into_inner();
+            // After a refused "Open" the dialog stays with its message; read it again.
+            let info = RefCell::new(String::new());
+            crate::chrome::walk(dialog.upcast_ref(), &|w| {
+                if w.widget_name() == "remote-service-info" {
+                    if let Some(l) = w.downcast_ref::<gtk::Label>() {
+                        *info.borrow_mut() = l.text().to_string();
+                    }
+                }
+            });
+            let info = info.into_inner();
+            result = json!({"dialog": texts, "info": info, "open": dialog.is_visible()});
+            if q["respond"] == "open" && dialog.is_visible() {
+                dialog.close();
+            }
+        }
+        return result;
     }
     VIEWS.with(|views|{let views=views.borrow();let Some(web)=views.get(q["index"].as_u64().unwrap_or(0) as usize) else{return json!({"count":views.len()});};
         if q["operation"]=="focus" {

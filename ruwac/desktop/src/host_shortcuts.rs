@@ -64,6 +64,9 @@ pub fn popup(view: &std::rc::Rc<crate::view::View>, x: f64, y: f64) {
         if let Some(links) = view.link_menu(x, y) {
             body.append(&links);
         }
+        if let Some(service) = view.remote_service_button() {
+            body.append(&service);
+        }
         body.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         body.append(&menus(false));
         pop.set_child(Some(&scroll(&body)));

@@ -71,6 +71,41 @@ pub fn mapped(uri: &Url, port: u16) -> Url {
     let _ = mapped.set_port(Some(port));
     mapped
 }
+/// The remote-loopback URL for "Open remote web service…": a port on the bound
+/// SSH machine's own loopback and an optional path, never another host.
+pub fn service_url(port: &str, path: &str, https: bool) -> Result<Url, String> {
+    let port: u16 = port
+        .trim()
+        .parse()
+        .ok()
+        .filter(|p| *p > 0)
+        .ok_or("Enter a port from 1 to 65535")?;
+    let path = path.trim();
+    if path.len() > 2048 || path.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("The path must be one line without spaces".into());
+    }
+    let path = if path.is_empty() {
+        "/".to_owned()
+    } else if path.starts_with('/') && !path.starts_with("//") {
+        path.to_owned()
+    } else if path.starts_with(['?', '#']) {
+        format!("/{path}")
+    } else if !path.contains("://") && !path.starts_with('/') {
+        format!("/{path}")
+    } else {
+        return Err("Enter a path on this machine, such as /app".into());
+    };
+    let scheme = if https { "https" } else { "http" };
+    let uri = parse(&format!("{scheme}://localhost:{port}{path}"))?;
+    match destination(&uri)? {
+        Destination::Loopback { port: p, .. }
+            if p == port && uri.host_str() == Some("localhost") =>
+        {
+            Ok(uri)
+        }
+        _ => Err("Enter a path on this machine, such as /app".into()),
+    }
+}
 /// Conservative fallback for terminals without exported OSC 8 attributes.
 /// The caller supplies the clicked character index, never executes the text.
 pub fn link_at(line: &str, at: usize) -> Option<String> {
@@ -160,6 +195,49 @@ mod tests {
             .is_err()
         );
         assert!(destination(&parse("http://server:5173/").unwrap()).is_err());
+    }
+    #[test]
+    fn remote_service_urls_stay_on_the_bound_machines_loopback() {
+        assert_eq!(
+            service_url("3092", "", false).unwrap().as_str(),
+            "http://localhost:3092/"
+        );
+        assert_eq!(
+            service_url(" 3092 ", "app/x?q=1#top", false)
+                .unwrap()
+                .as_str(),
+            "http://localhost:3092/app/x?q=1#top"
+        );
+        assert_eq!(
+            service_url("8443", "/", true).unwrap().as_str(),
+            "https://localhost:8443/"
+        );
+        assert_eq!(
+            service_url("80", "?q", false).unwrap().as_str(),
+            "http://localhost/?q"
+        );
+        for port in ["0", "65536", "-1", "abc", ""] {
+            assert!(service_url(port, "", false).is_err(), "{port}");
+        }
+        // A path can never redirect the preview to another host or scheme.
+        for path in [
+            "//example.org/",
+            "http://example.org/",
+            "/a b",
+            "/a\nb",
+            "@example.org",
+        ] {
+            let result = service_url("3092", path, false);
+            assert!(
+                result
+                    .as_ref()
+                    .map_or(true, |u| u.host_str() == Some("localhost")
+                        && u.port() == Some(3092)),
+                "{path}: {result:?}"
+            );
+        }
+        assert!(service_url("3092", "//example.org/", false).is_err());
+        assert!(service_url("3092", "http://example.org/", false).is_err());
     }
     #[test]
     fn mapped_navigation_preserves_path_and_memory_only_query() {

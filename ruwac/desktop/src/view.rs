@@ -2395,6 +2395,30 @@ impl View {
         body.append(&copy);
         Some(body)
     }
+    /// "Open remote web service…" appears only on a pane that was launched
+    /// through a saved, verified SSH machine and is still bound to it.
+    pub fn remote_service_button(self: &Rc<Self>) -> Option<gtk::Button> {
+        crate::web::Source::capture(self)?;
+        let button = gtk::Button::with_label("Open remote web service…");
+        button.add_css_class("flat");
+        button.set_widget_name("remote-service-open");
+        button.set_tooltip_text(Some(
+            "Preview a web app listening on this SSH machine's localhost, through this terminal's SSH connection",
+        ));
+        let weak = Rc::downgrade(self);
+        button.connect_clicked(move |button| {
+            if let Some(pop) = button
+                .ancestor(gtk::Popover::static_type())
+                .and_downcast::<gtk::Popover>()
+            {
+                pop.popdown();
+            }
+            if let Some(view) = weak.upgrade() {
+                crate::web::service_dialog(&view);
+            }
+        });
+        Some(button)
+    }
     fn open_url(self: &Rc<Self>, url: &str) {
         let source = crate::web::Source::capture(self);
         if source.is_none()
