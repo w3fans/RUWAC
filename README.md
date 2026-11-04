@@ -440,6 +440,13 @@ and `-x work` attach to it without creating a missing session. `-R work` attache
 or creates it; `-dmS work` creates it detached. Concurrent attachments retain their
 own selected window and use the canonical shared PTY size.
 
+The next isolated command-compatibility candidate is tracked in the
+[complete Screen/tmux command review](spec/RUWAC_MULTIPLEXER_COMMANDS.md). It adds
+explicit-target window/pane controls, literal text input and session-buffer
+access. This is a bounded RUWAC command dialect with JSON replies, not a tmux
+configuration interpreter. Candidate changes need qualification and release
+before they are available in installed packages.
+
 `ruwac -S work -X screen [NAME]`, `title NAME`, `windows`, `next`, `prev`,
 `other`, and `select N` control an existing exact named session. Explicit `-X kill`
 closes the current window's programs; `-X quit` closes all programs in that session.

@@ -3,6 +3,7 @@ mod doctor;
 mod flags;
 mod image;
 mod image_transfer;
+mod multiplexer;
 mod remote;
 mod startup;
 mod workspace_api;
@@ -177,6 +178,13 @@ fn named_request(a: &[String]) -> io::Result<Request> {
         ("session", "list") => "session.list",
         ("window", "create") => "window.create",
         ("window", "list") => "window.list",
+        ("window", "rename") => "window.rename",
+        ("window", "select") => "window.select",
+        ("pane", "select") => "pane.select",
+        ("pane", "close") => "pane.close",
+        ("buffer", "set") => "buffer.set",
+        ("buffer", "show") => "buffer.get",
+        ("buffer", "paste") => "buffer.paste",
         ("pane", "list") => "pane.list",
         ("pane", "send-text") => "pane.sendText",
         ("pane", "send-key") => "pane.sendKey",
@@ -190,6 +198,11 @@ fn named_request(a: &[String]) -> io::Result<Request> {
         "session.list" => &[],
         "window.create" | "window.list" | "pane.list" => &["--session"],
         "pane.sendText" => &["--id", "--text", "--file"],
+        "window.rename" => &["--window", "--name"],
+        "window.select" => &["--window"],
+        "pane.select" | "pane.close" | "buffer.paste" => &["--id"],
+        "buffer.set" => &["--session", "--text", "--file"],
+        "buffer.get" => &["--session"],
         "pane.sendKey" => &["--id", "--key"],
         "pane.capture" => &["--id", "--lines", "--buffer"],
         "pane.wait" => &["--id", "--contains", "--timeout-ms"],
@@ -236,7 +249,7 @@ fn named_request(a: &[String]) -> io::Result<Request> {
         }
         params["buffer"] = json!(value);
     }
-    if method == "pane.sendText" {
+    if matches!(method, "pane.sendText" | "buffer.set") {
         params["text"] = match (options.get("--text"), options.get("--file")) {
             (Some(text), None) => json!(text),
             (None, Some(path)) => {
@@ -256,6 +269,43 @@ fn named_request(a: &[String]) -> io::Result<Request> {
         };
     }
     Ok(request(method, params))
+}
+
+#[cfg(test)]
+mod buffer_control_tests {
+    use super::*;
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| s.to_string()).collect()
+    }
+    #[test]
+    fn new_native_controls_require_targets_and_preserve_flag_like_text() {
+        assert!(named_request(&args(&["buffer", "paste"])).is_err());
+        assert!(named_request(&args(&["window", "rename", "--window", "w"])).is_err());
+        assert!(
+            named_request(&args(&[
+                "buffer",
+                "set",
+                "--session",
+                "s",
+                "--text",
+                "x",
+                "--file",
+                "not-opened"
+            ]))
+            .is_err()
+        );
+        let mut a = args(&["buffer", "set", "-s", "session_fixture", "-t", "-h"]);
+        flags::normalize(&mut a);
+        let q = named_request(&a).unwrap();
+        assert_eq!(q.method, "buffer.set");
+        assert_eq!(q.params["text"], "-h");
+        assert_eq!(
+            named_request(&args(&["window", "select", "--window", "window_fixture"]))
+                .unwrap()
+                .params["window"],
+            "window_fixture"
+        );
+    }
 }
 
 fn job_request(args: &[String]) -> io::Result<Request> {
@@ -503,6 +553,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         call(&request)
     };
+    if let Some(reply) = multiplexer::run(&a, call, spawn_call)? {
+        println!("{reply}");
+        return Ok(());
+    }
     if a.len() >= 4 && a[0] == "-S" && a[2] == "-X" {
         let sessions = call(&request("session.list", json!({})))?;
         let id = named_session_id(&sessions, &a[1])?.ok_or("No exact named session")?;
@@ -515,7 +569,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let window = session["active_window"].clone();
         let name = ruwac_protocol::screen_command(&a[3]);
         let args = &a[4..];
+        let pane = || -> io::Result<Value> {
+            let windows = call(&request("window.list", json!({"session":id})))?;
+            windows["result"]
+                .as_array()
+                .and_then(|rows| rows.iter().find(|r| r["id"] == window))
+                .map(|row| row["active_pane"].clone())
+                .filter(|id| {
+                    id.as_str()
+                        .is_some_and(|s| ruwac_protocol::valid_id(s, "pane"))
+                })
+                .ok_or_else(|| io::Error::other("Active window or pane changed; retry"))
+        };
         let reply = match (name, args) {
+            ("stuff", [text]) => {
+                ruwac_protocol::checked_text(text).map_err(|e| io::Error::other(e.message))?;
+                call(&request("pane.sendText", json!({"pane":pane()?,"text":text})))?
+            }
+            ("paste", []) => call(&request("buffer.paste", json!({"pane":pane()?})))?,
+            ("split", []) => spawn_call(&request("pane.create", json!({"window":window,"orientation":"horizontal"})))?,
+            ("split", [flag]) if flag=="-v" => spawn_call(&request("pane.create", json!({"window":window,"orientation":"vertical"})))?,
+            ("info", []) => {
+                let rows=call(&request("pane.list",json!({"session":id})))?;
+                json!({"result":{"session":id,"window":window,"active_pane":pane()?,"panes":rows["result"].as_array().ok_or("Pane list unavailable")?.iter().filter(|p|p["window"]==window).collect::<Vec<_>>()}})
+            }
             ("new", [] | [_]) => spawn_call(&request("window.create", json!({"session":id,"name":args.first().map(String::as_str).unwrap_or("shell")})))?,
             ("rename", [_, ..]) => call(&request("window.rename", json!({"window":window,"name":args.join(" ")})))?,
             ("windows", []) => call(&request("window.list", json!({"session":id})))?,
@@ -533,7 +610,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 json!({"result":{"closed":true}})
             }
-            _ => return Err("Supported -S NAME -X commands: screen [NAME], title NAME, windows, next, prev, other, select N, kill, quit".into()),
+            _ => return Err("Supported -S NAME -X commands: screen [NAME], title NAME, windows, next, prev, other, select N, stuff TEXT, paste, split [-v], info, kill, quit".into()),
         };
         println!("{reply}");
         return Ok(());
@@ -676,7 +753,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Some("--version") => println!("RUWAC {}", env!("CARGO_PKG_VERSION")),
-        Some("session" | "window" | "pane") => println!("{}", spawn_call(&named_request(&a)?)?),
+        Some("session" | "window" | "pane" | "buffer") => {
+            println!("{}", spawn_call(&named_request(&a)?)?)
+        }
         Some("shell-argv") => {
             if remote.is_some() || a.len() != 1 {
                 return Err("shell-argv is endpoint-local and takes no options".into());
@@ -845,7 +924,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "Updates (Fedora 44): ruwac update --check | --install | --rollback | --auto-check on|off|status | --auto-install on|off|status | --testing-bundles on|off|status.\nTesting bundle delivery is opt-in for Fedora 44 x86_64; source builds require development dependencies; --headless retains a CLI-only installation. No running processes are restarted."
             );
             println!(
-                "RUWAC\n  ruwac -ls [--json]  # list persistent sessions\n  ruwac -wipe [NAME_OR_SESSION_ID] [--json]  # remove only dead windows/sessions\n  ruwac -S NAME -X COMMAND  # Screen control aliases; kill/quit close programs\n  ruwac -dmS NAME  # create a detached named session\n  ruwac -x NAME  # share an existing session (also -r)\n  ruwac -R NAME  # attach or create an exact named session\n  ruwac -S NAME  # create or attach a named terminal session\n  ruwac -r NAME_OR_SESSION_ID  # reattach an existing session\n  ruwac kill-session NAME_OR_SESSION_ID  # closes all programs in this session\n  ruwac job list [--session session_ID] [--query TEXT] --json\n  ruwac job query --id pane_ID --json\n  ruwac workspace describe|list|saved [--json]\n  ruwac workspace events subscribe --types tab,focus,layout,rdp --json\n  ruwac workspace events poll --subscription subscription_ID --after CURSOR --limit 50 --json\n  ruwac workspace events unsubscribe --subscription subscription_ID --json\n  ruwac workspace save --name NAME --json\n  ruwac workspace open|restore --id workspace_ID --json\n  ruwac host list [--query TEXT] [--group GROUP] [--protocol SSH|RDP] [--favorites] [--limit 1..50] [--offset N --snapshot TOKEN] --json\n  ruwac host query --id endpoint_ID --json\n  ruwac rdp list --json\n  ruwac rdp query|reconnect|disconnect --id view_ID --json\n  ruwac rdp open --profile endpoint_ID [--activate] --json\n  ruwac workspace activate --id tab_ID --json\n  ruwac workspace focus --id view_ID --json\n  ruwac doctor [--desktop] [--terminal [--repair]] [--json]\n  ruwac --version  # also -v / -V\n  Short forms: -h help · ls/list/-l sessions · new NAME = -S NAME · kill NAME = kill-session NAME\n  ruwac start  # starts/reuses a private persistent daemon\n  ruwac gui [--session session_ID]\n  ruwac session create --name NAME --detach --json\n  ruwac session list --json\n  ruwac pane list --session session_ID --json\n  ruwac pane send-text --id pane_ID --text TEXT --json\n  ruwac pane send-text --id pane_ID --file UTF8_FILE --json\n  ruwac pane send-key --id pane_ID --key Enter --json\n  ruwac pane capture --id pane_ID --lines 250 [--buffer active|primary] --json\n  ruwac pane wait --id pane_ID --contains TEXT --timeout-ms 5000 --json\n  ruwac --socket PATH serve\n  ruwac --socket PATH rpc METHOD --params JSON [--idempotency KEY]\n  ruwac --socket PATH request < request.json\n  ruwac --socket PATH attach --session session_ID [--window window_ID] [--viewer (-O)]\n  ruwac image-stage PNG PRIVATE_DIRECTORY\n  ruwac --socket PATH image-attach pane_ID PNG PRIVATE_DIRECTORY\n  ruwac --socket PATH health|version|capabilities|schema|describe\nRemote: ruwac --host SSH_HOST [--remote-binary PATH] [--socket REMOTE_PATH] COMMAND.\n  ruwac --host SSH_HOST describe\n  ruwac --host SSH_HOST pane send-text --id pane_ID --file LOCAL_UTF8_FILE\n  ruwac --host SSH_HOST attach --session session_ID [--window window_ID] [--viewer (-O)]\n  ruwac --host SSH_HOST image-attach pane_ID LOCAL_PNG REMOTE_PRIVATE_DIRECTORY\nHost/workspace/RDP commands address an already-running remote GUI with its explicit permissions. Uses existing SSH keys/config and verified host keys; no credential or agent forwarding. Without explicit --socket, the remote CLI selects its own private default.\nImage attachment: explicit local or SSH Codex draft; no automatic submission. No desktop clipboard or full Screen compatibility claim."
+                "RUWAC\n  ruwac -ls [--json]  # list persistent sessions\n  ruwac -wipe [NAME_OR_SESSION_ID] [--json]  # remove only dead windows/sessions\n  ruwac -S NAME -X COMMAND  # Screen control aliases; kill/quit close programs\n  ruwac -dmS NAME  # create a detached named session\n  ruwac -x NAME  # share an existing session (also -r)\n  ruwac -R NAME  # attach or create an exact named session\n  ruwac -S NAME  # create or attach a named terminal session\n  ruwac -r NAME_OR_SESSION_ID  # reattach an existing session\n  ruwac kill-session NAME_OR_SESSION_ID  # closes all programs in this session\n  tmux-style explicit-target controls: list-sessions; has-session/list-windows/new-window/next-window/previous-window/last-window -t SESSION; rename-window/select-window/split-window -t window_ID; select-pane/kill-pane/send-keys -t pane_ID (send-keys requires -l). See spec/RUWAC_MULTIPLEXER_COMMANDS.md for supported flags.\n  ruwac buffer set --session session_ID --text TEXT|--file UTF8_FILE\n  ruwac buffer show --session session_ID; buffer paste --id pane_ID\n  ruwac job list [--session session_ID] [--query TEXT] --json\n  ruwac job query --id pane_ID --json\n  ruwac workspace describe|list|saved [--json]\n  ruwac workspace events subscribe --types tab,focus,layout,rdp --json\n  ruwac workspace events poll --subscription subscription_ID --after CURSOR --limit 50 --json\n  ruwac workspace events unsubscribe --subscription subscription_ID --json\n  ruwac workspace save --name NAME --json\n  ruwac workspace open|restore --id workspace_ID --json\n  ruwac host list [--query TEXT] [--group GROUP] [--protocol SSH|RDP] [--favorites] [--limit 1..50] [--offset N --snapshot TOKEN] --json\n  ruwac host query --id endpoint_ID --json\n  ruwac rdp list --json\n  ruwac rdp query|reconnect|disconnect --id view_ID --json\n  ruwac rdp open --profile endpoint_ID [--activate] --json\n  ruwac workspace activate --id tab_ID --json\n  ruwac workspace focus --id view_ID --json\n  ruwac doctor [--desktop] [--terminal [--repair]] [--json]\n  ruwac --version  # also -v / -V\n  Short forms: -h help · ls/list/-l sessions · new NAME = -S NAME · kill NAME = kill-session NAME\n  ruwac start  # starts/reuses a private persistent daemon\n  ruwac gui [--session session_ID]\n  ruwac session create --name NAME --detach --json\n  ruwac session list --json\n  ruwac pane list --session session_ID --json\n  ruwac pane send-text --id pane_ID --text TEXT --json\n  ruwac pane send-text --id pane_ID --file UTF8_FILE --json\n  ruwac pane send-key --id pane_ID --key Enter --json\n  ruwac pane capture --id pane_ID --lines 250 [--buffer active|primary] --json\n  ruwac pane wait --id pane_ID --contains TEXT --timeout-ms 5000 --json\n  ruwac --socket PATH serve\n  ruwac --socket PATH rpc METHOD --params JSON [--idempotency KEY]\n  ruwac --socket PATH request < request.json\n  ruwac --socket PATH attach --session session_ID [--window window_ID] [--viewer (-O)]\n  ruwac image-stage PNG PRIVATE_DIRECTORY\n  ruwac --socket PATH image-attach pane_ID PNG PRIVATE_DIRECTORY\n  ruwac --socket PATH health|version|capabilities|schema|describe\nRemote: ruwac --host SSH_HOST [--remote-binary PATH] [--socket REMOTE_PATH] COMMAND.\n  ruwac --host SSH_HOST describe\n  ruwac --host SSH_HOST pane send-text --id pane_ID --file LOCAL_UTF8_FILE\n  ruwac --host SSH_HOST attach --session session_ID [--window window_ID] [--viewer (-O)]\n  ruwac --host SSH_HOST image-attach pane_ID LOCAL_PNG REMOTE_PRIVATE_DIRECTORY\nHost/workspace/RDP commands address an already-running remote GUI with its explicit permissions. Uses existing SSH keys/config and verified host keys; no credential or agent forwarding. Without explicit --socket, the remote CLI selects its own private default.\nImage attachment: explicit local or SSH Codex draft; no automatic submission. No desktop clipboard or full Screen compatibility claim."
             );
         }
         _ => return Err("unknown command; use --help".into()),
