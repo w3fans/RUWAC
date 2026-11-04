@@ -692,7 +692,7 @@ impl State {
                 json!({"name":"ruwac","implementation":"spike","package":env!("CARGO_PKG_VERSION"),"protocol":0}),
             ),
             "capabilities" => Ok(
-                json!({"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"job_metadata":true,"job_metadata_no_argv":true,"structured_agent_state":false,"recovery":self.store.is_some(),"primary_buffer_history":true,"extended_terminal_styles":true,"kitty_keyboard_input":false,"history_checkpoints":"private canonical active and hidden primary tail, 50000 lines or 512 KiB per pane; processes restore ended","desktop_clipboard":false,"primary":false,"graphics":false,"image_attachment":true,"image_attachment_adapters":["codex draft path"],"image_attachment_submits":false,"ssh_transport":"authenticated OpenSSH through CLI --host","shared_focus":false,"independent_client_focus":true,"non_sizing_viewer":1,"pane_divider_cells":true,"client_zoom":true,"atomic_paste":true,"max_paste_bytes":paste::MAX_BYTES,"pty_sizing":"minimum sizing-client dimensions and visible pane sizes; explicit non-sizing viewers never vote","split":"persistent horizontal/vertical tree, sixteen panes","capture_limit":2000,"history_page_limit":500,"scrollback_default":50000,"max_text_bytes":ruwac_protocol::MAX_TEXT}),
+                json!({"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"job_metadata":true,"job_metadata_no_argv":true,"structured_agent_state":false,"recovery":self.store.is_some(),"primary_buffer_history":true,"extended_terminal_styles":true,"kitty_keyboard_input":false,"history_checkpoints":"private canonical active and hidden primary tail, 50000 lines or 512 KiB per pane; processes restore ended","desktop_clipboard":false,"primary":false,"graphics":false,"image_attachment":true,"image_attachment_adapters":["codex draft path"],"image_attachment_submits":false,"ssh_transport":"authenticated OpenSSH through CLI --host","shared_focus":false,"independent_client_focus":true,"non_sizing_viewer":1,"pane_divider_cells":true,"client_zoom":true,"atomic_paste":true,"max_paste_bytes":paste::MAX_BYTES,"pty_sizing":"minimum sizing-client dimensions and visible pane sizes; explicit non-sizing viewers never vote","split":"persistent horizontal/vertical tree, sixteen panes","capture_limit":2000,"capture_formats":["plain","ansi"],"ansi_capture_max_bytes":65536,"history_page_limit":500,"scrollback_default":50000,"max_text_bytes":ruwac_protocol::MAX_TEXT}),
             ),
             "schema" => Ok(schema()),
             "describe" => Ok(
@@ -1144,12 +1144,35 @@ impl State {
                 } else {
                     p.term.capture(n as usize)
                 };
+                let format = match v.get("format") {
+                    None => "plain",
+                    Some(Value::String(s)) => s.as_str(),
+                    _ => {
+                        return Err(Error::new(
+                            "INVALID_PARAMS",
+                            "Capture format must be a string",
+                        ));
+                    }
+                };
+                if format != "plain" && (format != "ansi" || m != "pane.capture") {
+                    return Err(Error::new(
+                        "INVALID_PARAMS",
+                        "Capture format must be plain or ansi; pane.wait remains plain",
+                    ));
+                }
+                let t = if format == "ansi" {
+                    p.term.capture_ansi(n as usize, primary).ok_or_else(|| {
+                        Error::new("BUFFER_UNAVAILABLE", "Primary buffer is unavailable")
+                    })?
+                } else {
+                    t
+                };
                 let matched = v
                     .get("contains")
                     .and_then(Value::as_str)
                     .map(|s| t.contains(s));
                 Ok(
-                    json!({"pane":p.id,"text":t,"lines":t.lines().count(),"matched":matched,"ended":p.ended,"buffer":if primary {"primary"}else{"active"}}),
+                    json!({"pane":p.id,"text":t,"lines":t.lines().count(),"matched":matched,"ended":p.ended,"buffer":if primary {"primary"}else{"active"},"format":format}),
                 )
             }
             "pane.sendText" => {

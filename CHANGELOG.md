@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Support opt-in `pane.capture` format `ansi` for non-sizing mobile observations,
+  preserving terminal foreground/background colors and emphasis with a 64 KiB
+  bound. Default capture and pane.wait remain plain; restored checkpoint text
+  falls back to its retained plain history. No attach, resize or terminal input.
+
+
 - Ordinary commits and pull-request merges on `main` no longer fail the
   Source release workflow: it classifies each push and, without the
   controller-assigned tag at that exact commit, ends successfully without
