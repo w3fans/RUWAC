@@ -9,6 +9,10 @@
   checks on the daemon's machine that Claude Code is the selected foreground
   program and ready, then pastes the image path, which Claude Code turns into
   `[Image #N]`. Nothing is submitted.
+- Image paste into Claude Code no longer waits forever when Claude Code shows a
+  shortened footer, such as `⏵⏵ auto mode on · 1 shell` while background work
+  is listed: the permission-mode line now also counts as Claude Code being
+  ready for input.
 - Ordinary commits and pull-request merges on `main` no longer fail the
   Source release workflow: it classifies each push and, without the
   controller-assigned tag at that exact commit, ends successfully without

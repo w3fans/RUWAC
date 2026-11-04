@@ -157,9 +157,20 @@ pub fn validate(path: &str, foreground: u32) -> io::Result<Agent> {
 pub fn model_ready(screen: &str) -> bool {
     screen.contains("GPT-") || screen.contains("context left")
 }
-/// Claude Code's input footer appears once its composer accepts input.
+/// Claude Code's input footer appears once its composer accepts input. With a
+/// permission mode active and background work listed, the footer can shorten to
+/// just the mode line ("⏵⏵ auto mode on · 1 shell", "⏸ plan mode on").
 fn claude_ready(screen: &str) -> bool {
-    screen.contains("shift+tab to cycle") || screen.contains("? for shortcuts")
+    screen.contains("shift+tab to cycle")
+        || screen.contains("? for shortcuts")
+        || screen.lines().any(|line| {
+            let line = line.trim_start();
+            (line.starts_with("⏵⏵ ") || line.starts_with("⏸ "))
+                && line
+                    .split(" · ")
+                    .next()
+                    .is_some_and(|mode| mode.ends_with(" on"))
+        })
 }
 pub fn ready(agent: Agent, screen: &str) -> bool {
     match agent {
@@ -219,6 +230,19 @@ mod tests {
         assert_eq!(highest_image(screen), 2);
         assert!(ready(Agent::Claude, "  ? for shortcuts"));
         assert!(!ready(Agent::Claude, "Welcome to Claude Code"));
+        // Shortened footers keep only the permission-mode line.
+        for footer in [
+            "  ⏵⏵ auto mode on · 1 shell",
+            "  ⏵⏵ accept edits on",
+            "  ⏸ plan mode on · ← 1 agent",
+        ] {
+            assert!(ready(Agent::Claude, footer), "{footer}");
+            let screen = format!("❯ [Image #1] old\n⏺ done\n❯ [Image #3]\n────\n{footer}");
+            assert_eq!(highest_image(&screen), 3, "{footer}");
+        }
+        // Model output that merely mentions a mode is not a footer.
+        assert!(!ready(Agent::Claude, "⏺ I turned auto mode on for you"));
+        assert!(!ready(Agent::Claude, "  ⏵⏵ starting"));
         assert!(!ready(Agent::Codex, "  ? for shortcuts"));
     }
     #[test]
