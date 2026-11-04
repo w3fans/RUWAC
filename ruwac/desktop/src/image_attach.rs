@@ -84,11 +84,18 @@ pub fn attach(
         return Ok(json!({"pane":pane,"native_clipboard_key_forwarded":true,
             "submitted":false,"consumed":false,"queued":true}));
     }
-    guard::validate(
+    let agent = guard::validate(
         path,
         pid.try_into()
             .map_err(|_| io::Error::other("Invalid foreground PID"))?,
     )?;
+    // Daemons before v0.4.54 attach drafts only to Codex; their probe never
+    // reports Claude Code. Use the guarded client paste route for them.
+    let native_api = native_api
+        && (agent != guard::Agent::Claude
+            || rpc
+                .call("agent.probe", json!({"pane":pane}))
+                .is_ok_and(|probe| probe["adapter"] == "claude"));
     let before = rpc.call("pane.capture", json!({"pane":pane,"lines":100}))?;
     let before = guard::highest_image(before["text"].as_str().unwrap_or(""));
     target(rpc, session, pane, Some(pid))?;

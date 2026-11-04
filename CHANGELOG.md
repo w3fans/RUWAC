@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Pasting an image into Claude Code now also works in sessions whose RUWAC
+  daemon is older than v0.4.54 (only Codex could receive images there).
+  Running daemons are kept, so after updating the packages, Ctrl+V into Claude
+  Code in an existing session works without restarting it: the updated client
+  checks on the daemon's machine that Claude Code is the selected foreground
+  program and ready, then pastes the image path, which Claude Code turns into
+  `[Image #N]`. Nothing is submitted.
 - Ordinary commits and pull-request merges on `main` no longer fail the
   Source release workflow: it classifies each push and, without the
   controller-assigned tag at that exact commit, ends successfully without
