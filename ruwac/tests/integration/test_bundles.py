@@ -71,6 +71,8 @@ class Bundles(unittest.TestCase):
         def read(path, *args, **kwargs):
             if str(path) == '/etc/os-release':
                 return 'ID=fedora\nVERSION_ID=44\n'
+            if str(path) == '/usr/share/ruwac/rpm-installation.json':
+                raise FileNotFoundError(path)  # never the developer machine's COPR package
             return original(path, *args, **kwargs)
         with patch.object(sys, 'argv', ['installer', '--build-root', str(root), '--desktop', '--prefix', str(prefix)]), patch.object(Path, 'read_text', read), patch('platform.machine', return_value='x86_64'), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             result = runpy.run_path(str(ROOT / 'scripts/install-user.py'), run_name='__main__')

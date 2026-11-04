@@ -31,6 +31,10 @@ class Updates(unittest.TestCase):
         # publication qualification policy has separate refusal regressions.
         readiness = patch.object(updates, 'release_readiness', return_value=None)
         readiness.start(); self.addCleanup(readiness.stop)
+        # Per-user lifecycle fixtures must not see the developer machine's own
+        # COPR/Fedora package; distribution refusal has its own regressions.
+        distribution = patch.object(updates, 'distribution_package', return_value=False)
+        distribution.start(); self.addCleanup(distribution.stop)
 
     def tearDown(self):
         self.environment.stop()
@@ -121,7 +125,12 @@ class Updates(unittest.TestCase):
         def output(args, **kwargs):
             if args[0] == 'git': return (COMMIT + '\n') if kwargs.get('text') else (COMMIT + '\n').encode()
             return original(args, **kwargs)
-        with patch.object(sys, 'argv', ['installer', '--build-root', str(source), '--prefix', str(self.root / 'prefix')]), patch.object(subprocess, 'check_output', side_effect=output), contextlib.redirect_stdout(io.StringIO()):
+        read_text = Path.read_text
+        def read(path, *args, **kwargs):
+            if str(path) == '/usr/share/ruwac/rpm-installation.json':
+                raise FileNotFoundError(path)  # never the developer machine's COPR package
+            return read_text(path, *args, **kwargs)
+        with patch.object(sys, 'argv', ['installer', '--build-root', str(source), '--prefix', str(self.root / 'prefix')]), patch.object(subprocess, 'check_output', side_effect=output), patch.object(Path, 'read_text', read), contextlib.redirect_stdout(io.StringIO()):
             result = runpy.run_path(str(ROOT / 'scripts/install-user.py'), run_name='__main__')
             os.close(result['lock'])
         return source
