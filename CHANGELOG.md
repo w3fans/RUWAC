@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.4.57 — 2026-11-04 — Stable source release
+
 - Pasting an image into Claude Code now also works in sessions whose RUWAC
   daemon is older than v0.4.54 (only Codex could receive images there).
   Running daemons are kept, so after updating the packages, Ctrl+V into Claude
