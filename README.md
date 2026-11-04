@@ -390,7 +390,7 @@ session can still be served by an older engine. It does not gain new engine
 features until its sessions have ended and that engine is replaced.
 
 Right-click **New term** or a terminal for **Add terminal machine…**; the Agents
-menu offers **Add agent machine…**. Enter an SSH alias such as `kbl` and save or
+menu offers **Add agent machine…**. Enter an SSH alias such as `devbox` and save or
 connect. No RDP endpoint is required. OpenSSH supplies unspecified user, port and
 keys; configure them later in Machines → Edit. Category choices include existing
 group paths and allow a new path. **Copy machine…** is at the top of its editor.

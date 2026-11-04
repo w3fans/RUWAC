@@ -1753,7 +1753,7 @@ fn shortcut_button(
 fn quick_ssh_profile(host: &str, agent: u32) -> Result<Profile, String> {
     let host = host.trim();
     if host.is_empty() || host.chars().any(char::is_whitespace) {
-        return Err("Enter one SSH host or config alias, for example kbl".into());
+        return Err("Enter one SSH host or config alias, for example devbox".into());
     }
     let mut p: Profile = serde_json::from_value(serde_json::json!({
         "name":host,"server":host,"protocol":"SSH","group":"","username":"",
@@ -1796,7 +1796,7 @@ fn quick_ssh_dialog(
     dialog.add_button("Save & Connect", gtk::ResponseType::Other(5));
     dialog.set_default_response(gtk::ResponseType::Other(5));
     let host = gtk::Entry::builder()
-        .placeholder_text("SSH host or alias, e.g. kbl")
+        .placeholder_text("SSH host or alias, e.g. devbox")
         .activates_default(true)
         .hexpand(true)
         .build();
@@ -3092,9 +3092,9 @@ mod tests {
     use super::*;
     #[test]
     fn quick_host_profiles_are_ssh_only_and_preserve_openssh_defaults() {
-        let p = quick_ssh_profile(" kbl ", 0).unwrap();
-        assert_eq!(p.server, "kbl");
-        assert_eq!(p.name, "kbl");
+        let p = quick_ssh_profile(" devbox ", 0).unwrap();
+        assert_eq!(p.server, "devbox");
+        assert_eq!(p.name, "devbox");
         assert_eq!(p.protocol, "SSH");
         assert!(p.username.is_empty());
         assert!(!p.id.is_empty());
@@ -3102,29 +3102,29 @@ mod tests {
         let resolved = resolve(&p, &[], &[]).unwrap();
         let argv = ssh_argv(&resolved).unwrap();
         assert!(!argv.iter().any(|s| s == "-l" || s == "-p" || s == "-i"));
-        assert_eq!(argv.last().unwrap(), "kbl");
+        assert_eq!(argv.last().unwrap(), "devbox");
         assert_eq!(
-            quick_ssh_profile("kbl", 1)
+            quick_ssh_profile("devbox", 1)
                 .unwrap()
                 .preferences
                 .codex_command,
             "codex resume --all"
         );
         assert_eq!(
-            quick_ssh_profile("kbl", 2)
+            quick_ssh_profile("devbox", 2)
                 .unwrap()
                 .preferences
                 .claude_command,
             "claude --resume"
         );
         assert_eq!(
-            quick_ssh_profile("kbl", 3)
+            quick_ssh_profile("devbox", 3)
                 .unwrap()
                 .preferences
                 .kimi_command,
             "kimi --session"
         );
-        for host in ["", "-oProxyCommand=bad", "kbl extra", "a\nb"] {
+        for host in ["", "-oProxyCommand=bad", "devbox extra", "a\nb"] {
             assert!(quick_ssh_profile(host, 0).is_err(), "{host}");
         }
     }
