@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Ordinary commits and pull-request merges on `main` no longer fail the
+  Source release workflow: it classifies each push and, without the
+  controller-assigned tag at that exact commit, ends successfully without
+  publishing (quality and privacy still run in Fedora source checks). Tagged
+  releases keep every publication check; a tag that does not match the package
+  version or the pushed commit is refused.
+
 ## v0.4.56 — 2026-11-04 — Stable source release
 
 - Remote RUWAC updates from Fedora COPR no longer miss a new build or touch other
