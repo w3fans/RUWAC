@@ -139,6 +139,33 @@ jobs:
           for test in spike desktop_state client_focus jobs jobs_capacity recovery screen_previous screen_copy history_snapshot primary_history checkpoint_validation terminal_styles_apps mixed_nesting terminal_usability cli_user_shell cli_shell_contract natural_grid status_bar split_dividers; do
             python3 "ruwac/tests/integration/$test.py" --binary "$CARGO_TARGET_DIR/debug/ruwac" --evidence "$RUNNER_TEMP/ruwac-evidence"
           done
+      - name: Non-sizing viewer real-PTY fixtures and older-daemon refusal
+        env:
+          # v0.4.52 is the last published source without the non_sizing_viewer capability.
+          RUWAC_PRE_VIEWER_COMMIT: fca85c5ec0bc5a22a1895d363458fc9e025bb940
+        run: |
+          cargo build --locked --manifest-path ruwac/Cargo.toml
+          viewer="$RUNNER_TEMP/viewer"
+          mkdir -m 700 "$viewer" "$viewer/tmp" "$viewer/generated-home"
+          TMPDIR="$viewer/tmp" timeout 300 python3 ruwac/tests/integration/client_sizing_viewer.py --binary "$CARGO_TARGET_DIR/debug/ruwac" --evidence "$viewer/sizing-evidence"
+          git fetch --no-tags --depth=1 origin "$RUWAC_PRE_VIEWER_COMMIT"
+          git archive --output="$viewer/pre-viewer.tar" "$RUWAC_PRE_VIEWER_COMMIT"
+          mkdir "$viewer/pre-viewer-source"
+          tar -xf "$viewer/pre-viewer.tar" -C "$viewer/pre-viewer-source"
+          cargo build --locked --manifest-path "$viewer/pre-viewer-source/ruwac/Cargo.toml" --target-dir "$viewer/pre-viewer-target"
+          env TMPDIR="$viewer/tmp" HOME="$viewer/generated-home" XDG_CONFIG_HOME="$viewer/generated-home/config" XDG_DATA_HOME="$viewer/generated-home/data" XDG_CACHE_HOME="$viewer/generated-home/cache" \
+            timeout 120 python3 ruwac/tests/integration/viewer_legacy.py --binary "$CARGO_TARGET_DIR/debug/ruwac" --legacy "$viewer/pre-viewer-target/debug/ruwac" --evidence "$viewer/legacy-evidence"
+          python3 - "$viewer" <<'PY'
+          import json, sys
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          sizing = json.loads((root / 'sizing-evidence/result.json').read_text())
+          legacy = json.loads((root / 'legacy-evidence/acceptance.json').read_text())
+          assert sizing['PASS'] is True, [c['id'] for c in sizing['cases'] if c['status'] != 'PASS']
+          assert legacy['PASS'] is True and legacy['no_attach_resize_or_input'] and legacy['tty_modes_preserved']
+          print(f"Viewer real-PTY cases: {len(sizing['cases'])} PASS; older-daemon refusal PASS")
+          PY
+          rm -rf "$viewer/tmp"
 
   advisories:
     runs-on: ubuntu-latest
