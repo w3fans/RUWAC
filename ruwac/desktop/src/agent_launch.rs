@@ -516,9 +516,14 @@ mod tests {
             .unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         }
+        // Never the build machine's own RUWAC package: point the marker at the fixture.
+        let script = copr_function().replace(
+            "/usr/share/ruwac/rpm-installation.json",
+            &dir.join("rpm-installation.json").display().to_string(),
+        );
         let output = std::process::Command::new("bash")
             .arg("-c")
-            .arg(format!("{}; copr_ruwac; echo rc=$?", copr_function()))
+            .arg(format!("{script}; copr_ruwac; echo rc=$?"))
             .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
             .output()
             .unwrap();
