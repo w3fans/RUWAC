@@ -56,7 +56,10 @@ def command(action,**kw):
   try:
    d=json.loads((root/'gui-response.json').read_text());return d['result']if d['seq']==seq else None
   except(OSError,ValueError):return None
- return eventually(result,15)
+ try:return eventually(result,15)
+ except AssertionError:
+  if 'gui' in globals():print('GUI exit at command timeout:',gui.poll(),flush=True)
+  raise
 def js(script,index=0):
  command('web-preview',operation='script',script=script,index=index)
  return eventually(lambda:(d['script_result']if (d:=command('web-preview',index=index)).get('script_result')is not None else None),15)
@@ -130,6 +133,19 @@ try:
  js('document.cookie="fixture_cookie=a; SameSite=Strict";true',0)
  assert js('document.cookie === ""',1)is True;mark('separate-remote-previews-do-not-share-cookies')
 
+ # Record only this fixture cgroup's thread identities before additional browsers.
+ group=next(line for line in Path('/proc/self/cgroup').read_text().splitlines()if line.startswith('0:'))
+ process_threads=[]
+ for proc in Path('/proc').iterdir():
+  if not proc.name.isdigit():continue
+  try:
+   if group not in (proc/'cgroup').read_text().splitlines():continue
+   names={}
+   for thread in (proc/'task').iterdir():
+    name=(thread/'comm').read_text().strip();names[name]=names.get(name,0)+1
+   process_threads.append({'pid':int(proc.name),'comm':(proc/'comm').read_text().strip(),'threads':names})
+  except OSError:pass
+ (root/'thread-diagnostics.json').write_text(json.dumps(process_threads,indent=2)+'\n')
  from urllib.parse import urlsplit
  # "Open remote web service…": typed port and path on each verified SSH terminal's own machine.
  local_pid=rpc('pane.list',{'session':row['session']})[0]['pid']
@@ -139,11 +155,12 @@ try:
   for fields in [{'remote-service-port':'0'},{'remote-service-port':str(logical_port),'remote-service-path':f'//127.0.0.1:{servers[index][0].server_address[1]}/'},{'remote-service-port':str(logical_port),'remote-service-path':'http://example.invalid/'}]:
    refused=command('web-preview',operation='remote-service',pid=pid,fields=fields,respond='open')
    assert refused.get('open')and refused['info'],refused
-  assert command('web-preview')['count']==2 and not any(s.requests and s.requests[-1]['path'].startswith('//')for s,_ in servers)
+  assert command('web-preview')['count']==2+index and not any(s.requests and s.requests[-1]['path'].startswith('//')for s,_ in servers)
   assert 'Generated Web '+label in refused['dialog']['remote-service-summary'],refused
   opened=command('web-preview',operation='remote-service',pid=pid,fields={'remote-service-port':str(logical_port),'remote-service-path':'redirect'},respond='open')
   assert 'error'not in opened and not opened.get('open'),opened
   eventually(lambda:command('web-preview',index=2+index).get('remote')is True,20)
+  eventually(lambda:not command('web-preview',index=2+index).get('loading',True),20)
   eventually(lambda:host(2+index)==label,20)
   assert command('web-preview',index=2+index)['layout']['endpoint']==profiles[index]['id']
  mark('remote-web-service-dialog-refuses-bad-ports-and-host-paths-then-opens-through-each-original-SSH-terminal')
@@ -198,6 +215,11 @@ try:
  command('workspace-close');gui.wait(timeout=10)
  (root/'acceptance.json').write_text(json.dumps({'PASS':True,'checks':checks,'scope':'Actual GDK Ctrl-click, real OpenSSH identities and WebKit/HTTP/WebSocket; two same-host generated SSH servers use test-only process-local loopback-port translation. No separate-machine, physical-input or external-host claim.'},indent=2)+'\n')
 finally:
+ try:
+  group=next(line.split(':',2)[2]for line in Path('/proc/self/cgroup').read_text().splitlines()if line.startswith('0:'))
+  cgroup=Path('/sys/fs/cgroup')/group.lstrip('/')
+  (root/'resource-diagnostics.json').write_text(json.dumps({name:(cgroup/name).read_text()for name in ['pids.current','pids.peak','pids.events','memory.peak','memory.events']if (cgroup/name).exists()},indent=2)+'\n')
+ except(OSError,StopIteration):pass
  if session:
   try:seat('Stop')
   except Exception:pass

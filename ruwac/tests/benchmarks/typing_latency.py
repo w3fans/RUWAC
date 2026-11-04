@@ -109,16 +109,59 @@ class Rpc:
             raise RuntimeError(value['error'])
         return value['result']
 
-    def call(self, method, params=None):
-        self.send(method, params)
-        while True:
-            select.select([self.s], [], [], 30)
-            value = self.ready()
-            if value is not None:
-                return value
+    def call(self, method, params=None, *, deadline=None):
+        deadline = time.monotonic() + 30 if deadline is None else deadline
+        try:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError('RPC deadline expired: ' + method)
+            self.s.settimeout(left)
+            self.send(method, params)
+            while True:
+                value = self.ready()
+                if value is not None:
+                    return value
+                left = deadline - time.monotonic()
+                if left <= 0 or not select.select([self.s], [], [], left)[0]:
+                    raise TimeoutError('RPC deadline expired: ' + method)
+        except TimeoutError:
+            # A late response must never be mistaken for the next call's reply.
+            self.close()
+            raise
 
     def close(self):
         self.s.close()
+
+
+def visible_text(frame, pane):
+    """Read only canonical glyphs from the measured pane, never JSON metadata."""
+    for item in frame.get('panes', []):
+        if item['id'] == pane:
+            return '\n'.join(''.join(cell[0] for cell in row if not cell[1])
+                             for row in item['grid']['cells'])
+    raise ValueError('measured pane is missing from render frame')
+
+
+def finish_probes(probes, marks, deadline, started):
+    """Dedicated probe sockets can be abandoned at the shared key deadline."""
+    try:
+        while any(name not in marks for name in probes):
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            waiting = [rpc.s for name, (rpc, _) in probes.items() if name not in marks]
+            for sock in select.select(waiting, [], [], left)[0]:
+                for name, (rpc, _) in probes.items():
+                    if rpc.s is sock and name not in marks:
+                        try:
+                            if rpc.ready() is not None:
+                                marks[name] = (time.monotonic() - started) * 1000
+                        except (RuntimeError, EOFError, OSError):
+                            marks[name] = None
+    finally:
+        for name, (rpc, _) in probes.items():
+            marks.setdefault(name, None)
+            rpc.close()
 
 
 class Fixture:
@@ -300,16 +343,7 @@ class PtyTarget:
                             marks[name] = (now - t0) * 1000
                     except RuntimeError:  # pane.wait timed out
                         marks[name] = None
-        for name, (rpc, _) in probes.items():
-            while name not in marks:  # never leave a pane.wait reply for the next keystroke
-                select.select([rpc.s], [], [], 1)
-                try:
-                    if rpc.ready() is not None:
-                        marks[name] = None
-                except RuntimeError:
-                    marks[name] = None
-        for rpc, _ in probes.values():
-            rpc.close()
+        finish_probes(probes, marks, end, t0)
         return (None if shown is None else (shown - t0) * 1000), marks
 
     def pids(self):
@@ -348,14 +382,14 @@ class GuiTarget:
         self.rpc.call('session.attach', {'session': self.session, 'rows': ROWS, 'cols': COLS})
         self.revision = None
 
-    def frame_text(self):
+    def frame_text(self, deadline=None):
         before = self.rpc.bytes
-        frame = self.rpc.call('client.render', {'revision': self.revision} if self.revision is not None else {})
+        frame = self.rpc.call('client.render', {'revision': self.revision} if self.revision is not None else {}, deadline=deadline)
         self.bytes += self.rpc.bytes - before
         if frame.get('unchanged'):
             return self.last if hasattr(self, 'last') else ''
         self.revision = frame['revision']
-        self.last = json.dumps(frame.get('panes'), ensure_ascii=False)
+        self.last = visible_text(frame, self.pane)
         self.active = time.monotonic()
         return self.last
 
@@ -379,50 +413,47 @@ class GuiTarget:
         for rpc, pane in probes.values():
             rpc.send('pane.wait', {'pane': pane, 'contains': char, 'timeout_ms': int(timeout * 1000)})
         t0 = time.monotonic()
-        self.rpc.call('client.input', {'pane': self.pane, 'kind': 'keyboard', 'text': char})
-        marks = {'ack_ms': (time.monotonic() - t0) * 1000}
-        self.typed = time.monotonic()
-        shown = None
-        while time.monotonic() < t0 + timeout:
-            text = self.frame_text()
-            now = time.monotonic()
-            for name, (rpc, _) in probes.items():
-                try:
-                    if name not in marks and rpc.ready() is not None:
-                        marks[name] = (now - t0) * 1000
-                except RuntimeError:
-                    marks[name] = None
-            if char in text:
-                shown = now
-                break
-            # Wait out the worker's 8 ms poll, but timestamp daemon stages the moment they reply.
-            until = time.monotonic() + .008
-            while True:
-                waiting = [rpc.s for name, (rpc, _) in probes.items() if name not in marks]
-                left = until - time.monotonic()
-                if left <= 0:
+        end = t0 + timeout
+        marks, shown = {}, None
+        try:
+            self.rpc.call('client.input', {'pane': self.pane, 'kind': 'keyboard', 'text': char}, deadline=end)
+            marks = {'ack_ms': (time.monotonic() - t0) * 1000}
+            self.typed = time.monotonic()
+            shown = None
+            while time.monotonic() < t0 + timeout:
+                text = self.frame_text(deadline=end)
+                now = time.monotonic()
+                for name, (rpc, _) in probes.items():
+                    try:
+                        if name not in marks and rpc.ready() is not None:
+                            marks[name] = (now - t0) * 1000
+                    except RuntimeError:
+                        marks[name] = None
+                if char in text:
+                    shown = now
                     break
-                if not waiting:
-                    time.sleep(left)
-                    break
-                for sock in select.select(waiting, [], [], left)[0]:
-                    for name, (rpc, _) in probes.items():
-                        if rpc.s is sock and name not in marks:
-                            try:
-                                if rpc.ready() is not None:
-                                    marks[name] = (time.monotonic() - t0) * 1000
-                            except RuntimeError:
-                                marks[name] = None
-        for name, (rpc, _) in probes.items():
-            while name not in marks:
-                select.select([rpc.s], [], [], 1)
-                try:
-                    if rpc.ready() is not None:
-                        marks[name] = (time.monotonic() - t0) * 1000
-                except RuntimeError:
-                    marks[name] = None
-        for rpc, _ in probes.values():
-            rpc.close()
+                # Wait out the worker's 8 ms poll, but timestamp daemon stages the moment they reply.
+                until = min(end, time.monotonic() + .008)
+                while True:
+                    waiting = [rpc.s for name, (rpc, _) in probes.items() if name not in marks]
+                    left = until - time.monotonic()
+                    if left <= 0:
+                        break
+                    if not waiting:
+                        time.sleep(left)
+                        break
+                    for sock in select.select(waiting, [], [], left)[0]:
+                        for name, (rpc, _) in probes.items():
+                            if rpc.s is sock and name not in marks:
+                                try:
+                                    if rpc.ready() is not None:
+                                        marks[name] = (time.monotonic() - t0) * 1000
+                                except RuntimeError:
+                                    marks[name] = None
+        except TimeoutError:
+            shown = None
+        finally:
+            finish_probes(probes, marks, end, t0)
         return (None if shown is None else (shown - t0) * 1000), marks
 
     def pids(self):

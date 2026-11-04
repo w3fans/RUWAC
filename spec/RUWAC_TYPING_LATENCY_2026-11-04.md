@@ -1,5 +1,12 @@
 # RUWAC typing latency — measured baseline (2026-11-04)
 
+**Review correction (2026-11-04):** the original GUI-path detector searched serialized
+JSON, so `{` and `}` could match structure before an echo appeared. Treat the
+historical GUI and SSH-GUI figures below as unverified. The corrected benchmark
+reads only the measured pane’s visible glyphs and closes silent RPC/probe sockets
+at a deadline; eight isolated regressions cover these cases. Corrected local
+ASCII/Unicode runs are recorded separately; no performance fix is implied.
+
 **Scope:** measurement only. No RUWAC timing, polling interval or protocol was
 changed. Produced with `ruwac/tests/benchmarks/typing_latency.py` (workstream D
 of the [cloud work plan](RUWAC_CLOUD_WORK_PLAN_2026-11-04.md)).
@@ -13,7 +20,30 @@ interleaved in blocks of 20 keys. The GUI rows replay the desktop worker's own
 RPC sequence and schedule; **GTK paint, compositor and display latency are not
 included**.
 
-## Results (ms, active typing, one 40×120 pane)
+## Corrected local recheck (2026-11-04)
+
+Forty measured keys per path and charset on a bounded Fedora44 test job, using
+post57 candidate compiled runtime (no timing/protocol changes), one40×120 pane,
+active pacing. Topologies interleaved; zero timeouts across all400 measured keys.
+This is a short local recheck on a different host/load, not a before/after speed
+claim or the original ten-topology matrix. GUI means protocol frame receipt.
+
+| Path | ASCII p50/p95 ms | Unicode p50/p95 ms |
+| --- | ---: | ---: |
+| Direct PTY | 0.23 / 1.45 | 0.27 / 4.69 |
+| GNU Screen | 0.34 / 3.76 | 0.37 / 2.17 |
+| tmux | 0.84 / 6.17 | 0.55 / 3.41 |
+| RUWAC TUI | 17.47 / 28.62 | 15.98 / 21.37 |
+| RUWAC GUI protocol | 16.54 / 30.22 | 12.83 / 22.41 |
+
+The full-frame probe returned about155KB per40×120 frame, with median full-frame
+RPC around7ms versus0.15–0.17ms for an unchanged reply. This identifies frame
+serialization/transfer and frontend scheduling as candidates for further profiling;
+it does not isolate each cost or establish physical keystroke latency. Preserve
+legacy framing and semantic snapshots when investigating optimizations.
+
+## Historical original results (GUI figures unverified)
+
 
 | Path | p50 | p95 | p99 |
 | --- | ---: | ---: | ---: |

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Add explicit-target tmux-style window/pane controls and Screen-style literal
+  input, split and buffer operations. Stable target identities and strict flags
+  prevent ambiguous input; literal text is never submitted automatically. The
+  command compatibility inventory records supported subsets and remaining gaps.
+- Add a comparative typing benchmark for generated PTY, SSH, Screen, tmux and
+  RUWAC paths. GUI measurements read terminal glyphs rather than JSON syntax,
+  and silent RPC/probe waits have deadlines. Physical display latency is excluded.
+
 - "Open remote web service…" in the context menu of a terminal opened through
   a saved SSH machine previews a web app listening on that machine's localhost:
   enter its port and an optional path (HTTPS optional). It uses that terminal's
