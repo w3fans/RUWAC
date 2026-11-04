@@ -19,7 +19,9 @@ programs keep running until they exit or you explicitly stop them.
   [RDP and saved machines](#native-machine-and-rdp-controls), and
   [image paste](#pasting-images-into-ssh-terminals).
 - **Develop it:** [build and test](#build-and-test-from-source),
-  [repository map](#repository-map), and [contribution guide](CONTRIBUTING.md).
+  [repository map](#repository-map), [contribution guide](CONTRIBUTING.md), and
+  the [current development index](spec/RUWAC_CLOUD_INDEX_2026-11-04.md) (reading
+  order, source map and open work, usable with GitHub access alone).
 - **Get help:** [report a problem](#feedback-and-bug-reports), read the
   [security policy](SECURITY.md), or [support development](https://idz.si/bs/ruwac-donate.html).
 
