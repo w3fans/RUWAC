@@ -9,6 +9,7 @@ use alacritty_terminal::{
     },
     vte::ansi::{Color, Processor},
 };
+use ruwac_protocol::render_cells::valid_cell;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 type Formatter = Arc<dyn Fn(&str) -> String + Sync + Send>;
@@ -715,6 +716,17 @@ impl Terminal {
             self.term.mode().contains(TermMode::ALT_SCREEN),
         )
     }
+    /// Optional wire encoding; canonical snapshots and archive behavior stay plain.
+    pub fn render_snapshot(&self, compact: bool) -> Value {
+        if !compact || self.archived.is_some() {
+            return self.snapshot();
+        }
+        self.grid_encoded(
+            self.term.grid(),
+            self.term.mode().contains(TermMode::ALT_SCREEN),
+            true,
+        )
+    }
     fn snapshot_grid(&self, g: &Grid<Cell>, alternate: bool) -> Value {
         self.grid_encoded(g, alternate, false)
     }
@@ -825,33 +837,6 @@ fn packed_color(c: Color) -> u32 {
         Color::Named(n) => n as u32,
     }
 }
-fn valid_cell(cell: &Value) -> bool {
-    let Some(c) = cell.as_array() else {
-        return false;
-    };
-    (c.len() == 6 || c.len() == 7 && valid_extended_style(&c[6]))
-        && c[0]
-            .as_str()
-            .is_some_and(|s| s.len() <= 4096 && !s.chars().any(|c| c.is_control() && c != '\t'))
-        && [1, 4, 5].iter().all(|i| c[*i].is_boolean())
-        && [2, 3].iter().all(|i| valid_color(&c[*i]))
-}
-fn valid_extended_style(style: &Value) -> bool {
-    let Some(s) = style.as_object() else {
-        return false;
-    };
-    s.len() == 7
-        && s.contains_key("underline_color")
-        && ["italic", "dim", "hidden", "strike"]
-            .iter()
-            .all(|key| style[*key].is_boolean())
-        && matches!(style["width"].as_u64(), Some(1 | 2))
-        && matches!(
-            style["underline"].as_str(),
-            Some("none" | "single" | "double" | "curly" | "dotted" | "dashed")
-        )
-        && (style["underline_color"].is_null() || valid_color(&style["underline_color"]))
-}
 fn validate_grid(grid: &Value, rows: u16, cols: u16) -> std::result::Result<(), String> {
     if grid["rows"] != rows || grid["cols"] != cols {
         return Err("invalid terminal archive grid".into());
@@ -929,11 +914,6 @@ fn expand_grid(grid: &mut Value) {
     object.remove("cell_palette");
     object.remove("cell_indices");
     object.insert("cells".into(), json!(rows));
-}
-fn valid_color(c: &Value) -> bool {
-    c.as_u64().is_some_and(|i| i <= 268)
-        || c.as_array()
-            .is_some_and(|a| a.len() == 3 && a.iter().all(|n| n.as_u64().is_some_and(|n| n <= 255)))
 }
 fn history_limit(cols: u16) -> usize {
     let lines = std::env::var("RUWAC_SCROLLBACK_LINES")
@@ -1220,6 +1200,24 @@ mod tests {
             Some("\x1b]52;p;aGk=\x07")
         );
         assert_eq!(t.selection_reply(request, "hi"), None);
+    }
+    #[test]
+    fn compact_live_render_matches_plain_with_color_unicode_modes_and_restore() {
+        let mut t = Terminal::new(12, 60);
+        for bytes in [
+            b"\x1b[38;2;1;2;3m\x1b[48;2;4;5;6m\x1b[1;3;4;7m".as_slice(),
+            "Že\u{301}界\r\n".as_bytes(),
+            b"\x1b[?1000h\x1b[?2004h",
+            b"\x1b[?1049hALT",
+        ] {
+            t.feed(bytes);
+            let mut compact = json!({"panes":[{"grid":t.render_snapshot(true)}]});
+            ruwac_protocol::render_cells::expand_frame(&mut compact).unwrap();
+            assert_eq!(compact["panes"][0]["grid"], t.snapshot());
+            assert_eq!(t.render_snapshot(false), t.snapshot());
+        }
+        let t = Terminal::restore(t.checkpoint_archive()).unwrap();
+        assert_eq!(t.render_snapshot(true), t.snapshot());
     }
     #[test]
     fn compact_dual_grid_preserves_canonical_cells_and_history() {

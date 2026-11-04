@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Reduce full terminal-frame traffic using an optional palette encoding shared
+  by the GUI and TUI. Older clients still receive plain cells, and newer clients
+  accept plain replies from preserved engines. Decode exact glyphs and styles
+  before selection/drawing, with cell and byte budgets checked before expansion.
+
 - Add explicit-target tmux-style window/pane controls and Screen-style literal
   input, split and buffer operations. Stable target identities and strict flags
   prevent ambiguous input; literal text is never submitted automatically. The

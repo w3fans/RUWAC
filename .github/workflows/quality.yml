@@ -159,6 +159,9 @@ jobs:
           cargo build --locked --manifest-path "$viewer/pre-viewer-source/ruwac/Cargo.toml" --target-dir "$viewer/pre-viewer-target"
           env TMPDIR="$viewer/tmp" HOME="$viewer/generated-home" XDG_CONFIG_HOME="$viewer/generated-home/config" XDG_DATA_HOME="$viewer/generated-home/data" XDG_CACHE_HOME="$viewer/generated-home/cache" \
             timeout 120 python3 ruwac/tests/integration/viewer_legacy.py --binary "$CARGO_TARGET_DIR/debug/ruwac" --legacy "$viewer/pre-viewer-target/debug/ruwac" --evidence "$viewer/legacy-evidence"
+          mkdir -m 700 "$viewer/palette-evidence"
+          env TMPDIR="$viewer/tmp" HOME="$viewer/generated-home" XDG_CONFIG_HOME="$viewer/generated-home/config" XDG_DATA_HOME="$viewer/generated-home/data" XDG_CACHE_HOME="$viewer/generated-home/cache" \
+            timeout 120 python3 ruwac/tests/integration/render_cells.py --binary "$CARGO_TARGET_DIR/debug/ruwac" --legacy "$viewer/pre-viewer-target/debug/ruwac" --evidence "$viewer/palette-evidence"
           python3 - "$viewer" <<'PY'
           import json, sys
           from pathlib import Path

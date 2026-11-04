@@ -137,8 +137,14 @@ def visible_text(frame, pane):
     """Read only canonical glyphs from the measured pane, never JSON metadata."""
     for item in frame.get('panes', []):
         if item['id'] == pane:
-            return '\n'.join(''.join(cell[0] for cell in row if not cell[1])
-                             for row in item['grid']['cells'])
+            grid = item['grid']
+            if grid.get('cell_encoding') == 'palette-v1':
+                cells = [[grid['cell_palette'][i] for i in row] for row in grid['cell_indices']]
+            elif 'cell_encoding' in grid:
+                raise ValueError('unknown render cell encoding')
+            else:
+                cells = grid['cells']
+            return '\n'.join(''.join(cell[0] for cell in row if not cell[1]) for row in cells)
     raise ValueError('measured pane is missing from render frame')
 
 
@@ -369,6 +375,7 @@ class GuiTarget:
     def __init__(self, fx, name, sock, session, pane, stages):
         self.name, self.pane, self.stages, self.sock, self.session = name, pane, stages, sock, session
         self.rpc, self.reconnects = None, 0
+        self.render_encoding = fx.args.render_encoding
         self.connect()
         self.revision, self.typed, self.active, self.bytes = None, 0.0, 0.0, 0
         end = time.monotonic() + 20
@@ -384,7 +391,10 @@ class GuiTarget:
 
     def frame_text(self, deadline=None):
         before = self.rpc.bytes
-        frame = self.rpc.call('client.render', {'revision': self.revision} if self.revision is not None else {}, deadline=deadline)
+        params = {'revision': self.revision} if self.revision is not None else {}
+        if getattr(self, 'render_encoding', 'plain') != 'plain':
+            params['cell_encoding'] = self.render_encoding
+        frame = self.rpc.call('client.render', params, deadline=deadline)
         self.bytes += self.rpc.bytes - before
         if frame.get('unchanged'):
             return self.last if hasattr(self, 'last') else ''
@@ -567,6 +577,7 @@ def main():
     p.add_argument('--panes', type=int, choices=[1, 5, 20], default=1, help='windows per multiplexer session (extra ones hidden)')
     p.add_argument('--output', choices=['quiet', 'busy'], default='quiet', help='busy: 50 Hz noise in every pane')
     p.add_argument('--charset', choices=sorted(ALPHABETS), default='ascii')
+    p.add_argument('--render-encoding', choices=['plain', 'palette-v1'], default='palette-v1')
     p.add_argument('--timeout', type=float, default=2.0)
     p.add_argument('--seed', type=int, default=1)
     a = p.parse_args()
@@ -639,7 +650,7 @@ def main():
                 contributions[name + ':after_inner_daemon_ms'] = round(med[name] - inner, 3)
         report = {
             'schema': 1, 'kind': 'ruwac-typing-latency',
-            'scenario': {k: getattr(a, k) for k in ['keys', 'block', 'pacing', 'panes', 'output', 'charset', 'timeout', 'seed']},
+            'scenario': {k: getattr(a, k) for k in ['keys', 'block', 'pacing', 'panes', 'output', 'charset', 'timeout', 'seed', 'render_encoding']},
             'environment': {'cpus': os.cpu_count(), 'loadavg_after': Path('/proc/loadavg').read_text().split()[:3], 'kernel': platform.release(),
                             'python': platform.python_version(),
                             'ruwac': subprocess.run([fx.binary, '--version'], capture_output=True, text=True).stdout.strip(),
@@ -652,6 +663,7 @@ def main():
             'elapsed_s': round(elapsed, 1),
             'limits': ['Single machine; the SSH hop is loopback with no network delay.',
                        'gui/ssh-gui emulate the desktop worker RPC schedule; GTK paint, compositor and display latency are not included.',
+                       'GUI replay extracts glyphs in Python; it does not simulate Rust cell expansion cost (included by TUI runs).',
                        'CPU is the whole fixture process tree for all topologies together (they are interleaved), not per topology.',
                        'Stage contributions are differences of medians between topologies, not per-keystroke decomposition.'],
         }

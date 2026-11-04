@@ -1,3 +1,4 @@
+pub mod render_cells;
 /// GNU Screen names for operations supported by both RUWAC clients.
 pub fn screen_command(name: &str) -> &str {
     match name {
@@ -109,8 +110,12 @@ pub fn client_call(
             ));
         }
         params["max_response_bytes"] = json!(MAX_RENDER_FRAME);
+        params["cell_encoding"] = json!("palette-v1");
     }
     let mut frame = call(method, params)?;
+    if method == "client.render" {
+        render_cells::expand_frame(&mut frame)?;
+    }
     if method != "client.render" || frame["unchanged"] == true || frame["size_role"] == "viewer" {
         return Ok(frame);
     }
@@ -145,8 +150,9 @@ pub fn client_call(
     if !ended.is_empty() {
         frame = call(
             "client.render",
-            json!({"max_response_bytes":MAX_RENDER_FRAME}),
+            json!({"max_response_bytes":MAX_RENDER_FRAME,"cell_encoding":"palette-v1"}),
         )?;
+        render_cells::expand_frame(&mut frame)?;
     }
     Ok(frame)
 }

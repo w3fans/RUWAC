@@ -112,6 +112,16 @@ class MeasurementTests(unittest.TestCase):
             rpc.close()
             peer.close()
 
+    def test_palette_frame_glyphs_are_measured_without_metadata_matches(self):
+        value = frame('')
+        grid = value['panes'][1]['grid']
+        grid.pop('cells')
+        grid.update(cell_encoding='palette-v1', cell_palette=[['界',False],['',True]], cell_indices=[[0,1]])
+        self.assertEqual(bench.visible_text(value, 'echo'), '界')
+        grid['cell_encoding'] = 'unknown'
+        with self.assertRaises(ValueError):
+            bench.visible_text(value, 'echo')
+
 
 if __name__ == '__main__':
     unittest.main()
