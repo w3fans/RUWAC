@@ -1329,6 +1329,17 @@ impl State {
                         &mut rects,
                     );
                 }
+                // Independent zoomers can leave several canonical grids at full
+                // size. A non-sizing projection may show all of them. Keep the
+                // established plain response rather than exceeding the shared
+                // palette decoder's aggregate expansion budget.
+                let compact = compact
+                    && rects
+                        .iter()
+                        .filter_map(|(id, _)| self.panes.get(id))
+                        .map(|p| p.term.rows as usize * p.term.cols as usize)
+                        .sum::<usize>()
+                        <= ruwac_protocol::TerminalLimits::CURRENT.cells;
                 // This is deliberately metadata-only: no cell matrix is built
                 // or retained for a quiet view when a hidden pane emits output.
                 // Include every field of the projected frame and each visible

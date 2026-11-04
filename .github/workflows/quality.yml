@@ -143,6 +143,10 @@ jobs:
           for test in spike desktop_state client_focus jobs jobs_capacity recovery screen_previous multiplexer_commands screen_copy history_snapshot primary_history checkpoint_validation terminal_styles_apps mixed_nesting terminal_usability cli_user_shell cli_shell_contract natural_grid status_bar split_dividers; do
             python3 "ruwac/tests/integration/$test.py" --binary "$CARGO_TARGET_DIR/debug/ruwac" --evidence "$RUNNER_TEMP/ruwac-evidence"
           done
+      - name: Large independent zoomers and non-sizing viewer palette fallback
+        run: |
+          mkdir -p "$RUNNER_TEMP/large-viewer"
+          timeout 120 python3 ruwac/tests/integration/render_cells_large.py --binary "$CARGO_TARGET_DIR/debug/ruwac" --evidence "$RUNNER_TEMP/large-viewer"
       - name: Non-sizing viewer real-PTY fixtures and older-daemon refusal
         env:
           # v0.4.52 is the last published source without the non_sizing_viewer capability.

@@ -2,10 +2,14 @@
 
 ## Unreleased
 
+## v0.4.58 — 2026-11-04 — Stable source release
+
 - Reduce full terminal-frame traffic using an optional palette encoding shared
   by the GUI and TUI. Older clients still receive plain cells, and newer clients
   accept plain replies from preserved engines. Decode exact glyphs and styles
   before selection/drawing, with cell and byte budgets checked before expansion.
+  Large views spanning independently zoomed canonical grids keep plain frames
+  when their combined cells exceed the palette expansion budget.
 
 - Add explicit-target tmux-style window/pane controls and Screen-style literal
   input, split and buffer operations. Stable target identities and strict flags

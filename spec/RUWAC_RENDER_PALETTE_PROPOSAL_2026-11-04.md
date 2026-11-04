@@ -9,7 +9,8 @@ This is an unshipped experiment; measure before making a speed claim.
 responses retain canonical plain cells. The daemon advertises the encoding in
 capabilities. The existing archive palette representation is reused for live
 snapshots: exact cell tuples in `cell_palette`, row/column indices in
-`cell_indices`. Mostly unique screens may retain plain cells. Archived/restored
+`cell_indices`. Mostly unique screens and views whose combined canonical grids exceed the
+palette expansion cell budget retain plain cells. Archived/restored
 snapshots stay on their existing path. This is complete-frame compression, not
 a delta stream or revision-based reconstruction.
 
