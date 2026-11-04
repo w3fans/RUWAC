@@ -1,5 +1,16 @@
 # RUWAC delivered behavior and remaining acceptance
 
+## Reading this historical ledger — 2026-11-04
+
+Start with the [current development index](RUWAC_CLOUD_INDEX_2026-11-04.md),
+[acceptance status](RUWAC_ACCEPTANCE_STATUS.md) and
+[actionable work plan](RUWAC_CLOUD_WORK_PLAN_2026-11-04.md).
+This chronological ledger preserves earlier decisions and receipts; the v0.4.40
+baseline below is not the latest source status. CLI/SSH non-sizing viewers shipped
+in v0.4.53; source through v0.4.56 adds Claude image paste, machine-copy usability
+and COPR updates. Controller/GUI sizing and full physical/external qualification
+remain open. Do not implement old pending lists without checking later evidence.
+
 Use [the README](../README.md) for current build, installation and interaction
 instructions. [The functionality audit](RUWAC_FUNCTIONALITY_AUDIT.md) tracks
 requirements and distinguishes implementation from full acceptance. Versioned

@@ -1,5 +1,33 @@
 # RUWAC acceptance status
 
+## Current source reconciliation — 2026-11-04
+
+Reviewed source: `338c53e40ae0ce12b530d8d64dc54eecd9638f58`. The tagged source baseline is
+v0.4.56, commit `a4be3f60dc12667e2e3bf5c727ba1b8b0ae7de7c`.
+This update reconciles source and retained evidence; it runs no new runtime,
+physical-device or external-host acceptance. Later release candidates require
+separate acceptance and publication checks.
+
+| Increment | Implemented / source evidence | Qualification boundary |
+| --- | --- | --- |
+| v0.4.53 | Non-sizing CLI/SSH viewer (`--viewer` / `-O`), canonical PTY preservation and older-daemon refusal; dependency maintenance. | Retained delivery at `9a8553788a1a683bab61e4dda28f251af5cd30ae`: 19 frozen categories, nine public assets, 28 actual-public runtime phases, nine selection cases, two offline Codex drafts and four companion suites. This supersedes the *unreleased candidate* wording in the dated v0.4.52 entry below. |
+| v0.4.54 | Claude Code image draft attachment; source-built Fedora/COPR packaging; retirement of competing per-user command links while keeping running engines. | Source changes exist. This reconciliation does not certify every provider, package upgrade or live installation. |
+| v0.4.55 | Copy machine action beside Save, opening the new copy for editing; remote Fedora installation/update through COPR. | Source behavior is documented in the changelog; real distribution and session-preserving upgrade acceptance remains distinct. |
+| v0.4.56 | DNF metadata refresh and repository restriction for remote package checks/updates. | The pinned cloud audit records published source and exact-commit quality/privacy success with the RSA advisory job failing separately. No fleet-wide or clean-security qualification follows. |
+| After v0.4.56 | Public CI invokes real-PTY viewer and older-daemon refusal fixtures; ordinary untagged pushes skip source publication; Claude paste supports older daemons and shortened ready footers. | Source at the reviewed commit contains these changes. Their presence is not a completed v0.4.57 release or a new public-artifact acceptance receipt. |
+
+The [viewer contract](RUWAC_VIEWER_SIZING.md) distinguishes hosted real-PTY gates
+from the separately qualified authenticated SSH fixture. A viewer accepts input:
+it excludes sizing votes and is not an authorization barrier. Desktop viewer
+controls, controller takeover/release and pan/fit remain open.
+
+Remaining work is ordered in the [cloud work plan](RUWAC_CLOUD_WORK_PLAN_2026-11-04.md).
+Remote-service dialog and typing instrumentation have separate maintainer branches;
+do not duplicate them or describe them as shipped. Generic cross-machine Wayland
+PRIMARY, physical/external clipboard and input, endurance, complete distribution
+qualification and the unsuppressed RSA finding remain open. Preserve the dated
+receipts below; their candidate statements describe their original checkpoints.
+
 ## Released v0.4.52 — reconciled 2026-10-31
 
 Commit `fca85c5ec0bc5a22a1895d363458fc9e025bb940` completed all 19 frozen

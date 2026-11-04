@@ -1,5 +1,20 @@
 # RUWAC purpose, functionality and implementation audit
 
+## Current reconciliation — 2026-11-04
+
+Use the [cloud index](RUWAC_CLOUD_INDEX_2026-11-04.md) for the current reading
+order and the [acceptance reconciliation](RUWAC_ACCEPTANCE_STATUS.md) for exact
+source and delivery boundaries. The dated v0.4.52 lead below is historical:
+non-sizing CLI/SSH viewers shipped in v0.4.53. Source through v0.4.56 additionally
+implements Claude Code image attachment, visible machine copying and Fedora/COPR
+package updates. Post-v0.4.56 source adds public viewer CI and older-daemon Claude
+paste fixes; source presence does not establish a later delivered release.
+
+Full controller-owned sizing, GTK viewer controls, pan/fit, generic cross-machine
+PRIMARY, physical/external/endurance and distribution/security qualification remain
+partial. The known RSA advisory is unsuppressed. Keep the settled application-mouse
+behavior and explicit Shift+drag override; no new selection-priority mode is planned.
+
 Review started: 2026-10-17; historical change review below covers v0.4.18.
 Current behavior was reconciled on 2026-10-20 against v0.4.31 and the
 stabilization candidate's explicit SSH review and update-readiness changes. This is a product requirements ledger and source review, not a claim

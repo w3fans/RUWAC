@@ -1,5 +1,14 @@
 # Linux v0.4.50 audit: implementation ledger
 
+## Later status — 2026-11-04
+
+This response retains its original audit checkpoint. Its v0.4.53 viewer candidate
+subsequently shipped; see the [current acceptance reconciliation](RUWAC_ACCEPTANCE_STATUS.md)
+and [v0.4.56 source review](RUWAC_CLOUD_AUDIT_v0.4.56_2026-11-04.md).
+Controller/GTK viewer controls and the broader physical/external/endurance matrix
+remain open. Do not interpret an old candidate paragraph as the current release
+state or treat source review as new runtime acceptance.
+
 ## Current reconciliation — 2026-10-31
 
 The dated table below describes the earlier review, not current delivery.
