@@ -607,6 +607,19 @@ struct Store {
     database_revision: Cell<i64>,
     mirror_hash: RefCell<String>,
 }
+/// Recheck persisted identity at a user approval boundary, rather than using
+/// the UI's periodically refreshed metadata cache. Never use this on a timer.
+pub fn fresh_ssh_binding_matches(id: &str, expected: &str) -> bool {
+    let s = Store::load();
+    if s.error.is_some() || s.path.is_none() {
+        return false;
+    }
+    s.items
+        .iter()
+        .find(|p| p.id == id)
+        .and_then(|p| resolve(p, &s.groups, &s.items).ok())
+        .is_some_and(|p| p.protocol == "SSH" && crate::launch_context::binding(&p) == expected)
+}
 impl Store {
     fn load() -> Self {
         use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};

@@ -83,6 +83,14 @@ try:
  print('Second service:',json.dumps(web(operation='remote-service',pid=pid,fields={'remote-service-port':str(port),'remote-service-path':'/app','remote-service-https':True},respond='open')),flush=True);time.sleep(2);print('Second preview:',json.dumps(web(index=1)),'TLS requests:',json.dumps(server.handshakes),flush=True);eventually(lambda:web(index=1).get('error_visible'),20);mark('new-preview-does-not-inherit-certificate-approval')
  before=len(server.requests);web(operation='certificate-review',index=1);web(operation='address',index=1,text=f'https://localhost:{port}/changed');web(operation='certificate-response',accept=True,index=1);time.sleep(.3);assert len(server.requests)==before;mark('changed-address-refuses-stale-certificate-approval')
  cmd('focus-view',view=1);cmd('host-shortcuts',click='new-web-preview');q=web(operation='remote-service',existing=True,pid=pid,respond='cancel');assert not q.get('open')and'Generated TLS remote'in q['dialog']['remote-service-summary'];mark('main-preview-action-targets-selected-verified-terminal')
+ # A queued approval must not outlive its original preview.
+ web(operation='certificate-review',index=1);web(operation='focus',index=1);cmd('close-tab',tab=cmd('inspect')['selected_tab']);eventually(lambda:web()['count']==1,10)
+ before=len(server.requests);web(operation='certificate-response',index=0,accept=True);time.sleep(.3);assert len(server.requests)==before and web()['remote'];mark('closed-preview-refuses-queued-approval-and-preserves-other-preview')
+ # Saved identity changes invalidate pending approval without replacing SSH.
+ web(operation='remote-service',pid=pid,fields={'remote-service-port':str(port),'remote-service-path':'/app','remote-service-https':True},respond='open');eventually(lambda:web(index=1).get('error_visible'),20);web(operation='certificate-review',index=1)
+ before=len(server.requests);profile['server']='127.0.0.1:1';library.write_text(json.dumps(dict(schema=1,items=[profile],groups=[])));library.chmod(0o600)
+ web(operation='certificate-response',index=1,accept=True);eventually(lambda:not web(index=1)['remote'],15);time.sleep(.3);assert len(server.requests)==before
+ assert next(p['pid']for p in rpc('pane.list',dict(session=context['session']))if p['id']==context['pane'])==pid;mark('changed-SSH-identity-refuses-pending-approval-without-replacing-PTY')
  (a.evidence/'acceptance.json').write_text(json.dumps(dict(PASS=True,checks=checks,scope='Owned loopback HTTPS server through generated pinned OpenSSH and real WebKit. No external host, owner session or physical hardware claim.'),indent=2)+'\n')
 finally:
  if sock.exists():
