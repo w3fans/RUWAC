@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v0.4.60 — 2026-11-05 — Stable source release
+
+- Make engine-coexistence acceptance choose the backend socket explicitly,
+  retaining lifecycle and namespace checks when the GUI API socket sorts first.
+
+- Recognize a validated LLVM byte-indexed branch-table encoding in the artifact
+  privacy scan. Keep real private strings, malformed tables and key material
+  rejected; avoid mistaking numeric branch offsets for a private hostname.
+
 - Clarify that qualified development patch releases continue independently of
   broader stable milestones, using the existing controller and release gates.
 

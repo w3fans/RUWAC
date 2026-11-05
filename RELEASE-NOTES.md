@@ -1,33 +1,34 @@
-RUWAC v0.4.59 reports running engine versions and opens separate updated-engine workspaces.
+RUWAC v0.4.60 improves remote localhost previews and terminal hyperlink copying.
 
-Package updates preserve existing terminal processes. Those terminals keep using
-their original daemon, so installing new files alone does not activate backend
-fixes. Run `ruwac engine status` to distinguish the installed CLI from the running
-engine. GUI terminal footers also identify their local engine; this information
-is cached at connection time rather than queried while typing or rendering.
-`ruwac --host HOST engine status` discovers an updated CLI and its engine on the
-selected verified SSH endpoint. Older remote CLIs must be updated first.
+Open a remote web service from its existing verified SSH terminal, choosing the
+service's remote loopback port and path. The preview reuses that terminal's SSH
+identity and forwarding route. Load and certificate errors remain visible.
+For an untrusted HTTPS certificate, review its fingerprint explicitly for that
+preview; approval is isolated and refused if the SSH identity or view changes.
+This workflow provides access to services bound only to the remote machine's
+localhost without manually setting up a separate tunnel or using an RDP desktop.
 
-Run `ruwac engine gui` for new work on the updated engine. It opens an independent
-window with a separate socket, workspace and durable terminal checkpoint. The
-original window, daemon and terminal programs keep running; sessions are not
-migrated. `ruwac engine new` provides equivalent terminal-only launch arguments.
-Retain both included RUWAC_SOCKET and RUWAC_STATE_FILE settings when reconnecting.
-The new engine's shells inherit its socket, so plain RUWAC commands address the
-correct engine. The checkpoint override stays with the frontend and engine; it
-is removed from new PTY shells so nested daemons cannot accidentally reuse it.
-Explicit custom checkpoint overrides are refused rather than
-silently shared. A new engine can activate the palette frame encoding while an
-older preserved engine continues serving its existing clients.
+Mouse copying now joins matching styled URL fragments that a terminal application
+has wrapped onto the next display row. It removes their display-only padding and
+indentation, including in pinned mouse selections. Ordinary text, code, shell
+continuations and genuine hard newlines keep their existing behavior. Unstyled
+history is preserved conservatively. Reopen the GUI to load the clipboard fix;
+your daemon and existing terminal programs can keep running.
 
-Agent attachment tests now retry only Linux ETXTBSY when starting copied test
-executables, for at most two seconds. Other spawn errors fail immediately.
-Production process launching is unchanged. Tests cover a real open writer,
-eventual execution, a persistent busy error and an unrelated permission error.
+The Machines dropdown adds RDP, Term, Codex and Claude capability filters, including
+linked endpoints. All machines, Favorites, Recent and Alt+M remain available.
+COPR documentation explains that the single ruwac source-package row supplies
+both the ruwac CLI and ruwac-desktop binary RPMs, with normal DNF updates.
 
-Release qualification retains the existing 19 mandatory categories and adds
-real-process engine coexistence, concurrent startup, durable recovery, refusal,
-actual palette frame and isolated mapped-window preservation checks. Published
-artifact verification is a separate delivery step. Physical input, broader
-external-host qualification and the remaining development plan are still open.
-The known RSA timing advisory remains unresolved and unsuppressed.
+Completed development patches continue through the existing release controller
+and mandatory release gates. Broader stable milestones retain their additional
+acceptance criteria; incomplete unrelated features do not freeze patch delivery.
+This increment retains the 19 required release categories, with additional native
+checks for wrapped links, capability filters and remote HTTPS preview handling.
+Published-artifact qualification and authorized installation remain separate
+steps after source publication. Physical input and broader external-host coverage
+remain open. The known RSA timing advisory remains unresolved and unsuppressed.
+
+Packaging recognizes an additional validated x86-64 byte-indexed jump-table
+encoding. This avoids numeric-data privacy false positives while retaining
+checks for actual private strings, unknown/malformed tables and key material.
