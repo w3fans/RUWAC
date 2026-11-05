@@ -10,8 +10,8 @@ use std::{
     cell::{Cell, RefCell},
     rc::{Rc, Weak},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -498,7 +498,7 @@ impl Web {
             if response != gtk::ResponseType::Accept { return; }
             let Some(web) = weak.upgrade() else { return; };
             let same_failure = web.tls_failure.borrow().as_ref().is_some_and(|current| current.generation == failure.generation && current.uri == failure.uri);
-            let live_route = web.remote.borrow().as_ref().is_some_and(|r| r.source.valid() && r.forward.valid() && crate::profiles::fresh_ssh_binding_matches(&r.source.endpoint, &r.source.binding));
+            let live_route = web.remote.borrow().as_ref().is_some_and(|r| r.source.valid() && r.forward.valid() && crate::profiles::fresh_ssh_profile(&r.source.endpoint).is_some_and(|p| crate::launch_context::binding(&p) == r.source.binding));
             if web.closed.get() || !same_failure || !live_route || web.generation.get() != failure.generation || web.browser.uri() != reviewed_uri || web.address.text() != reviewed_address {
                 web.status.set_text("The preview or its SSH connection changed. Review the current service certificate again.");
                 return;
@@ -654,7 +654,7 @@ impl Web {
                 let (tx, rx) = std::sync::mpsc::sync_channel(1);
                 let isolated_tls = uri.scheme() == "https";
                 std::thread::spawn(move || {
-                    let result = crate::ssh_transport::LocalForward::open(
+                    let result = crate::ssh_transport::LocalForward::open_for_preview(
                         &token,
                         pid,
                         &host,

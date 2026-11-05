@@ -439,7 +439,11 @@ fn next_tls_address() -> io::Result<std::net::Ipv4Addr> {
     ))
 }
 impl LocalForward {
-    pub fn open(
+    /// Keep the existing plain-loopback API used by forwarding clients.
+    pub fn open(token: &str, pid: u32, host: &str, port: u16) -> io::Result<Self> {
+        Self::open_for_preview(token, pid, host, port, false)
+    }
+    pub fn open_for_preview(
         token: &str,
         pid: u32,
         host: &str,

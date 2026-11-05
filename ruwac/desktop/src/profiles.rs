@@ -609,16 +609,16 @@ struct Store {
 }
 /// Recheck persisted identity at a user approval boundary, rather than using
 /// the UI's periodically refreshed metadata cache. Never use this on a timer.
-pub fn fresh_ssh_binding_matches(id: &str, expected: &str) -> bool {
+pub fn fresh_ssh_profile(id: &str) -> Option<Profile> {
     let s = Store::load();
     if s.error.is_some() || s.path.is_none() {
-        return false;
+        return None;
     }
     s.items
         .iter()
         .find(|p| p.id == id)
         .and_then(|p| resolve(p, &s.groups, &s.items).ok())
-        .is_some_and(|p| p.protocol == "SSH" && crate::launch_context::binding(&p) == expected)
+        .filter(|p| p.protocol == "SSH")
 }
 impl Store {
     fn load() -> Self {

@@ -192,14 +192,16 @@ mod tests {
             destination(&parse("https://example.org/").unwrap()).unwrap(),
             Destination::Public
         );
-        assert!(destination(
-            &parse(&format!(
-                "http://{}:5173/",
-                std::net::Ipv4Addr::new(10, 0, 0, 1)
-            ))
-            .unwrap()
-        )
-        .is_err());
+        assert!(
+            destination(
+                &parse(&format!(
+                    "http://{}:5173/",
+                    std::net::Ipv4Addr::new(10, 0, 0, 1)
+                ))
+                .unwrap()
+            )
+            .is_err()
+        );
         assert!(destination(&parse("http://server:5173/").unwrap()).is_err());
     }
     #[test]
