@@ -41,9 +41,16 @@ try:
  wrapper.write_text('#!/usr/bin/python3\nimport os,sys\nos.execv(os.environ["TEST_ENGINE_GUI"],[os.environ["TEST_ENGINE_GUI"],*sys.argv[1:],"--fixture-dir",os.environ["TEST_ENGINE_FIXTURE"]])\n');wrapper.chmod(0o700)
  second=start([a.binary,'--socket',sock,'engine','gui'],'updated-gui',dict(env,RUWAC_GUI_ENTRY=str(wrapper),TEST_ENGINE_GUI=str(a.gui),TEST_ENGINE_FIXTURE=str(newer)))
  state=eventually(lambda:(s if (s:=command(newer,'inspect')).get('revision')is not None else None),20)
- check('new mapped GUI uses updated engine',state['status'].endswith('Engine '+subprocess.check_output([str(a.binary),'--version'],text=True).strip().split()[-1]))
+ version=subprocess.check_output([str(a.binary),'--version'],text=True).strip().split()[-1]
+ check('new mapped GUI uses updated engine',state['status'].endswith('Engine '+version))
  check('new terminal healthy',state['tab_status']=='Ready'and state['tabs']==1)
- new_socket=next(sock.parent.glob('engine-*.sock'))
+ # The mapped GUI creates engine-VERSION.gui.sock beside the engine socket.
+ # Exercise GUI-first enumeration explicitly; it must never receive engine RPCs.
+ expected_socket=sock.parent/('engine-'+version+'.sock')
+ candidates=sorted(sock.parent.glob('engine-*.sock'),key=lambda p:p==expected_socket)
+ assert expected_socket.with_suffix('.gui.sock')in candidates and candidates[0]!=expected_socket
+ matches=[p for p in candidates if p==expected_socket];assert len(matches)==1
+ new_socket=matches[0]
  check('independent new session namespace',all(s['id']!=row['session']for s in call(new_socket,'session.list')))
  check('original socket and PTY unchanged',original==(sock.stat().st_ino,[(p['id'],p['pid'])for p in call(sock,'pane.list',{'session':row['session']})]))
  check('original mapped GUI remains usable',command(older,'inspect')['tab_status']=='Ready'and first.poll()is None)
