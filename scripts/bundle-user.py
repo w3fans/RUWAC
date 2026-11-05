@@ -308,14 +308,16 @@ def indexed_branch_slots(data, records):
             references.add(section[3] + match.start() + 7 + struct.unpack('<i', match[1])[0])
     ordered_references = sorted(references)
     # LLVM also emits byte-discriminant tables without an explicit comparison.
-    # movzbl bounds the index to 0..255. Recognize only this exact load/relative
+    # movzbl bounds the index to 0..255. Accept the observed RSI+disp8 and
+    # RBX+disp32 loads into EAX; calculate RIP from the displacement end, not
+    # an assumed instruction length. Recognize only this exact load/relative
     # dispatch form (with one optional stack spill that preserves RAX/RCX).
     # Classify only the contiguous prefix of negative offsets that actually
     # target executable bytes; text, positive words, unknown instructions and
     # the first invalid target remain scanned. No matching policy value, text
     # hash, symbol/section name or externally supplied exception is consulted.
     byte_dispatch = re.compile(
-        rb'\x0f\xb6\x46.\x48\x8d\x0d(.{4})'
+        rb'(?:\x0f\xb6\x46.|\x0f\xb6\x83.{4})\x48\x8d\x0d(.{4})'
         rb'\x48\x63\x04\x81\x48\x01\xc8'
         rb'(?:\x48\x89\x74\x24.)?\xff\xe0', re.S)
     for section in records:
@@ -325,7 +327,7 @@ def indexed_branch_slots(data, records):
         if start + size > len(data):
             raise ValueError('Executable section exceeds artifact bounds')
         for match in byte_dispatch.finditer(data[start:start + size]):
-            table = section[3] + match.start() + 11 + struct.unpack('<i', match[1])[0]
+            table = section[3] + match.start(1) + 4 + struct.unpack('<i', match[1])[0]
             candidates = [s for s in records if s[1] == 1 and s[2] & 2
                           and not s[2] & 5 and s[3] <= table < s[3] + s[5]]
             if table % 4 or len(candidates) != 1:

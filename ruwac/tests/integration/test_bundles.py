@@ -277,12 +277,13 @@ class Bundles(unittest.TestCase):
         for options in [{'unchecked': True}, {'bad_target': True}]:
             self.assertTrue(bundles.artifact_findings(self.branch_elf(**options), checker, ['toy'])[0])
 
-    def byte_branch_elf(self, literal=b'generated fixture', bad_target=False, unknown=False, spill=True, count=4, positive=False, writable=False, unaligned=False, wrong_jump=False, extra_reference=False, far=False):
+    def byte_branch_elf(self, literal=b'generated fixture', bad_target=False, unknown=False, spill=True, count=4, positive=False, writable=False, unaligned=False, wrong_jump=False, extra_reference=False, far=False, wide_displacement=False):
         table = (1342177280 if far else 16777216) + (1 if unaligned else 0)
         dispatch = 4096
         numeric = b'toy' + (b'\xc3' if far else b'\x00' if positive else b'\xff')
         target = table + int.from_bytes(numeric, 'little', signed=True)
-        code = b'\x0f\xb6F\x10H\x8d\r' + struct.pack('<i', table - dispatch - 11) + b'Hc\x04\x81H\x01\xc8' + (b'H\x89t$\x08' if spill else b'') + b'\xff\xe0'
+        load = b'\x0f\xb6\x83\x38\x01\x00\x00' if wide_displacement else b'\x0f\xb6F\x10'
+        code = load + b'H\x8d\r' + struct.pack('<i', table - dispatch - len(load) - 7) + b'Hc\x04\x81H\x01\xc8' + (b'H\x89t$\x08' if spill else b'') + b'\xff\xe0'
         if unknown:
             code = b'\x90' + code[1:]
         if wrong_jump:
@@ -310,6 +311,19 @@ class Bundles(unittest.TestCase):
     def test_byte_dispatch_numeric_prefix_with_and_without_spill(self):
         for spill in [False, True]:
             self.assertFalse(self.byte_branch_findings(spill=spill))
+
+    def test_byte_dispatch_disp32_numeric_prefix(self):
+        for spill in [False, True]:
+            self.assertFalse(self.byte_branch_findings(wide_displacement=True, spill=spill))
+
+    def test_byte_dispatch_disp32_preserves_negative_controls(self):
+        for options in [dict(literal=b'toy\x00'), dict(unknown=True),
+                        dict(wrong_jump=True), dict(bad_target=True),
+                        dict(positive=True), dict(writable=True),
+                        dict(unaligned=True), dict(count=257), dict(count=1),
+                        dict(far=True), dict(count=8, extra_reference=True)]:
+            with self.subTest(options=options):
+                self.assertTrue(self.byte_branch_findings(wide_displacement=True, **options))
 
     def test_byte_dispatch_adjacent_literal_is_still_rejected(self):
         self.assertTrue(self.byte_branch_findings(literal=b'toy\x00'))
