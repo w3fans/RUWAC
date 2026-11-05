@@ -10,8 +10,8 @@ use std::{
     cell::{Cell, RefCell},
     rc::{Rc, Weak},
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
     time::Duration,
 };
@@ -75,16 +75,51 @@ struct Remote {
     original: url::Url,
     forward: crate::ssh_transport::LocalForward,
 }
+#[derive(Clone)]
+struct TlsFailure {
+    generation: u64,
+    uri: String,
+    certificate: gtk::gio::TlsCertificate,
+    errors: gtk::gio::TlsCertificateFlags,
+}
 struct Web {
     root: gtk::Box,
     browser: webkit6::WebView,
     address: gtk::Entry,
     status: gtk::Label,
+    content: gtk::Stack,
+    failure_title: gtk::Label,
+    failure_detail: gtk::Label,
+    certificate_button: gtk::Button,
+    failed: Cell<bool>,
+    generation: Cell<u64>,
+    tls_failure: RefCell<Option<TlsFailure>>,
     remote: RefCell<Option<Remote>>,
     pending: RefCell<Option<Arc<AtomicBool>>>,
     binding: RefCell<Option<String>>,
     closed: Cell<bool>,
     endpoint: RefCell<Option<String>>,
+}
+fn certificate_issues(errors: gtk::gio::TlsCertificateFlags) -> String {
+    use gtk::gio::TlsCertificateFlags as F;
+    let mut messages = Vec::new();
+    for (flag, message) in [
+        (F::UNKNOWN_CA, "Issuer is not trusted"),
+        (
+            F::BAD_IDENTITY,
+            "Certificate does not match the service address",
+        ),
+        (F::NOT_ACTIVATED, "Certificate is not valid yet"),
+        (F::EXPIRED, "Certificate has expired"),
+        (F::REVOKED, "Certificate has been revoked"),
+        (F::INSECURE, "Certificate uses insecure cryptography"),
+        (F::GENERIC_ERROR, "Certificate verification failed"),
+    ] {
+        if errors.contains(flag) {
+            messages.push(message);
+        }
+    }
+    messages.join("\n")
 }
 impl Web {
     fn new(endpoint: Option<String>) -> Rc<Self> {
@@ -138,19 +173,55 @@ impl Web {
         }));
         status.set_xalign(0.0);
         status.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        let content = gtk::Stack::new();
+        content.set_vexpand(true);
+        content.set_hexpand(true);
+        content.add_named(&browser, Some("page"));
+        let failure = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        failure.set_halign(gtk::Align::Center);
+        failure.set_valign(gtk::Align::Center);
+        failure.set_margin_start(24);
+        failure.set_margin_end(24);
+        let failure_title = gtk::Label::new(None);
+        failure_title.add_css_class("title-2");
+        failure_title.set_widget_name("web-failure-title");
+        let failure_detail = gtk::Label::new(None);
+        failure_detail.set_widget_name("web-failure-detail");
+        failure_detail.set_wrap(true);
+        failure_detail.set_max_width_chars(70);
+        let certificate_button = gtk::Button::with_label("Review certificate…");
+        certificate_button.set_widget_name("web-review-certificate");
+        certificate_button.set_halign(gtk::Align::Center);
+        failure.append(&failure_title);
+        failure.append(&failure_detail);
+        failure.append(&certificate_button);
+        content.add_named(&failure, Some("error"));
         root.append(&bar);
-        root.append(&browser);
+        root.append(&content);
         root.append(&status);
         let web = Rc::new(Self {
             root,
             browser,
             address,
             status,
+            content,
+            failure_title,
+            failure_detail,
+            certificate_button,
+            failed: Cell::new(false),
+            generation: Cell::new(0),
+            tls_failure: RefCell::new(None),
             remote: RefCell::new(None),
             pending: RefCell::new(None),
             binding: RefCell::new(None),
             closed: Cell::new(false),
             endpoint: RefCell::new(endpoint),
+        });
+        let w = Rc::downgrade(&web);
+        web.certificate_button.connect_clicked(move |_| {
+            if let Some(w) = w.upgrade() {
+                w.review_certificate();
+            }
         });
         let w = Rc::downgrade(&web);
         back.connect_clicked(move |_| {
@@ -222,7 +293,14 @@ impl Web {
         let w = Rc::downgrade(&web);
         web.browser.connect_load_changed(move |_, event| {
             if let Some(w) = w.upgrade() {
-                if event == webkit6::LoadEvent::Finished {
+                if event == webkit6::LoadEvent::Started {
+                    w.generation.set(w.generation.get().wrapping_add(1));
+                    w.failed.set(false);
+                    w.tls_failure.borrow_mut().take();
+                    w.content.set_visible_child_name("page");
+                    w.status.set_text("Loading web service…");
+                }
+                if event == webkit6::LoadEvent::Finished && !w.failed.get() {
                     if let Some(r) = w.remote.borrow().as_ref() {
                         w.status.set_text(&format!(
                             "{} · remote {}:{} → localhost:{} · ephemeral browser",
@@ -238,7 +316,29 @@ impl Web {
             }
         });
         let w = Rc::downgrade(&web);
-        web.browser.connect_load_failed(move |_,_,_,_|{if let Some(w)=w.upgrade(){w.status.set_text("Page could not load. Check the URL, server and certificate; certificate validation remains enabled.");}true});
+        web.browser.connect_load_failed(move |_, _, uri, error| {
+            if error.matches(webkit6::NetworkError::Cancelled) { return true; }
+            if let Some(w) = w.upgrade() {
+                if w.tls_failure.borrow().is_none() {
+                    let origin = web_route::parse(uri).map(|u| u.origin().ascii_serialization()).unwrap_or_else(|_| "this service".into());
+                    w.show_failure("Page could not load", &format!("Could not load {origin}. Check the service address, its server and the SSH connection, then retry."), false);
+                }
+            }
+            true
+        });
+        let w = Rc::downgrade(&web);
+        web.browser.connect_load_failed_with_tls_errors(move |_, uri, certificate, errors| {
+            if let Some(w) = w.upgrade() {
+                *w.tls_failure.borrow_mut() = Some(TlsFailure { generation: w.generation.get(), uri: uri.into(), certificate: certificate.clone(), errors });
+                let remote = w.remote.borrow().as_ref().is_some_and(|r| r.source.valid() && r.forward.valid());
+                w.show_failure("Certificate could not be verified", if remote {
+                    "The remote localhost service uses a certificate that could not be verified. Review its certificate to continue only in this preview. Nothing has been trusted automatically."
+                } else {
+                    "The server certificate could not be verified. Use your external browser for this address. Certificate approval in Preview is available only for a service opened through its verified SSH terminal."
+                }, remote);
+            }
+            true
+        });
         let w = Rc::downgrade(&web);
         session.connect_download_started(move |_,download|{download.cancel();if let Some(w)=w.upgrade(){w.status.set_text("Downloads are disabled in Preview; use Open externally for an explicit browser download.");}});
         web.browser.connect_permission_request(|_, request| {
@@ -271,9 +371,9 @@ impl Web {
             let Some(uri)=uri.and_then(|u|web_route::parse(&u).ok()) else {decision.ignore();w.status.set_text("Navigation blocked: only HTTP and HTTPS pages are allowed");return true;};
             if let Some(remote)=w.remote.borrow().as_ref() {
                 if !remote.source.valid()||!remote.forward.valid(){decision.ignore();w.browser.stop_loading();w.status.set_text("Original SSH connection changed. Reopen the preview explicitly from its terminal.");return true;}
-                let mapped=web_route::mapped(&remote.original,remote.forward.local_port);
+                let mapped=web_route::mapped_to(&remote.original,remote.forward.local_host,remote.forward.local_port);
                 if uri.origin()==mapped.origin() {return false;}
-                if uri.origin()==remote.original.origin() {let mapped=web_route::mapped(&uri,remote.forward.local_port);decision.ignore();w.browser.load_uri(mapped.as_str());return true;}
+                if uri.origin()==remote.original.origin() {let mapped=web_route::mapped_to(&uri,remote.forward.local_host,remote.forward.local_port);decision.ignore();w.browser.load_uri(mapped.as_str());return true;}
                 decision.ignore();w.status.set_text("Remote preview stays on its approved origin/port. Open another URL explicitly in a new Web view.");return true;
             }
             false
@@ -318,6 +418,97 @@ impl Web {
             glib::ControlFlow::Continue
         });
         web
+    }
+    fn show_failure(&self, title: &str, detail: &str, review: bool) {
+        self.failed.set(true);
+        self.failure_title.set_text(title);
+        self.failure_detail.set_text(detail);
+        self.certificate_button.set_visible(review);
+        self.content.set_visible_child_name("error");
+        self.status.set_text(title);
+    }
+    fn review_certificate(self: &Rc<Self>) {
+        use gtk::gio::prelude::TlsCertificateExt;
+        use sha2::{Digest, Sha256};
+        let Some(failure) = self.tls_failure.borrow().clone() else {
+            return;
+        };
+        let Some(origin) = web_route::parse(&failure.uri).ok() else {
+            return;
+        };
+        let Some(host) = origin.host_str().map(str::to_owned) else {
+            return;
+        };
+        let Some(certificate) = failure
+            .certificate
+            .certificate()
+            .filter(|b| !b.is_empty() && b.len() <= 262144)
+        else {
+            return;
+        };
+        let fingerprint = format!("{:x}", Sha256::digest(certificate.as_ref()));
+        let label = {
+            let remote = self.remote.borrow();
+            let Some(remote) = remote
+                .as_ref()
+                .filter(|r| r.source.valid() && r.forward.valid())
+            else {
+                return;
+            };
+            format!(
+                "{} · {}",
+                remote.source.label,
+                remote.original.origin().ascii_serialization()
+            )
+        };
+        let dialog = gtk::Dialog::builder()
+            .title("Review remote service certificate")
+            .modal(true)
+            .default_width(520)
+            .build();
+        dialog.set_widget_name("web-certificate-dialog");
+        dialog.set_transient_for(self.root.root().and_downcast::<gtk::Window>().as_ref());
+        dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+        dialog.add_button("Trust in this preview", gtk::ResponseType::Accept);
+        dialog.set_default_response(gtk::ResponseType::Cancel);
+        let issues = format!("{}", certificate_issues(failure.errors));
+        for (name, text) in [
+            ("web-certificate-origin", label),
+            ("web-certificate-issues", issues),
+            ("web-certificate-fingerprint", format!("SHA-256: {fingerprint}")),
+            ("web-certificate-scope", "Verify this fingerprint with the service owner before continuing. Approval applies only to this certificate for this remote service in this preview. It is discarded when the preview closes; no system trust or saved connection is changed.".into()),
+        ] {
+            let line = gtk::Label::new(Some(&text));
+            line.set_widget_name(name);
+            line.set_wrap(true);
+            line.set_selectable(true);
+            line.set_xalign(0.0);
+            line.set_margin_start(12);
+            line.set_margin_end(12);
+            line.set_margin_top(10);
+            dialog.content_area().append(&line);
+        }
+        // WebKit can clear its current URI after a TLS load failure. Bind the
+        // approval to the displayed state, while retrying the captured failed URI.
+        let reviewed_uri = self.browser.uri();
+        let reviewed_address = self.address.text();
+        let weak = Rc::downgrade(self);
+        dialog.connect_response(move |dialog, response| {
+            dialog.close();
+            if response != gtk::ResponseType::Accept { return; }
+            let Some(web) = weak.upgrade() else { return; };
+            let same_failure = web.tls_failure.borrow().as_ref().is_some_and(|current| current.generation == failure.generation && current.uri == failure.uri);
+            let live_route = web.remote.borrow().as_ref().is_some_and(|r| r.source.valid() && r.forward.valid());
+            if web.closed.get() || !same_failure || !live_route || web.generation.get() != failure.generation || web.browser.uri() != reviewed_uri || web.address.text() != reviewed_address {
+                web.status.set_text("The preview or its SSH connection changed. Review the current service certificate again.");
+                return;
+            }
+            if let Some(session) = web.browser.network_session() {
+                session.allow_tls_certificate_for_host(&failure.certificate, &host);
+                web.browser.load_uri(&failure.uri);
+            }
+        });
+        dialog.present();
     }
     fn choose_source(self: &Rc<Self>) {
         let Some(endpoint) = self.endpoint.borrow().clone() else {
@@ -407,14 +598,24 @@ impl Web {
             }
         };
         if let Some(remote) = self.remote.borrow().as_ref() {
-            let mapped = web_route::mapped(&remote.original, remote.forward.local_port);
+            let mapped = web_route::mapped_to(
+                &remote.original,
+                remote.forward.local_host,
+                remote.forward.local_port,
+            );
             if source.is_none()
                 && (uri.origin() == mapped.origin() || uri.origin() == remote.original.origin())
                 && remote.source.valid()
                 && remote.forward.valid()
             {
-                self.browser
-                    .load_uri(web_route::mapped(&uri, remote.forward.local_port).as_str());
+                self.browser.load_uri(
+                    web_route::mapped_to(
+                        &uri,
+                        remote.forward.local_host,
+                        remote.forward.local_port,
+                    )
+                    .as_str(),
+                );
                 return;
             }
             if source.is_none() {
@@ -451,8 +652,15 @@ impl Web {
                 *self.pending.borrow_mut() = Some(cancel.clone());
                 let (token, pid) = (source.token.clone(), source.pid);
                 let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                let isolated_tls = uri.scheme() == "https";
                 std::thread::spawn(move || {
-                    let result = crate::ssh_transport::LocalForward::open(&token, pid, &host, port);
+                    let result = crate::ssh_transport::LocalForward::open(
+                        &token,
+                        pid,
+                        &host,
+                        port,
+                        isolated_tls,
+                    );
                     let _ = tx.send(result);
                 });
                 let weak = Rc::downgrade(self);
@@ -463,7 +671,7 @@ impl Web {
                                 return glib::ControlFlow::Break;
                             }
                             w.pending.borrow_mut().take();
-                            match result{Ok(forward)=>{let mapped=web_route::mapped(&uri,forward.local_port);*w.endpoint.borrow_mut()=Some(source.endpoint.clone());*w.remote.borrow_mut()=Some(Remote{source:source.clone(),original:uri.clone(),forward});w.browser.load_uri(mapped.as_str());},Err(_)=>w.status.set_text("SSH preview failed. The original master must be live and permit local forwarding; no replacement connection was opened.")}
+                            match result{Ok(forward)=>{let mapped=web_route::mapped_to(&uri,forward.local_host,forward.local_port);*w.endpoint.borrow_mut()=Some(source.endpoint.clone());*w.remote.borrow_mut()=Some(Remote{source:source.clone(),original:uri.clone(),forward});w.browser.load_uri(mapped.as_str());},Err(_)=>w.status.set_text("SSH preview failed. The original master must be live and permit local forwarding; no replacement connection was opened.")}
                         }
                         glib::ControlFlow::Break
                     }
@@ -505,6 +713,71 @@ pub fn open(tabs: &adw::TabView, url: Option<&str>, source: Option<Source>) -> R
         web.address.grab_focus();
     }
     Ok(())
+}
+/// The main preview action chooses an existing verified terminal, never a new host.
+pub fn service_picker(tabs: &adw::TabView) {
+    let views = TERMINALS.with(|all| {
+        all.borrow()
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .map(|all| {
+                all.borrow()
+                    .iter()
+                    .filter(|v| Source::capture(v).is_some_and(|source| source.valid()))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    let selected = tabs.selected_page();
+    let current = views
+        .iter()
+        .filter(|v| {
+            selected
+                .as_ref()
+                .is_some_and(|page| crate::tiles::contains(&page.child(), &v.root))
+        })
+        .collect::<Vec<_>>();
+    if current.len() == 1 {
+        service_dialog(current[0]);
+        return;
+    }
+    let dialog = gtk::Dialog::builder()
+        .title("Choose remote terminal for Web Preview")
+        .modal(true)
+        .default_width(440)
+        .build();
+    dialog.set_widget_name("web-source-picker");
+    dialog.set_transient_for(tabs.root().and_downcast::<gtk::Window>().as_ref());
+    let text = gtk::Label::new(Some(if views.is_empty() {
+        "Open an SSH terminal from Machines first. Web Preview opens a localhost service on that terminal's remote machine, without RDP."
+    } else {
+        "Choose the terminal whose remote machine runs the localhost service. This preview will stay bound to that SSH connection."
+    }));
+    text.set_wrap(true);
+    text.set_margin_start(12);
+    text.set_margin_end(12);
+    text.set_margin_top(12);
+    dialog.content_area().append(&text);
+    for view in views {
+        let title = crate::tiles::page(tabs, &view.root)
+            .map(|page| page.title().to_string())
+            .unwrap_or_else(|| "Remote terminal".into());
+        let button = gtk::Button::with_label(&title);
+        let weak = dialog.downgrade();
+        button.connect_clicked(move |_| {
+            if let Some(dialog) = weak.upgrade() {
+                dialog.close();
+            }
+            if Source::capture(&view).is_some_and(|source| source.valid()) {
+                service_dialog(&view);
+            }
+        });
+        dialog.content_area().append(&button);
+    }
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.connect_response(|dialog, _| dialog.close());
+    dialog.present();
 }
 /// "Open remote web service…" on an already opened, verified SSH terminal: a
 /// port (and optional path) on that machine's own loopback, previewed through
@@ -655,6 +928,10 @@ pub fn fixture(tabs: &adw::TabView, q: &serde_json::Value) -> serde_json::Value 
             return json!({"error":e});
         }
     }
+    if q["operation"] == "service-picker" {
+        service_picker(tabs);
+        return json!({"opened":true});
+    }
     if q["operation"] == "remote-service" {
         // Drives the real dialog of the terminal whose foreground SSH pane has this PID.
         let pid = q["pid"].as_u64().unwrap_or(0);
@@ -673,7 +950,9 @@ pub fn fixture(tabs: &adw::TabView, q: &serde_json::Value) -> serde_json::Value 
         let Some(view) = view else {
             return json!({"error":"No verified SSH terminal with that process"});
         };
-        service_dialog(&view);
+        if q["existing"] != true {
+            service_dialog(&view);
+        }
         let mut result = json!({"status": view.status.text().as_str()});
         for top in gtk::Window::list_toplevels() {
             let Some(dialog) = top.downcast_ref::<gtk::Dialog>() else {
@@ -735,6 +1014,14 @@ pub fn fixture(tabs: &adw::TabView, q: &serde_json::Value) -> serde_json::Value 
             if let Err(error)=web_route::parse(text){return json!({"error":error});}
             web.address.set_text(text);
         }
+        if q["operation"]=="certificate-review" {web.review_certificate();}
+        if q["operation"]=="certificate-response" {
+            for top in gtk::Window::list_toplevels() {
+                if let Some(dialog) = top.downcast_ref::<gtk::Dialog>().filter(|d| d.widget_name() == "web-certificate-dialog") {
+                    dialog.response(if q["accept"] == true {gtk::ResponseType::Accept} else {gtk::ResponseType::Cancel});
+                }
+            }
+        }
         if q["operation"]=="choose-source" {web.choose_source();}
         if q["operation"]=="control" {
             let name=q["name"].as_str().unwrap_or("");
@@ -765,6 +1052,6 @@ pub fn fixture(tabs: &adw::TabView, q: &serde_json::Value) -> serde_json::Value 
         }
         let window=web.root.root().and_downcast::<gtk::Window>();
         let focused=window.as_ref().and_then(gtk::prelude::GtkWindowExt::focus);
-        json!({"script_result":SCRIPT_RESULT.with(|v|v.borrow().clone()),"count":views.len(),"status":web.status.text().as_str(),"loading":web.browser.is_loading(),"ephemeral":web.browser.network_session().is_some_and(|s|s.is_ephemeral()),"remote":web.remote.borrow().is_some(),"layout":describe(web.root.upcast_ref()),"origin":web.browser.uri().and_then(|u|web_route::parse(&u).ok()).map(|u|u.origin().ascii_serialization()),"address_focused":focused.as_ref().is_some_and(|f|crate::tiles::contains(&web.address,f)),"browser_focused":focused.as_ref().is_some_and(|f|crate::tiles::contains(&web.browser,f)),"browser_origin":window.as_ref().and_then(|w|web.browser.compute_point(w,&gtk::graphene::Point::new(0.,0.))).map(|p|[p.x(),p.y()])})
+        json!({"script_result":SCRIPT_RESULT.with(|v|v.borrow().clone()),"count":views.len(),"failed":web.failed.get(),"error_visible":web.content.visible_child_name().as_deref()==Some("error"),"certificate_review_available":web.certificate_button.is_visible(),"failure_detail":web.failure_detail.text().as_str(),"status":web.status.text().as_str(),"loading":web.browser.is_loading(),"ephemeral":web.browser.network_session().is_some_and(|s|s.is_ephemeral()),"remote":web.remote.borrow().is_some(),"layout":describe(web.root.upcast_ref()),"origin":web.browser.uri().and_then(|u|web_route::parse(&u).ok()).map(|u|u.origin().ascii_serialization()),"address_focused":focused.as_ref().is_some_and(|f|crate::tiles::contains(&web.address,f)),"browser_focused":focused.as_ref().is_some_and(|f|crate::tiles::contains(&web.browser,f)),"browser_origin":window.as_ref().and_then(|w|web.browser.compute_point(w,&gtk::graphene::Point::new(0.,0.))).map(|p|[p.x(),p.y()])})
     })
 }

@@ -287,6 +287,18 @@ fn bounded_forward(argv: Vec<String>) -> io::Result<()> {
 }
 impl ForwardLease {
     pub fn open(token: &str, pid: u32, host: &str, remote_port: u16) -> io::Result<Self> {
+        Self::open_at(token, pid, host, remote_port, std::net::Ipv4Addr::LOCALHOST)
+    }
+    fn open_at(
+        token: &str,
+        pid: u32,
+        host: &str,
+        remote_port: u16,
+        local_host: std::net::Ipv4Addr,
+    ) -> io::Result<Self> {
+        if !permitted_forward_address(local_host) {
+            return Err(io::Error::other("Private loopback address required"));
+        }
         if !matches!(host, "127.0.0.1" | "::1") || remote_port == 0 {
             return Err(io::Error::other(
                 "Only an explicit remote loopback TCP port is permitted",
@@ -294,10 +306,10 @@ impl ForwardLease {
         }
         let remote_host = if host == "::1" { "[::1]" } else { host };
         for _ in 0..3 {
-            let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+            let listener = std::net::TcpListener::bind((local_host, 0))?;
             let local_port = listener.local_addr()?.port();
             drop(listener);
-            let specification = format!("127.0.0.1:{local_port}:{remote_host}:{remote_port}");
+            let specification = format!("{local_host}:{local_port}:{remote_host}:{remote_port}");
             let argv = forwarding_argv(token, pid, "forward", &specification)?;
             let forward = Self {
                 token: token.into(),
@@ -333,6 +345,7 @@ impl Drop for ForwardLease {
 /// abrupt GUI termination closes that pipe and cancels the exact forward;
 /// cancelling a preview never terminates its persistent SSH master/PTY.
 pub struct LocalForward {
+    pub local_host: std::net::Ipv4Addr,
     token: String,
     pid: u32,
     pub local_port: u16,
@@ -385,8 +398,59 @@ fn reap_forward_worker(mut worker: std::process::Child) {
         let _ = worker.wait();
     });
 }
+// GLib's TLS resumption cache is process-global and keyed by hostname, not
+// port. Give each HTTPS preview a fresh numeric loopback identity, so a
+// certificate accepted in one view cannot authorize another view or SSH host.
+fn permitted_forward_address(ip: std::net::Ipv4Addr) -> bool {
+    ip == std::net::Ipv4Addr::LOCALHOST
+        || (ip.octets()[0] == 127 && (64..128).contains(&ip.octets()[1]))
+}
+fn request_local_address(q: &serde_json::Value) -> io::Result<std::net::Ipv4Addr> {
+    if q.as_object().is_none_or(|q| {
+        !matches!(q.len(), 4 | 5)
+            || q.keys()
+                .any(|k| !["token", "pid", "host", "port", "local_host"].contains(&k.as_str()))
+    }) {
+        return Err(io::Error::other("Invalid forwarding request"));
+    }
+    match q.get("local_host") {
+        None => Ok(std::net::Ipv4Addr::LOCALHOST),
+        Some(v) => v
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .filter(|ip| permitted_forward_address(*ip))
+            .ok_or_else(|| io::Error::other("Private loopback address required")),
+    }
+}
+fn next_tls_address() -> io::Result<std::net::Ipv4Addr> {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let value = NEXT
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |n| (n < 0x3fffff).then_some(n + 1),
+        )
+        .map_err(|_| io::Error::other("HTTPS preview address limit reached; reopen the GUI"))?;
+    Ok(std::net::Ipv4Addr::new(
+        127,
+        64 + (value >> 16) as u8,
+        (value >> 8) as u8,
+        value as u8,
+    ))
+}
 impl LocalForward {
-    pub fn open(token: &str, pid: u32, host: &str, port: u16) -> io::Result<Self> {
+    pub fn open(
+        token: &str,
+        pid: u32,
+        host: &str,
+        port: u16,
+        isolated_tls: bool,
+    ) -> io::Result<Self> {
+        let local_host = if isolated_tls {
+            next_tls_address()?
+        } else {
+            std::net::Ipv4Addr::LOCALHOST
+        };
         use std::io::Write;
         let _ = client(token, pid)?;
         if !matches!(host, "127.0.0.1" | "::1") || port == 0 {
@@ -399,7 +463,7 @@ impl LocalForward {
             .stderr(std::process::Stdio::null())
             .spawn()?;
         let response = (|| -> io::Result<u16> {
-            let packet = serde_json::json!({"token":token,"pid":pid,"host":host,"port":port})
+            let packet = serde_json::json!({"token":token,"pid":pid,"host":host,"port":port,"local_host":local_host.to_string()})
                 .to_string()
                 + "\n";
             worker
@@ -416,6 +480,9 @@ impl LocalForward {
             if response["ok"] != true {
                 return Err(io::Error::other("Original SSH master refused forwarding"));
             }
+            if response["local_host"].as_str() != Some(local_host.to_string().as_str()) {
+                return Err(io::Error::other("Forwarding address mismatch"));
+            }
             response["port"]
                 .as_u64()
                 .and_then(|p| u16::try_from(p).ok())
@@ -424,12 +491,13 @@ impl LocalForward {
         })();
         match response {
             Ok(local_port) => Ok(Self {
+                local_host,
                 token: token.into(),
                 pid,
                 local_port,
                 worker: std::cell::RefCell::new(Some(worker)),
                 specification: format!(
-                    "127.0.0.1:{local_port}:{}:{port}",
+                    "{local_host}:{local_port}:{}:{port}",
                     if host == "::1" { "[::1]" } else { host }
                 ),
             }),
@@ -481,9 +549,7 @@ pub fn run_forward_worker_if_requested() -> Option<i32> {
         let mut input = unsafe { fs::File::from_raw_fd(fd) };
         let packet = pipe_line(&mut input, 3)?;
         let q: serde_json::Value = serde_json::from_slice(&packet)?;
-        if q.as_object().is_none_or(|q| q.len() != 4) {
-            return Err(io::Error::other("Invalid forwarding request"));
-        }
+        let local_host = request_local_address(&q)?;
         let token = q["token"]
             .as_str()
             .ok_or_else(|| io::Error::other("Transport identity required"))?;
@@ -498,8 +564,8 @@ pub fn run_forward_worker_if_requested() -> Option<i32> {
             .as_u64()
             .and_then(|p| u16::try_from(p).ok())
             .ok_or_else(|| io::Error::other("Remote port required"))?;
-        let lease = ForwardLease::open(token, pid, host, port)?;
-        let response = serde_json::json!({"ok":true,"port":lease.local_port}).to_string() + "\n";
+        let lease = ForwardLease::open_at(token, pid, host, port, local_host)?;
+        let response = serde_json::json!({"ok":true,"port":lease.local_port,"local_host":local_host.to_string()}).to_string() + "\n";
         io::stdout().write_all(response.as_bytes())?;
         io::stdout().flush()?;
         let mut cancel = [0];
@@ -508,4 +574,39 @@ pub fn run_forward_worker_if_requested() -> Option<i32> {
         Ok(())
     })();
     Some(if result.is_ok() { 0 } else { 1 })
+}
+
+#[cfg(test)]
+mod tls_address_tests {
+    use super::*;
+    #[test]
+    fn legacy_forward_request_stays_local_and_new_requests_cannot_widen_binding() {
+        let mut q =
+            serde_json::json!({"token":"generated", "pid":1,"host":"127.0.0.1","port":8080});
+        assert_eq!(
+            request_local_address(&q).unwrap(),
+            std::net::Ipv4Addr::LOCALHOST
+        );
+        q["local_host"] = "127.64.0.1".into();
+        assert_eq!(request_local_address(&q).unwrap().to_string(), "127.64.0.1");
+        for invalid in ["0.0.0.0", "192.0.2.2", "::1", "localhost", "127.64.0.1:22"] {
+            q["local_host"] = invalid.into();
+            assert!(request_local_address(&q).is_err());
+        }
+        q.as_object_mut().unwrap().remove("local_host");
+        q["unexpected"] = true.into();
+        assert!(request_local_address(&q).is_err());
+    }
+    #[test]
+    fn tls_preview_addresses_are_distinct_and_always_loopback() {
+        let a = next_tls_address().unwrap();
+        let b = next_tls_address().unwrap();
+        assert_ne!(a, b);
+        assert!(a.is_loopback() && b.is_loopback());
+        assert!(permitted_forward_address(a) && permitted_forward_address(b));
+        assert!(!permitted_forward_address("0.0.0.0".parse().unwrap()));
+        assert!(!permitted_forward_address("192.0.2.2".parse().unwrap()));
+        assert!(!permitted_forward_address("127.128.0.1".parse().unwrap()));
+        assert!(permitted_forward_address("127.0.0.1".parse().unwrap()));
+    }
 }

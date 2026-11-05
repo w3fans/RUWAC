@@ -71,6 +71,14 @@ pub fn mapped(uri: &Url, port: u16) -> Url {
     let _ = mapped.set_port(Some(port));
     mapped
 }
+/// Map an HTTPS view to its dedicated loopback identity without changing scheme,
+/// path or query. The address is allocated and validated by the SSH forward.
+pub fn mapped_to(uri: &Url, host: std::net::Ipv4Addr, port: u16) -> Url {
+    let mut mapped = uri.clone();
+    let _ = mapped.set_host(Some(&host.to_string()));
+    let _ = mapped.set_port(Some(port));
+    mapped
+}
 /// The remote-loopback URL for "Open remote web service…": a port on the bound
 /// SSH machine's own loopback and an optional path, never another host.
 pub fn service_url(port: &str, path: &str, https: bool) -> Result<Url, String> {
@@ -184,16 +192,14 @@ mod tests {
             destination(&parse("https://example.org/").unwrap()).unwrap(),
             Destination::Public
         );
-        assert!(
-            destination(
-                &parse(&format!(
-                    "http://{}:5173/",
-                    std::net::Ipv4Addr::new(10, 0, 0, 1)
-                ))
-                .unwrap()
-            )
-            .is_err()
-        );
+        assert!(destination(
+            &parse(&format!(
+                "http://{}:5173/",
+                std::net::Ipv4Addr::new(10, 0, 0, 1)
+            ))
+            .unwrap()
+        )
+        .is_err());
         assert!(destination(&parse("http://server:5173/").unwrap()).is_err());
     }
     #[test]
@@ -248,5 +254,24 @@ mod tests {
             link_at("open (https://example.org/path). next", 15).as_deref(),
             Some("https://example.org/path")
         );
+    }
+}
+
+#[cfg(test)]
+mod isolated_tls_tests {
+    use super::*;
+    #[test]
+    fn distinct_tls_routes_keep_remote_request_and_scheme() {
+        let original = parse("https://localhost:3082/app?ticket=generated#page").unwrap();
+        let a = mapped_to(&original, "127.64.0.1".parse().unwrap(), 32001);
+        let b = mapped_to(&original, "127.64.0.2".parse().unwrap(), 32002);
+        assert_ne!(a.host_str(), b.host_str());
+        assert_ne!(a.origin(), b.origin());
+        assert_eq!(a.scheme(), "https");
+        assert_eq!(a.path(), original.path());
+        assert_eq!(a.query(), original.query());
+        assert_eq!(a.fragment(), original.fragment());
+        assert_eq!(original.host_str(), Some("localhost"));
+        assert_eq!(original.port(), Some(3082));
     }
 }
