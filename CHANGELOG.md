@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## v0.4.59 — 2026-11-05 — Stable source release
+
+- Bound retries of Linux ETXTBSY when spawning copied test executables in agent
+  attachment tests. Other launch errors still fail immediately; production
+  process launching is unchanged. Verify the retry with a real open writer and
+  enforce its deadline for a persistent busy error.
+
+- Report installed CLI and running daemon versions separately with `engine
+  status`, including discovery through an updated remote CLI. Show the local
+  engine version in the GUI terminal footer without querying it during rendering.
+  `engine gui` opens new work on an independent updated engine, preserving the
+  original window, terminals and history. `engine new` provides terminal-only
+  launch arguments with a separate durable checkpoint; no sessions are migrated.
+  Clear the engine checkpoint override from new PTY shells so independent nested
+  daemons cannot reuse its history file. Keep the socket for normal client routing.
+
 ## v0.4.58 — 2026-11-04 — Stable source release
 
 - Reduce full terminal-frame traffic using an optional palette encoding shared

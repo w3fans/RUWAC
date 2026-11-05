@@ -45,6 +45,24 @@ Updates preserve terminal processes and saved configuration. Reopen the GUI to
 load updated code; RDP connections reconnect after reopening. Already running
 programs and daemons keep the code and environment they started with.
 
+To check which engine your terminals actually use, run `ruwac engine status`.
+It reports both the installed CLI and the running engine without starting or
+restarting anything. The GUI terminal footer also identifies a preserved older
+local engine. An installed update does not change existing terminal processes.
+
+For new work on the updated engine, run `ruwac engine gui`. This opens a separate
+GUI window with its own socket, workspace and durable terminal history. Your
+original window and terminals keep running. Sessions are not migrated between
+engines. For terminal-only use, `ruwac engine new` returns argument arrays for
+launching a new session or GUI; retain the included `RUWAC_STATE_FILE` setting
+when reconnecting so engine restarts recover the same history. Checkpoint
+selection stays with that frontend/engine and is cleared from new PTY shells. A custom
+`RUWAC_STATE_FILE` must be unset before requesting a separate engine.
+
+`ruwac --host HOST engine status` checks an updated remote CLI and its running
+engine through the existing verified SSH route. Older remote CLIs need updating
+before they can provide this report; no remote engine is restarted automatically.
+
 ## First terminal session
 
 After installation, start a named session:

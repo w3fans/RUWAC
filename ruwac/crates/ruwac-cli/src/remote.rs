@@ -179,6 +179,18 @@ impl Remote {
         }
         Ok(v)
     }
+    pub fn engine_status(&self) -> io::Result<Value> {
+        let v = self.exchange(&["engine", "status", "--json"], Vec::new())?;
+        if v["version"] != 0
+            || !v["result"]["running"].is_boolean()
+            || !v["result"]["installed_cli"].is_string()
+        {
+            return Err(io::Error::other(
+                "remote engine discovery rejected; update the remote CLI for installed/running version reporting",
+            ));
+        }
+        Ok(v)
+    }
     pub fn shell_argv(&self) -> io::Result<Vec<String>> {
         let value = self.exchange(&["shell-argv"], Vec::new()).map_err(|_| {
             io::Error::other(

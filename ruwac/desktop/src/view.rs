@@ -14,6 +14,14 @@ use std::{
 thread_local! {
     static HISTORY_STYLE: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
 }
+fn engine_version_notice(version: Option<&str>) -> String {
+    let frontend = env!("CARGO_PKG_VERSION");
+    match version {
+        Some(engine) if engine == frontend => format!("Engine {engine}"),
+        Some(engine) => format!("GUI {frontend} · local engine {engine} (preserved)"),
+        None => format!("GUI {frontend} · local engine version unavailable"),
+    }
+}
 fn terminal_tab_status(frame: bool, offline: bool, warning: bool) -> crate::tiles::TabStatus {
     use crate::tiles::TabStatus;
     if offline {
@@ -30,6 +38,18 @@ fn terminal_tab_status(frame: bool, offline: bool, warning: bool) -> crate::tile
 mod tab_health_tests {
     use super::terminal_tab_status;
     use crate::tiles::TabStatus;
+    #[test]
+    fn installed_gui_is_never_mistaken_for_running_engine() {
+        let current = env!("CARGO_PKG_VERSION");
+        assert_eq!(
+            super::engine_version_notice(Some(current)),
+            format!("Engine {current}")
+        );
+        assert!(
+            super::engine_version_notice(Some("0.1.9")).contains("local engine 0.1.9 (preserved)")
+        );
+        assert!(super::engine_version_notice(None).contains("unavailable"));
+    }
     #[test]
     fn retained_warning_does_not_mark_live_terminal_failed() {
         assert_eq!(
@@ -1816,11 +1836,16 @@ impl View {
                     }
                 };
                 self.status.set_text(&format!(
-                    "{} · {}:{} — {state}{shared}",
+                    "{} · {}:{} — {state}{shared} · {}",
                     frame["session_name"].as_str().unwrap_or("Terminal"),
                     frame["window_index"].as_u64().unwrap_or(0),
-                    frame["name"].as_str().unwrap_or("shell")
+                    frame["name"].as_str().unwrap_or("shell"),
+                    engine_version_notice(s.engine_version.as_deref())
                 ));
+                self.status.set_tooltip_text(Some(&format!(
+                    "{}\nUpdates preserve running terminals. For new work on an independent updated engine, run: ruwac engine gui. Existing sessions stay on their current engine.",
+                    engine_version_notice(s.engine_version.as_deref())
+                )));
             }
             if self.navigation.get() {
                 if self.expected_window.borrow().as_deref() == frame["window"].as_str() {

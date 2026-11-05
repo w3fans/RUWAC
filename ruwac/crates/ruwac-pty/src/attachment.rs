@@ -199,6 +199,38 @@ pub fn highest_image(screen: &str) -> u64 {
         .max()
         .unwrap_or(0)
 }
+/// Copied test executables can transiently return ETXTBSY during parallel test
+/// process creation. Retry only that kernel error, with an absolute deadline.
+/// This helper is never compiled into production process launching.
+#[cfg(test)]
+pub fn spawn_test_command(command: &mut std::process::Command) -> io::Result<std::process::Child> {
+    retry_test_spawn(
+        || command.spawn(),
+        std::time::Instant::now() + std::time::Duration::from_secs(2),
+    )
+}
+
+#[cfg(test)]
+fn retry_test_spawn<T>(
+    mut spawn: impl FnMut() -> io::Result<T>,
+    deadline: std::time::Instant,
+) -> io::Result<T> {
+    loop {
+        match spawn() {
+            Err(e)
+                if e.raw_os_error() == Some(libc::ETXTBSY)
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(
+                    std::time::Duration::from_millis(10)
+                        .min(deadline.saturating_duration_since(std::time::Instant::now())),
+                );
+            }
+            result => return result,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,11 +296,9 @@ mod tests {
             let exe = dir.join(index.to_string()).join(relative);
             fs::create_dir_all(exe.parent().unwrap()).unwrap();
             fs::copy("/usr/bin/sleep", &exe).unwrap();
-            let mut child = std::process::Command::new(&exe)
-                .arg("5")
-                .process_group(0)
-                .spawn()
-                .unwrap();
+            let mut child =
+                spawn_test_command(std::process::Command::new(&exe).arg("5").process_group(0))
+                    .unwrap();
             std::thread::sleep(std::time::Duration::from_millis(50));
             let found = foreground_agent(child.id());
             child.kill().unwrap();
@@ -276,5 +306,78 @@ mod tests {
             assert_eq!(found, expected, "{relative}");
         }
         fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn copied_executable_busy_writer_is_retried_then_reaped() {
+        let dir = std::env::temp_dir().join(format!(
+            "ruwac-exec-retry-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let executable = dir.join("true");
+        fs::copy("/usr/bin/true", &executable).unwrap();
+        let writer = fs::OpenOptions::new()
+            .write(true)
+            .open(&executable)
+            .unwrap();
+        assert_eq!(
+            std::process::Command::new(&executable)
+                .spawn()
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ETXTBSY)
+        );
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            drop(writer);
+        });
+        let spawned = spawn_test_command(&mut std::process::Command::new(&executable));
+        release.join().unwrap();
+        let mut child = spawned.unwrap();
+        assert!(child.wait().unwrap().success());
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn executable_retry_preserves_other_errors_and_deadline() {
+        use std::time::{Duration, Instant};
+        let mut attempts = 0;
+        let error = retry_test_spawn::<()>(
+            || {
+                attempts += 1;
+                Err(io::Error::from_raw_os_error(libc::EACCES))
+            },
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EACCES));
+        assert_eq!(attempts, 1);
+        attempts = 0;
+        let error = retry_test_spawn::<()>(
+            || {
+                attempts += 1;
+                Err(io::Error::from_raw_os_error(libc::ETXTBSY))
+            },
+            Instant::now() + Duration::from_millis(30),
+        )
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ETXTBSY));
+        // A preempted test may first observe the error after its deadline.
+        assert!((1..=10).contains(&attempts));
+        attempts = 0;
+        let value = retry_test_spawn(
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(io::Error::from_raw_os_error(libc::ETXTBSY))
+                } else {
+                    Ok(42)
+                }
+            },
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(value, 42);
+        assert_eq!(attempts, 3);
     }
 }

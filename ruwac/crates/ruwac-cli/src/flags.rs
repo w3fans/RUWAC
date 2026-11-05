@@ -102,6 +102,7 @@ pub fn normalize(args: &mut [String]) {
     } else if matches!(
         name,
         "session"
+            | "engine"
             | "buffer"
             | "window"
             | "pane"

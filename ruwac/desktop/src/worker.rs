@@ -441,6 +441,8 @@ pub struct State {
     pub acknowledgements: u64,
     pub coalesced: u64,
     pub supports_previous_window: bool,
+    /// Cached once per authenticated connection; never queried while rendering.
+    pub engine_version: Option<String>,
 }
 pub struct Worker {
     tx: SyncSender<Command>,
@@ -541,6 +543,15 @@ impl Worker {
                     .is_some_and(|methods| methods.iter().any(|m| m == "window.previous"));
                 let capabilities = rpc.call("capabilities", json!({}))?;
                 rpc.limits = ruwac_protocol::TerminalLimits::advertised(&capabilities);
+                let engine_version = rpc.call("version", json!({})).ok().and_then(|v| {
+                    v["package"]
+                        .as_str()
+                        .filter(|s| {
+                            !s.is_empty() && s.len() <= 64 && !s.chars().any(char::is_control)
+                        })
+                        .map(str::to_owned)
+                });
+                st.lock().unwrap().engine_version = engine_version;
                 // A not-yet-allocated or hidden tab must not impose a 24x80
                 // transient resize on an already shared session.
                 let mut early = VecDeque::new();

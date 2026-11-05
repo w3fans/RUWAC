@@ -54,6 +54,10 @@ impl Pty {
         cmd.env_remove("NO_COLOR");
         cmd.env_remove("BASH_ENV");
         cmd.env_remove("ENV");
+        // Checkpoint selection belongs to the engine/frontend that starts it.
+        // A shell launching an independent or test daemon must not reuse this
+        // engine's checkpoint. Keep RUWAC_SOCKET for ordinary client routing.
+        cmd.env_remove("RUWAC_STATE_FILE");
         let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
         let pid = child.process_id().ok_or("child PID unavailable")?;
         drop(pair.slave);

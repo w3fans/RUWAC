@@ -75,6 +75,12 @@ fn probe(path: &Path) -> io::Result<bool> {
 }
 
 pub fn ensure(path: &Path) -> io::Result<bool> {
+    ensure_with_state(path, None)
+}
+
+/// An explicit side-by-side engine may have its own durable checkpoint. The
+/// override belongs only to the spawned child, never to this frontend's process.
+pub fn ensure_with_state(path: &Path, state: Option<&Path>) -> io::Result<bool> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -98,9 +104,13 @@ pub fn ensure(path: &Path) -> io::Result<bool> {
         .arg("--socket")
         .arg(path)
         .arg("serve")
+        .env("RUWAC_SOCKET", path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(state) = state {
+        command.env("RUWAC_STATE_FILE", state);
+    }
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() < 0 {

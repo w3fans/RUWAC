@@ -154,11 +154,9 @@ mod tests {
         let exe = root.join("claude/versions/9.9.9");
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
         std::fs::copy("/usr/bin/sleep", &exe).unwrap();
-        let mut child = std::process::Command::new(&exe)
-            .arg("10")
-            .process_group(0)
-            .spawn()
-            .unwrap();
+        let mut child =
+            guard::spawn_test_command(std::process::Command::new(&exe).arg("10").process_group(0))
+                .unwrap();
         std::thread::sleep(Duration::from_millis(50));
         let pid = u64::from(child.id());
         let calls = std::cell::RefCell::new(Vec::new());

@@ -1,37 +1,33 @@
-RUWAC v0.4.58 reduces terminal frame traffic and adds useful terminal controls and remote Web service previews.
+RUWAC v0.4.59 reports running engine versions and opens separate updated-engine workspaces.
 
-Terminal clients can use compact complete frames while preserving exact glyphs,
-colors, styles and input modes. Older clients continue receiving plain frames;
-updated clients accept plain replies from preserved engines. Expansion has cell
-and byte limits. Oversized aggregate views keep plain frames, including views
-spanning independently zoomed canonical grids. Polling, socket framing and SSH timing/privacy settings are
-unchanged. Existing daemons and terminal programs do not need to be restarted.
+Package updates preserve existing terminal processes. Those terminals keep using
+their original daemon, so installing new files alone does not activate backend
+fixes. Run `ruwac engine status` to distinguish the installed CLI from the running
+engine. GUI terminal footers also identify their local engine; this information
+is cached at connection time rather than queried while typing or rendering.
+`ruwac --host HOST engine status` discovers an updated CLI and its engine on the
+selected verified SSH endpoint. Older remote CLIs must be updated first.
 
-Generated A/B/A tests measured local TUI medians of 16–19 ms before versus 11 ms
-in the candidate, and nested SSH GUI-protocol medians of 52–54 ms versus 33 ms.
-Local frame traffic fell from about 158 KB to 12 KB per key. Local GUI median
-varied with host load; these measurements exclude physical display latency and
-real-network RTT. The dated design/results documents record controls and limits.
+Run `ruwac engine gui` for new work on the updated engine. It opens an independent
+window with a separate socket, workspace and durable terminal checkpoint. The
+original window, daemon and terminal programs keep running; sessions are not
+migrated. `ruwac engine new` provides equivalent terminal-only launch arguments.
+Retain both included RUWAC_SOCKET and RUWAC_STATE_FILE settings when reconnecting.
+The new engine's shells inherit its socket, so plain RUWAC commands address the
+correct engine. The checkpoint override stays with the frontend and engine; it
+is removed from new PTY shells so nested daemons cannot accidentally reuse it.
+Explicit custom checkpoint overrides are refused rather than
+silently shared. A new engine can activate the palette frame encoding while an
+older preserved engine continues serving its existing clients.
 
-The new explicit-target command subset includes tmux-style window/pane navigation,
-splitting, renaming and literal input, plus Screen-style stuff/paste/split/info and
-session-buffer controls. Stable identities and strict flags reject ambiguous
-requests; literal text is not submitted automatically. The command inventory
-lists supported subsets and remaining differences, without claiming full tmux or
-Screen scripting/configuration compatibility.
+Agent attachment tests now retry only Linux ETXTBSY when starting copied test
+executables, for at most two seconds. Other spawn errors fail immediately.
+Production process launching is unchanged. Tests cover a real open writer,
+eventual execution, a persistent busy error and an unrelated permission error.
 
-On a terminal opened through a verified saved SSH machine, choose “Open remote
-web service…” and enter the port and optional path of the app listening on that
-machine's localhost. The preview uses that terminal's original SSH connection
-and a temporary local-loopback forward. No manual ssh -L or replacement login is
-needed. Invalid ports, foreign-host paths and changed connection identities are
-refused. Closing a preview closes its forward while keeping the terminal alive.
-
-Reopen the GUI and reattach a TUI frontend to load new client behavior; preserve
-running programs. New engine-side compression applies when using an updated
-engine; preserved engines remain supported through plain frames.
-
-The known RSA RUSTSEC-2023-0071 advisory remains unresolved and unsuppressed.
-Physical/external-host, full viewer/controller and broader product qualification
-remain open. Published-artifact verification and installation are separate from
-source publication.
+Release qualification retains the existing 19 mandatory categories and adds
+real-process engine coexistence, concurrent startup, durable recovery, refusal,
+actual palette frame and isolated mapped-window preservation checks. Published
+artifact verification is a separate delivery step. Physical input, broader
+external-host qualification and the remaining development plan are still open.
+The known RSA timing advisory remains unresolved and unsuppressed.
