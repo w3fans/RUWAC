@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Open remote localhost web services from an existing verified SSH terminal.
+  Keep load and certificate errors visible, offer explicit certificate-fingerprint
+  review for that preview, and refuse approval after its SSH identity or view
+  changes. Isolate HTTPS preview identities so certificate approval cannot carry
+  into a different preview.
+- Add RDP, Term, Codex and Claude choices to the Machines filter, including linked
+  endpoints. Keep All machines, Favorites, Recent and Alt+M behavior available.
+- Explain that COPR's `ruwac` source package supplies both CLI and GUI RPMs, with
+  desktop installation, DNF updates and per-user migration instructions.
+
 ## v0.4.59 — 2026-11-05 — Stable source release
 
 - Bound retries of Linux ETXTBSY when spawning copied test executables in agent

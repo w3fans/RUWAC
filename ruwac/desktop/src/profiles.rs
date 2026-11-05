@@ -2144,6 +2144,26 @@ fn shortcut_menu(
     }
     body
 }
+// Capability filters apply to a whole machine, including linked endpoints.
+// Keep endpoint search/favorite/recent semantics independent of these filters.
+fn capability_machines(items: &[Profile], mode: u32) -> Option<std::collections::HashSet<&str>> {
+    if !(3..=6).contains(&mode) {
+        return None;
+    }
+    Some(
+        items
+            .iter()
+            .filter(|p| match mode {
+                3 => p.protocol == "RDP",
+                4 => p.protocol == "SSH",
+                5 => !p.preferences.codex_command.is_empty(),
+                6 => !p.preferences.claude_command.is_empty(),
+                _ => false,
+            })
+            .map(|p| p.machine_id.as_str())
+            .collect(),
+    )
+}
 pub fn sidebar(
     agent_launcher: AgentLauncher,
     open: impl Fn(Profile, PreferenceSink, ConnectionLease) + 'static,
@@ -2172,7 +2192,16 @@ pub fn sidebar(
     search.set_placeholder_text(Some("Machines, groups, tags (Alt+M)"));
     search.set_width_chars(12);
     root.append(&search);
-    let filter = gtk::DropDown::from_strings(&["All machines", "Favorites", "Recent"]);
+    let filter = gtk::DropDown::from_strings(&[
+        "All machines",
+        "Favorites",
+        "Recent",
+        "RDP",
+        "Term",
+        "Codex",
+        "Claude",
+    ]);
+    filter.set_widget_name("machine-sidebar-filter");
     root.append(&filter);
     let status = gtk::Label::new(None);
     status.set_widget_name("machines-status");
@@ -2241,13 +2270,17 @@ pub fn sidebar(
                         .collect()
                 }
             };
-            let mut rows: Vec<_> = store
-                .borrow()
+            let state = store.borrow();
+            let machines = capability_machines(&state.items, filter.selected());
+            let mut rows: Vec<_> = state
                 .items
                 .iter()
                 .enumerate()
                 .filter(|(_, p)| {
                     ids.contains(&p.id)
+                        && machines
+                            .as_ref()
+                            .is_none_or(|ids| ids.contains(p.machine_id.as_str()))
                         && p.matches(&search.text())
                         && match filter.selected() {
                             1 => p.favorite,
@@ -2257,6 +2290,8 @@ pub fn sidebar(
                 })
                 .map(|(i, p)| (i, p.clone()))
                 .collect();
+            drop(machines);
+            drop(state);
             rows.sort_by_key(|(_, p)| {
                 (
                     p.group.clone(),
@@ -3103,6 +3138,32 @@ pub fn sidebar(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sidebar_capabilities_include_linked_endpoints_without_matching_other_machines() {
+        let mut rdp = quick_ssh_profile("desktop", 0).unwrap();
+        rdp.protocol = "RDP".into();
+        let mut ssh = quick_ssh_profile("desktop-ssh", 1).unwrap();
+        ssh.machine_id = rdp.machine_id.clone();
+        let mut claude = quick_ssh_profile("claude-host", 2).unwrap();
+        claude.preferences.kimi_command = "kimi --session".into();
+        let plain = quick_ssh_profile("plain", 0).unwrap();
+        let items = vec![rdp.clone(), ssh.clone(), claude.clone(), plain.clone()];
+        let selected = |mode| capability_machines(&items, mode).unwrap();
+        assert_eq!(selected(3), [rdp.machine_id.as_str()].into_iter().collect());
+        assert_eq!(selected(4).len(), 3);
+        assert_eq!(selected(5), [rdp.machine_id.as_str()].into_iter().collect());
+        assert_eq!(
+            selected(6),
+            [claude.machine_id.as_str()].into_iter().collect()
+        );
+        for mode in [0, 1, 2, u32::MAX] {
+            assert!(capability_machines(&items, mode).is_none());
+        }
+        assert!(capability_machines(&[], 3).unwrap().is_empty());
+        // Filtering does not modify profiles or enable missing agent commands.
+        assert!(plain.preferences.codex_command.is_empty());
+        assert!(rdp.preferences.claude_command.is_empty());
+    }
     #[test]
     fn quick_host_profiles_are_ssh_only_and_preserve_openssh_defaults() {
         let p = quick_ssh_profile(" devbox ", 0).unwrap();
