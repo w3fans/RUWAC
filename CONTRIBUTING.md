@@ -35,4 +35,24 @@ Dependency changes must update the appropriate Cargo.lock, retain upstream licen
 
 Product publication and version allocation belong to the existing qualified build/release authority. Contributors do not invent release versions or bypass that workflow. GitHub quality checks build test artifacts; they do not publish binaries, RPMs or stable releases.
 
+## Development releases and stable milestones
+
+Completed functional changes follow the established development patch-release
+workflow: controller-assigned version, changelog, build, required tests and
+validation, GitHub publication, then authorized installation/update delivery.
+Stabilization recommendations, unfinished unrelated features and incomplete
+higher milestones do not impose a standing release freeze. Stable milestones
+must additionally meet their own acceptance criteria.
+
+Cloud pull-request contributors use the approved review and CI process; the
+designated release authority publishes the validated merged changes. Audit-only
+and candidate-only work retains its stated scope and does not authorize invented
+changes or deployments just to create a version.
+
+Release gates remain mandatory, including security checks, active release locks
+and required approval for service changes. A blocked release must identify the
+specific failed gate and corrective action. Reconcile local changes and merged
+upstream work before publishing; never overwrite another active checkout.
+Use the existing version controller and release scripts throughout.
+
 Report vulnerabilities according to [SECURITY.md](SECURITY.md). Participation follows [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Clarify that qualified development patch releases continue independently of
+  broader stable milestones, using the existing controller and release gates.
+
 - Copy styled hyperlinks wrapped by terminal applications as one URL, removing
   only their display margin. Apply this to pinned mouse selections as well as
   live terminal cells; preserve ordinary text, code and genuine hard newlines.
