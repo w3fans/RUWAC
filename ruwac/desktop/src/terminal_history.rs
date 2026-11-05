@@ -112,11 +112,13 @@ impl History {
     pub fn selected(&self, a: (usize, usize), z: (usize, usize)) -> String {
         let (a, z) = if a <= z { (a, z) } else { (z, a) };
         let mut result = String::new();
+        let mut skip_indent = 0;
         for row in a.0..=z.0.min(self.rows.len().saturating_sub(1)) {
             let Some((text, wrapped)) = self.rows.get(row) else {
                 break;
             };
-            let start = if row == a.0 { a.1 } else { 0 };
+            let start = if row == a.0 { a.1 } else { skip_indent };
+            skip_indent = 0;
             let end = if row == z.0 {
                 z.1.saturating_add(1)
             } else {
@@ -137,7 +139,26 @@ impl History {
             }
             if row != z.0 && !wrapped {
                 result.push_str(line.trim_end_matches(' '));
-                result.push('\n');
+                // Only screen rows whose styles survived the frozen snapshot
+                // qualify. Unstyled history keeps every genuine hard newline.
+                let next_end = if row + 1 == z.0 {
+                    z.1.saturating_add(1)
+                } else {
+                    self.cols
+                };
+                let continuation = self
+                    .live_cells
+                    .iter()
+                    .find(|(n, _)| *n == row)
+                    .zip(self.live_cells.iter().find(|(n, _)| *n == row + 1))
+                    .and_then(|((_, previous), (_, next))| {
+                        crate::view::styled_url_continuation(previous, next, &result, next_end)
+                    });
+                if let Some(indent) = continuation {
+                    skip_indent = indent;
+                } else {
+                    result.push('\n');
+                }
             } else {
                 result.push_str(&line);
             }

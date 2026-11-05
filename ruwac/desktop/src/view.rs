@@ -70,6 +70,87 @@ mod tab_health_tests {
         assert_eq!(terminal_tab_status(true, false, false), TabStatus::Ready);
     }
 }
+fn copy_link_style(cell: &Value) -> Option<(&Value, &str, Option<&Value>)> {
+    let extra = cell.get(6)?;
+    let underline = extra.get("underline")?.as_str()?;
+    if !matches!(
+        underline,
+        "single" | "double" | "curly" | "dotted" | "dashed"
+    ) {
+        return None;
+    }
+    Some((cell.get(2)?, underline, extra.get("underline_color")))
+}
+// A TUI may render a hyperlink with an explicit newline and its own left
+// margin, losing terminal soft-wrap metadata. Repair only a matching styled
+// URL at the right edge; ordinary text/code continues to keep hard newlines.
+pub(crate) fn styled_url_continuation(
+    previous: &Value,
+    next: &Value,
+    copied: &str,
+    next_end: usize,
+) -> Option<usize> {
+    let previous = previous.as_array()?;
+    let next = next.as_array()?;
+    let nonblank = |c: &Value| {
+        c[1] != true
+            && c[0]
+                .as_str()
+                .is_some_and(|t| !t.is_empty() && !t.chars().all(char::is_whitespace))
+    };
+    let last = previous.iter().rposition(nonblank)?;
+    if previous.len().saturating_sub(last + 1) > 3 {
+        return None;
+    }
+    let style = copy_link_style(&previous[last])?;
+    for cell in previous[..=last].iter().rev() {
+        if cell[1] == true {
+            continue;
+        }
+        let text = cell[0].as_str()?;
+        if text.is_empty() || text.chars().any(char::is_whitespace) {
+            break;
+        }
+        if copy_link_style(cell)? != style {
+            return None;
+        }
+    }
+    let token = copied.split_whitespace().next_back()?;
+    if !token.starts_with("https://") && !token.starts_with("http://") {
+        return None;
+    }
+    let first = next.iter().position(nonblank)?;
+    if first > 4 || first >= next_end {
+        return None;
+    }
+    let mut suffix = String::new();
+    for cell in next.iter().take(next_end).skip(first) {
+        if cell[1] == true {
+            continue;
+        }
+        let text = cell[0].as_str()?;
+        if text.is_empty() || text.chars().any(char::is_whitespace) {
+            break;
+        }
+        if copy_link_style(cell)? != style {
+            return None;
+        }
+        suffix.push_str(text);
+    }
+    if suffix.is_empty()
+        || suffix.starts_with("https:")
+        || suffix.starts_with("http:")
+        || suffix == "&"
+        || suffix
+            .chars()
+            .any(|c| matches!(c, '\\' | '\'' | '"' | '`' | '$' | ';' | '|' | '<' | '>'))
+        || token.len() + suffix.len() > crate::web_route::MAX_URL
+    {
+        return None;
+    }
+    crate::web_route::parse(&format!("{token}{suffix}")).ok()?;
+    Some(first)
+}
 fn selection_text(grid: &Value, mut a: (usize, usize), mut z: (usize, usize)) -> String {
     if a > z {
         std::mem::swap(&mut a, &mut z);
@@ -78,29 +159,39 @@ fn selection_text(grid: &Value, mut a: (usize, usize), mut z: (usize, usize)) ->
         return String::new();
     };
     let mut result = String::new();
+    let mut skip_indent = 0;
     for r in a.0..=z.0.min(rows.len().saturating_sub(1)) {
         let Some(cells) = rows.get(r).and_then(Value::as_array) else {
             break;
         };
-        let start = if r == a.0 { a.1 } else { 0 };
+        let start = if r == a.0 { a.1 } else { skip_indent };
         let end = if r == z.0 {
             z.1.saturating_add(1)
         } else {
             cells.len()
         };
-        let mut line = String::new();
+        skip_indent = 0;
         for cell in cells.iter().take(end).skip(start) {
             if cell[1] != true {
-                line.push_str(cell[0].as_str().unwrap_or(""));
+                result.push_str(cell[0].as_str().unwrap_or(""));
             }
         }
         let wrapped = grid["wrapped"][r].as_bool().unwrap_or(false);
         if r != z.0 && !wrapped {
-            // Grid padding after a shell continuation must not become text.
-            result.push_str(line.trim_end_matches(' '));
-            result.push('\n');
-        } else {
-            result.push_str(&line);
+            let next_end = if r + 1 == z.0 {
+                z.1.saturating_add(1)
+            } else {
+                usize::MAX
+            };
+            let continuation = rows
+                .get(r + 1)
+                .and_then(|next| styled_url_continuation(&rows[r], next, &result, next_end));
+            result.truncate(result.trim_end_matches(' ').len());
+            if let Some(indent) = continuation {
+                skip_indent = indent;
+            } else {
+                result.push('\n');
+            }
         }
     }
     result
@@ -163,6 +254,88 @@ mod selection_tests {
         assert_eq!(g["cells"][1][1][1], true);
         assert_eq!(g["cells"][1][2][0], "e\u{301}");
         assert_eq!(live["cursor"]["visible"], true);
+    }
+    fn styled_url_grid() -> (Value, (usize, usize), (usize, usize)) {
+        let prefix = "A long question filling the terminal row: from ";
+        let url = "https://github.com/w3fans/dPDF/";
+        let tail = "actions/runs/41968233752";
+        let first = format!("{prefix}{url}  ");
+        let second = format!("  {tail} (the message above the jobs).");
+        let width = first.len().max(second.len());
+        let lines = [format!("{first:width$}"), format!("{second:width$}")];
+        let mut g = grid(&[&lines[0], &lines[1]], &[false, false]);
+        for (row, start, end) in [
+            (0, prefix.len(), prefix.len() + url.len()),
+            (1, 2, 2 + tail.len()),
+        ] {
+            for cell in g["cells"][row]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .take(end)
+                .skip(start)
+            {
+                let values = cell.as_array_mut().unwrap();
+                values.resize(7, Value::Null);
+                values[2] = json!({"rgb":[80,180,240]});
+                values[6] = json!({"underline":"single"});
+            }
+        }
+        (g, (0, prefix.find("from ").unwrap()), (1, second.len() - 1))
+    }
+    #[test]
+    fn copied_wrapped_codex_url_has_no_padding_or_indent() {
+        let (g, a, z) = styled_url_grid();
+        let expected = "from https://github.com/w3fans/dPDF/actions/runs/41968233752 (the message above the jobs).";
+        assert_eq!(selection_text(&g, a, z), expected);
+        assert_eq!(selection_text(&g, z, a), expected);
+    }
+    #[test]
+    fn ordinary_hard_lines_and_non_link_indentation_are_preserved() {
+        let (mut g, a, z) = styled_url_grid();
+        for cells in g["cells"].as_array_mut().unwrap() {
+            for cell in cells.as_array_mut().unwrap() {
+                cell.as_array_mut().unwrap().truncate(2);
+            }
+        }
+        assert!(selection_text(&g, a, z).contains("dPDF/\n  actions/"));
+        let (mut g, a, z) = styled_url_grid();
+        for cell in g["cells"][1].as_array_mut().unwrap() {
+            cell.as_array_mut().unwrap().truncate(2);
+        }
+        assert!(selection_text(&g, a, z).contains("dPDF/\n  actions/"));
+    }
+    #[test]
+    fn separated_links_and_different_styles_are_not_reflowed() {
+        let (mut g, a, z) = styled_url_grid();
+        g["cells"][1][2][2] = json!({"rgb":[255,0,0]});
+        assert!(selection_text(&g, a, z).contains("dPDF/\n  actions/"));
+        let (mut g, a, z) = styled_url_grid();
+        for (i, c) in "https://".chars().enumerate() {
+            g["cells"][1][2 + i][0] = json!(c.to_string());
+        }
+        assert!(selection_text(&g, a, z).contains("dPDF/\n  https://"));
+    }
+    #[test]
+    fn links_away_from_row_edge_keep_their_real_newline() {
+        let (mut g, a, z) = styled_url_grid();
+        for _ in 0..8 {
+            g["cells"][0]
+                .as_array_mut()
+                .unwrap()
+                .push(json!([" ", false]));
+        }
+        assert!(selection_text(&g, a, z).contains("dPDF/\n  actions/"));
+    }
+    #[test]
+    fn link_copy_does_not_join_shell_syntax_or_unselected_continuations() {
+        for bad in [";", "|", "$", "\\", "`", "'", "\""] {
+            let (mut g, a, z) = styled_url_grid();
+            g["cells"][1][2][0] = json!(bad);
+            assert!(selection_text(&g, a, z).contains("dPDF/\n  "));
+        }
+        let (g, a, _) = styled_url_grid();
+        assert!(selection_text(&g, a, (1, 1)).ends_with("\n  "));
     }
     #[test]
     fn selected_wrapped_install_command_keeps_one_logical_line_in_both_directions() {

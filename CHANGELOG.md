@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Copy styled hyperlinks wrapped by terminal applications as one URL, removing
+  only their display margin. Apply this to pinned mouse selections as well as
+  live terminal cells; preserve ordinary text, code and genuine hard newlines.
+
 - Open remote localhost web services from an existing verified SSH terminal.
   Keep load and certificate errors visible, offer explicit certificate-fingerprint
   review for that preview, and refuse approval after its SSH identity or view
