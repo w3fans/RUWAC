@@ -1,22 +1,16 @@
-RUWAC v0.4.67
+RUWAC v0.4.68
 
-PNG paste into a local nested RUWAC terminal now hands the staged image to
-that specific terminal, which validates its selected agent and attaches through
-its existing engine connection. Displayless persisted Codex/Claude processes no
-longer need direct X11 clipboard access for this route. No Enter is sent.
+Double-click words in GUI terminals and ordinary shell panes in the terminal
+client. Applications that request mouse input keep receiving their mouse events;
+hold Shift in the GUI to select terminal text instead.
 
-The handoff is private, short-lived and bounded. Typing, changing pane/view or
-losing GUI focus revokes unfinished delivery. Ordinary native Ctrl+V, SSH image
-transfer and older nested frontends retain their existing routes.
+Selections preserve combining accents, wide characters and joined emoji, including
+words split by a real soft wrap. Oversized word copies leave the terminal attached
+and preserve its previous copy buffer. Existing held-drag scrollback, keyboard
+controls, PNG handoffs and persistent terminal sessions remain in place.
 
-Update and reopen the GUI, then detach the nested CLI with Ctrl+A followed by d
-and reattach with ruwac -r SESSION. The engine, agent and terminal programs can
-keep running. Updating only the package files does not reload an attached CLI.
-
-Generated displayless-agent tests use an actual published v0.4.59 engine and
-preserve its agent PID/start identity. Native GDK/PTY comparison retains the
-published v0.4.66 GUI as a negative control. Frozen release and actual-public
-acceptance remain separate from candidate results; owner physical/provider
-image consumption and external Windows acceptance are not claimed.
-
-The known RSA Marvin advisory and maintenance warnings remain unsuppressed.
+Reopen the GUI and detach/reattach the terminal client to load the new frontend.
+The engine, agents and terminal programs can keep running. This development patch
+has generated PTY/native-compositor acceptance; physical input, clipboard-manager
+and external Windows acceptance remain separate. The known RSA advisory remains
+unsuppressed.

@@ -2,9 +2,13 @@
 
 ## Unreleased
 
+## v0.4.68 — 2026-11-06 — Stable source release
+
 - Double-click terminal words in the GUI or an ordinary shell in the terminal
   client. Preserve Unicode graphemes and soft-wrapped words; use Shift in the
   GUI when the application owns mouse input.
+- Use each source pane’s history geometry when selecting words in fresh or
+  populated splits.
 - Keep application mouse handling, held-drag scrollback and persistent sessions.
   Refuse oversized word copies without detaching the terminal or replacing its
   previous copy buffer.
