@@ -1,19 +1,15 @@
 use std::time::Duration;
 
+pub(super) fn recently_active(since_input: Duration) -> bool {
+    since_input < Duration::from_millis(150)
+}
+
 pub(super) fn interval(since_input: Duration) -> Duration {
-    Duration::from_millis(if since_input < Duration::from_millis(150) {
-        8
-    } else {
-        25
-    })
+    Duration::from_millis(if recently_active(since_input) { 8 } else { 25 })
 }
 
 pub(super) fn input_wait(since_input: Duration, since_render: Duration) -> Duration {
-    let input_poll = Duration::from_millis(if since_input < Duration::from_millis(150) {
-        4
-    } else {
-        10
-    });
+    let input_poll = Duration::from_millis(if recently_active(since_input) { 4 } else { 10 });
     // Keep both polling budgets, but do not sleep past a frame already due.
     input_poll.min(interval(since_input).saturating_sub(since_render))
 }

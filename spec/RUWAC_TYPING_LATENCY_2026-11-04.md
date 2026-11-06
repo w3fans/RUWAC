@@ -1,5 +1,10 @@
 # RUWAC typing latency — measured baseline (2026-11-04)
 
+**Follow-up (2026-11-06):** compact frames shipped in v0.4.58. The subsequent
+TUI output-wakeup change and its corrected A/B/A measurements are described in
+[TUI output wakeups](RUWAC_TYPING_WAKEUPS_2026-11-06.md). The historical baseline
+below retains its original scope and detector correction.
+
 **Review correction (2026-11-04):** the original GUI-path detector searched serialized
 JSON, so `{` and `}` could match structure before an echo appeared. Treat the
 historical GUI and SSH-GUI figures below as unverified. The corrected benchmark

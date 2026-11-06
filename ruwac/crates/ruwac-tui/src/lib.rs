@@ -1,4 +1,5 @@
 mod copy;
+mod output_wakeup;
 mod refresh;
 mod status_commands;
 use ruwac_protocol::{MAX_TEXT, request, write_frame};
@@ -1534,10 +1535,12 @@ fn draw_mode(
 }
 
 fn verified_connect(socket: &Path) -> io::Result<UnixStream> {
-    use std::os::unix::{
-        fs::{FileTypeExt, MetadataExt},
-        io::AsRawFd,
-    };
+    verified_path(socket)?;
+    verified_stream(UnixStream::connect(socket)?)
+}
+
+fn verified_path(socket: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
     for (path, mode) in [
         (
             socket
@@ -1558,7 +1561,11 @@ fn verified_connect(socket: &Path) -> io::Result<UnixStream> {
     if !std::fs::symlink_metadata(socket)?.file_type().is_socket() {
         return Err(io::Error::other("Not a socket"));
     }
-    let s = UnixStream::connect(socket)?;
+    Ok(())
+}
+
+fn verified_stream(s: UnixStream) -> io::Result<UnixStream> {
+    use std::os::fd::AsRawFd;
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut n = std::mem::size_of_val(&cred) as libc::socklen_t;
     if unsafe {
@@ -1578,6 +1585,14 @@ fn verified_connect(socket: &Path) -> io::Result<UnixStream> {
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
     Ok(s)
 }
+fn expired_input(decoder: &mut Decoder, since_input: Duration) -> Vec<Input> {
+    if since_input > Duration::from_millis(40) {
+        decoder.escape_timeout()
+    } else {
+        vec![]
+    }
+}
+
 pub fn attach(socket: &Path, session: &str) -> io::Result<()> {
     attach_with_window(socket, session, None)
 }
@@ -1653,17 +1668,21 @@ pub fn attach_with_role(
         call(&mut s, "window.select", json!({"window":window}))?;
     }
     let (tx, rx) = mpsc::sync_channel(64);
+    let output_wake = output_wakeup::OutputWake::new(socket, tx.clone());
     std::thread::spawn(move || {
         let mut stdin = io::stdin().lock();
         let mut b = [0; 8192];
         loop {
             match stdin.read(&mut b) {
                 Ok(0) | Err(_) => {
-                    let _ = tx.send(None);
+                    let _ = tx.send(output_wakeup::Ingress::End);
                     break;
                 }
                 Ok(n) => {
-                    if tx.send(Some(b[..n].to_vec())).is_err() {
+                    if tx
+                        .send(output_wakeup::Ingress::Bytes(b[..n].to_vec()))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -1698,19 +1717,26 @@ pub fn attach_with_role(
         // Briefly poll faster after input so local echo is not delayed by the
         // ordinary output refresh cadence. Quiet terminals keep their old rate.
         let wait = refresh::input_wait(input_at.elapsed(), rendered.elapsed());
+        if !matches!(mode, Mode::Live) || !refresh::recently_active(input_at.elapsed()) {
+            output_wake.disarm();
+        }
+        let mut output_ready = false;
         let events = match rx.recv_timeout(wait) {
-            Ok(Some(b)) => {
+            Ok(output_wakeup::Ingress::Bytes(b)) => {
                 input_at = Instant::now();
+                if matches!(mode, Mode::Live) {
+                    output_wake.arm();
+                }
                 decoder.feed(&b)
             }
-            Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(_) => {
-                if input_at.elapsed() > Duration::from_millis(40) {
-                    decoder.escape_timeout()
-                } else {
-                    vec![]
-                }
+            Ok(output_wakeup::Ingress::End) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Ok(output_wakeup::Ingress::Output) => {
+                output_wake.received();
+                output_ready =
+                    matches!(mode, Mode::Live) && refresh::recently_active(input_at.elapsed());
+                expired_input(&mut decoder, input_at.elapsed())
             }
+            Err(mpsc::RecvTimeoutError::Timeout) => expired_input(&mut decoder, input_at.elapsed()),
         };
         let mut dirty = !events.is_empty();
         if primary_paste
@@ -2370,7 +2396,7 @@ pub fn attach_with_role(
             )?;
             dirty = true;
         }
-        if rendered.elapsed() >= refresh::interval(input_at.elapsed()) {
+        if output_ready || rendered.elapsed() >= refresh::interval(input_at.elapsed()) {
             if matches!(mode, Mode::Live) {
                 // Navigation can already have replaced the frame with an idle
                 // live shell. Observe it before a revision-only poll skips it.
@@ -2495,6 +2521,16 @@ pub fn attach_with_role(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn output_wakes_do_not_postpone_pending_escape_decoding() {
+        let mut decoder = Decoder::default();
+        assert!(decoder.feed(b"\x1b").is_empty());
+        assert!(expired_input(&mut decoder, Duration::from_millis(39)).is_empty());
+        assert_eq!(
+            expired_input(&mut decoder, Duration::from_millis(41)),
+            vec![Input::Keyboard(vec![27])]
+        );
+    }
     #[test]
     fn incremental_rows_compare_text_and_every_cell_attribute() {
         let mut cache = DrawCache::default();

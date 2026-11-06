@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Wake terminal views promptly after input using the engine's existing change
+  notifications. Bound extra render work to two wakeups per input batch, retaining
+  polling fallback for older engines and disconnected notification streams.
+- Preserve Unicode input, bracketed paste, selection, scrollback and persistent
+  terminal processes. Record measured latency and resource tradeoffs in the
+  typing-wakeup report.
+
 ## v0.4.65 — 2026-11-06 — Stable source release
 
 - Keep scrolling terminal history when a drag starts on the live shell and is
