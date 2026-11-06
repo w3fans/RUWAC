@@ -7,6 +7,8 @@ from spike import Client,eventually
 parser=argparse.ArgumentParser()
 for name in ['binary','gui','evidence']:parser.add_argument('--'+name,required=True)
 parser.add_argument("--history-delay-ms",type=int)
+parser.add_argument("--edge",choices=["inside","outside"],default="inside")
+parser.add_argument("--plain-shell",action="store_true")
 parser.add_argument("--truncate-history",action="store_true")
 parser.add_argument("--cancel-selection",choices=["focus","typing","timeout"])
 a=parser.parse_args()
@@ -39,6 +41,7 @@ def command(root,action,**kw):
  raise RuntimeError('GUI fixture response timeout')
 def text(root):return '\n'.join(''.join(c[0]for c in row)for row in command(root,'history-viewport')['cells'])
 receiver=r/'echo.py';receiver.write_text('import os,tty\ntty.setraw(0)\nfor i in range(60):os.write(1,("\\x1b[32mROW%04d \\x1b[0m"%i+"abcdefghijklmNOPQRSTUVWXYZ0123456789 "*5+"\\r\\n").encode())\nos.write(1,b"\\r\\nBENCH_READY\\r\\n\\x1b[?1000h\\x1b[?1006h")\ni=0\nwhile True:\n b=os.read(0,1)\n if not b:break\n i+=1\n os.write(1,("ACK%04d\\r\\n"%i).encode())\n')
+if a.plain_shell:receiver.write_text(receiver.read_text().replace(r'\x1b[?1000h\x1b[?1006h',''))
 try:
  seat=bus.call_sync(service,'/org/gnome/Mutter/RemoteDesktop',service,'CreateSession',None,None,Gio.DBusCallFlags.NONE,5000,None).unpack()[0];control('Start');control('NotifyPointerMotionRelative',GLib.Variant('(dd)',(1.,1.)));key(194,True);key(194,False)
  root=r/'selection';root.mkdir(mode=0o700);e=dict(env)
@@ -129,11 +132,11 @@ try:
   (r/'acceptance.json').write_text(json.dumps({'PASS':True,'history_delay_ms':a.history_delay_ms,'historical_markers':sorted(historical_markers),'selected_bytes':len(selected.encode()),'selected_logical_lines':len(selected.splitlines()),'offset':viewport['offset'],'primary_sha256':expected_hash,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'gui_sha256':hashlib.sha256(gui.read_bytes()).hexdigest(),'scope':'Actual Mutter Shift+drag+wheel+immediate release; real frozen RPC reply delayed by proxy'},indent=2)+'\n')
   print('Fast history release PASS',a.history_delay_ms,flush=True)
   raise SystemExit(0)
- key(42,True);move(ox+10*cw,oy+6*ch);control('NotifyPointerButton',GLib.Variant('(ib)',(272,True)));time.sleep(.08)
+ key(42,not a.plain_shell);move(ox+10*cw,oy+6*ch);control('NotifyPointerButton',GLib.Variant('(ib)',(272,True)));time.sleep(.08)
  move(ox+15*cw,oy+3*ch);time.sleep(.2)
  pinned=command(root,'history-viewport');assert any(c[2]!=256 for row in pinned['cells']for c in row),'Starting-screen colours disappeared'
  key(42,False) # Local selection remains captured after Shift is released.
- move(ox+15*cw,oy-ch);time.sleep(2.5)
+ move(ox+15*cw,oy+(ch*.5 if a.edge=='inside'else-ch));time.sleep(2.5)
  edge=command(root,'history-viewport');selected_before=command(root,'copy-state').get('selection','');assert selected_before,'Drag failed to begin'
  move(ox+15*cw,oy+2*ch);control('NotifyPointerAxis',GLib.Variant('(ddu)',(0.,30.,0)));control('NotifyPointerAxis',GLib.Variant('(ddu)',(0.,30.,1)));time.sleep(.15)
  after=command(root,'history-viewport');selected_after=command(root,'copy-state').get('selection','')
@@ -146,6 +149,26 @@ try:
  assert command(root,'copy-state')['selection']==selected_after
  expected_hash=hashlib.sha256(selected_after.encode()).hexdigest()
  eventually(lambda:command(root,'read-text',primary=True).get('sha256')==expected_hash,8)
+ assert after['offset']<edge['offset'],'Wheel did not scroll the held selection toward newer history'
+ # Stationary edge holds must keep scrolling; the middle and release must stop.
+ move(ox+10*cw,oy+6*ch);key(42,not a.plain_shell)
+ control('NotifyPointerButton',GLib.Variant('(ib)',(272,True)))
+ move(ox+15*cw,oy+3*ch);time.sleep(.15)
+ move(ox+15*cw,oy+ch*.5);time.sleep(.5)
+ held_first=command(root,'history-viewport')['offset'];time.sleep(.5)
+ held_second=command(root,'history-viewport')['offset']
+ assert held_second>held_first>0,'Stationary top-edge hold did not keep scrolling'
+ move(ox+15*cw,oy+3*ch);time.sleep(.15)
+ middle=command(root,'history-viewport')['offset'];time.sleep(.15)
+ assert command(root,'history-viewport')['offset']==middle,'Middle-of-pane drag kept scrolling'
+ move(ox+15*cw,oy+(info['grid_size'][1]-.5)*ch);time.sleep(.25)
+ bottom=command(root,'history-viewport')['offset']
+ assert bottom<middle,'Visible bottom edge did not scroll toward newer history'
+ control('NotifyPointerButton',GLib.Variant('(ib)',(272,False)));key(42,False)
+ released=command(root,'history-viewport')['offset'];time.sleep(.2)
+ assert command(root,'history-viewport')['offset']==released,'Released selection kept scrolling'
+ assert command(root,'copy-state')['selection'],'Edge scrolling lost the selection'
+ assert 'ACK'not in rpc(sock,'pane.capture',{'pane':row['pane'],'lines':100})['text'],'Selection leaked mouse input'
  # A key cancels the pinned snapshot, returns to live output and cannot
  # resurrect the old selection when a subsequent history reply arrives.
  command(root,'switch',view=0,text='x')
@@ -153,7 +176,7 @@ try:
  time.sleep(.2)
  assert command(root,'copy-state')['selection']=='','Typing retained selection'
  assert command(root,'history-viewport')['offset']==0,'Typing retained history offset'
- receipt={'typing_cancels_selection':True,'PASS':True,'edge_hold_offset':edge['offset'],'wheel_offset':after['offset'],'selection_before_bytes':len(selected_before.encode()),'selected_logical_lines':len(selected_before.splitlines()),'selected_visual_rows':edge['offset']+7,'visible_rows':info['grid_size'][1],'selection_after_bytes':len(selected_after.encode()),'scope':'Actual isolated Mutter Shift+drag outside terminal, followed by native wheel while holding; no owner clipboard or physical/remote claim'}
+ receipt={'typing_cancels_selection':True,'PASS':True,'edge_hold_offset':edge['offset'],'wheel_offset':after['offset'],'selection_before_bytes':len(selected_before.encode()),'selected_logical_lines':len(selected_before.splitlines()),'selected_visual_rows':edge['offset']+7,'visible_rows':info['grid_size'][1],'selection_after_bytes':len(selected_after.encode()),'edge':a.edge,'plain_shell':a.plain_shell,'stationary_hold':[held_first,held_second],'bottom_offset':bottom,'release_stops':True,'scope':'Actual isolated Mutter held selection at visible top/bottom rows and native wheel; outside-edge mode retained; no owner clipboard or physical/remote claim'}
  (r/'acceptance.json').write_text(json.dumps(receipt,indent=2)+'\n');print(json.dumps(receipt),flush=True)
  command(root,'workspace-close');app.wait(timeout=8);rpc(sock,'daemon.stop');server.wait(timeout=5)
 finally:

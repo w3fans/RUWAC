@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Scroll GUI terminal history while holding a selection in the first or last
+  visible row. Keep selection scrolling beyond the pane and with the mouse wheel;
+  stop when the pointer returns to the middle or the button is released.
+
 ## v0.4.62 — 2026-11-06 — Stable source release
 
 - Avoid sleeping past a due terminal-viewer frame while waiting for input. Keep

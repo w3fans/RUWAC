@@ -635,6 +635,8 @@ above the saved hosts. Applications using mouse input keep their right-click;
 use the tab menu or Shift+right-click for RUWAC's menu. **Select text…** opens
 native scrollback, where ordinary mouse selection works without holding Shift.
 SSH terminal output is selected in exactly the same way as local output.
+In a GUI terminal, hold the selection at the first or last visible text row to
+scroll through history. The mouse wheel also scrolls while you hold the selection.
 
 When running a nested `ruwac -r` or `ruwac -S` session, use **Ctrl+A, then [**
 to open that session's history, then select with the mouse **without Shift**.

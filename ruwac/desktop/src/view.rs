@@ -1135,9 +1135,12 @@ impl View {
         };
         let (_, py) = self.mouse_position.get();
         let bottom = y + rows as f64 * self.cell_height.get();
-        let delta = if py < y {
+        // Start in the visible edge row: a maximized terminal or a split pane
+        // need not leave space for dragging beyond its drawing area.
+        let edge = self.cell_height.get().min((bottom - y) / 2.0);
+        let delta = if py < y + edge {
             ((y - py) / self.cell_height.get()).ceil().clamp(1.0, 8.0) as isize
-        } else if py >= bottom {
+        } else if py >= bottom - edge {
             -((py - bottom) / self.cell_height.get())
                 .ceil()
                 .clamp(1.0, 8.0) as isize
