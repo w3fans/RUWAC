@@ -243,13 +243,10 @@ impl Windows {
         let tabs = adw::TabView::new();
         tabs.set_vexpand(true);
         tabs.remove_shortcuts(adw::TabViewShortcuts::ALT_DIGITS | adw::TabViewShortcuts::ALT_ZERO);
-        let bar = adw::TabBar::builder()
-            .view(&tabs)
-            .autohide(false)
-            .expand_tabs(true)
-            .build();
+        let bar = crate::tab_strip::TabStrip::new(&tabs, &window);
         bar.add_css_class("ruwac-tabs");
-        header.set_title_widget(Some(&bar));
+        header.set_centering_policy(adw::CenteringPolicy::Loose);
+        header.set_title_widget(Some(&crate::chrome::tab_title_widget(bar.widget())));
         body.append(&header);
         body.append(&tabs);
         window.set_content(Some(&body));

@@ -51,6 +51,7 @@ mod ssh_probe;
 mod ssh_transport;
 mod staging;
 mod system_shortcuts;
+mod tab_strip;
 mod terminal_history;
 mod terminal_primary;
 mod terminal_style;
@@ -329,7 +330,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
   window.set_icon_name(Some("si.z4.ruwac"));window_state::bind(&window);
   let input_probe=Rc::new(Cell::new(0u64));if fixture.is_some(){let counter=input_probe.clone();let key=gtk::EventControllerKey::new();key.set_propagation_phase(gtk::PropagationPhase::Capture);key.connect_key_pressed(move|_,key,_,_|{if key==gdk::Key::F24{counter.set(counter.get()+1);glib::Propagation::Stop}else{glib::Propagation::Proceed}});window.add_controller(key);}
 
-  let box_=gtk::Box::new(gtk::Orientation::Vertical,0);let header=adw::HeaderBar::new();box_.append(&header);let tabs=adw::TabView::new();tabs.remove_shortcuts(adw::TabViewShortcuts::ALT_DIGITS|adw::TabViewShortcuts::ALT_ZERO);/* Window capture handles Alt+digit according to Map keys. */let focus_memory:tiles::FocusMemory=Rc::new(RefCell::new(std::collections::HashMap::new()));tabs.set_vexpand(true);let bar=adw::TabBar::builder().view(&tabs).autohide(false).build();header.set_title_widget(Some(&bar));let tools=gtk::Box::new(gtk::Orientation::Horizontal,6);tools.set_margin_start(6);tools.set_margin_end(6);tools.set_margin_top(4);tools.set_margin_bottom(4);let workspace_overlay=gtk::Overlay::new();workspace_overlay.set_vexpand(true);box_.append(&workspace_overlay);
+  let box_=gtk::Box::new(gtk::Orientation::Vertical,0);let header=adw::HeaderBar::new();box_.append(&header);let tabs=adw::TabView::new();tabs.remove_shortcuts(adw::TabViewShortcuts::ALT_DIGITS|adw::TabViewShortcuts::ALT_ZERO);/* Window capture handles Alt+digit according to Map keys. */let focus_memory:tiles::FocusMemory=Rc::new(RefCell::new(std::collections::HashMap::new()));tabs.set_vexpand(true);let bar=tab_strip::TabStrip::new(&tabs,&window);header.set_title_widget(Some(bar.widget()));let tools=gtk::Box::new(gtk::Orientation::Horizontal,6);tools.set_margin_start(6);tools.set_margin_end(6);tools.set_margin_top(4);tools.set_margin_bottom(4);let workspace_overlay=gtk::Overlay::new();workspace_overlay.set_vexpand(true);box_.append(&workspace_overlay);
   let appearance_views=all.clone();let chrome=chrome::Chrome::new(&window,&header,&bar,&box_,Rc::new(move|prefs|for view in appearance_views.borrow().iter(){view.apply_appearance(prefs);}));
   updates::attach(&header,&window,fixture.is_none());
   if let Some(message)=workspace_warning.as_ref(){box_.append(&gtk::Label::new(Some(message)));}

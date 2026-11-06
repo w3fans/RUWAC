@@ -337,6 +337,14 @@ Global `--remote-binary PATH` and `--socket REMOTE_PATH` select an explicit exec
 
 ## Desktop navigation and diagnostics
 
+Tabs shrink to fit the available header space. Under **Controls**, enable
+**Two rows of tabs** or **Compact tabs** to fit more sessions. The new-terminal
+**+** stays visible after the tabs. Full titles remain available in tooltips;
+very crowded rows can scroll horizontally and reveal the selected tab. These
+presentation settings also apply to detached windows and preserve running
+sessions. When a tab header has keyboard focus, arrow keys, Home and End move
+between headers; Space or Enter activates one. Shift+F10 opens its tab menu.
+
 Launch `ruwac gui`. By default, Alt+1–9 select workspace tabs 1–9 and Alt+0 selects tab 10; system shortcuts such as Alt+Tab stay on this computer. Tap AltGr (Right Alt) on its own to enable **Map keys**, shown in the header: those keys then go to the terminal program or remote desktop. A current RUWAC attached client receiving Alt+digits selects its own windows. Tap AltGr again to return to workspace tabs and local system shortcuts. AltGr held with another key always types keyboard-layout characters. The shortcuts work from terminal, RDP and Files views. Missing tabs are a no-op. Other unbound Ctrl+Alt and Shift+Alt shortcuts remain available to applications. Use `ruwac gui --theme system` to follow the desktop color preference, or `--theme light` / `--theme dark` explicitly.
 
 `ruwac doctor --desktop` checks local runtime availability without changing it. `ruwac doctor --terminal` inspects the current terminal. After a crashed client leaves raw/no-echo attributes, run `ruwac doctor --terminal --repair` directly in that affected foreground terminal. Repair never targets another terminal and does not reset emulator mouse/private modes. Remote read-only checks use `ruwac --host SSH_HOST doctor`; remote terminal repair is refused.
@@ -421,6 +429,33 @@ The native Files view supports SFTP and verified staged rsync copies of files an
 
 ## Fedora testing RPMs
 
+### COPR repository
+
+For Fedora 43, 44, 45 and Rawhide on x86_64, enable the repository once and install
+both the CLI and GUI:
+
+```sh
+sudo dnf copr enable zvegelj/ruwac
+sudo dnf install ruwac ruwac-desktop
+```
+
+Install only `ruwac` for a headless machine. COPR lists one source package named
+`ruwac`; it produces both binary packages. Later updates use normal DNF:
+
+```sh
+sudo dnf upgrade --refresh ruwac ruwac-desktop
+```
+
+`--refresh` avoids an older cached repository listing after a new release. Reopen
+the GUI to load its new executable. Package installation preserves running
+terminal engines and their programs; the installed CLI, running GUI and running
+engine can therefore have different versions. Use `ruwac engine status` to inspect
+the engine without replacing it. COPR packages use DNF for updates and do not ship
+the upstream testing-update timer. These community packages are separate from
+inclusion in the official Fedora repositories.
+
+### Upstream testing RPM downloads
+
 Tagged releases provide upstream Fedora 44 x86_64 testing RPMs: `ruwac` contains
 only the daemon/CLI; `ruwac-desktop` adds GTK/RDP and depends on the matching core
 package. Download both RPMs and their checksum/provenance assets from the same
@@ -442,8 +477,8 @@ installation and explicit opt-in to a system update timer. It refuses per-user
 installation or rollback that would shadow the system package.
 Per-user source/testing-bundle updates remain available for separately installed
 per-user builds. System updates remain disabled until an administrator enables them;
-see [setup and opt-out](spec/RUWAC_UPDATES.md). A signed Fedora package repository
-remains unfinished. The desktop RSA advisory remains unsuppressed.
+see [setup and opt-out](spec/RUWAC_UPDATES.md). Official Fedora repository inclusion remains a separate goal. The desktop RSA
+advisory remains unsuppressed.
 
 A fresh GTK workspace creates its own terminal session instead of borrowing an unrelated CLI session. Explicitly attaching the same session shares its PTY size: the smallest attached viewport governs it, and the status bar shows the shared size. Closing or detaching the smaller view allows it to expand. Remmina import discovers native, legacy and Flatpak profile directories, previews the selected metadata, and requires an explicit import; custom file selection remains available. [Remmina documents its profile locations](https://remmina.org/how-to-install-remmina/).
 
@@ -491,7 +526,7 @@ read-only; selecting a profile previews metadata, then **Import selected profile
 imports it explicitly. Passwords are never imported.
 
 
-The single-row header keeps tabs beside collapsible actions. **Controls** (F10 or
+The default single-row header keeps tabs beside collapsible actions. **Controls** (F10 or
 Ctrl+.) opens the selected session's actions without changing its viewport. An
 optional dock occupies a normal row. Appearance offers six palettes, terminal fonts,
 size and line spacing. See [desktop controls and remote shortcuts](spec/RUWAC_DESKTOP_CHROME.md).

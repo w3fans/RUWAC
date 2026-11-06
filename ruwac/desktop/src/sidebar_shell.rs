@@ -35,6 +35,10 @@ pub struct Settings {
     #[serde(default)]
     pub controls_docked: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub two_tab_rows: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compact_tabs: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub primary_receive: bool,
 
     pinned: bool,
@@ -106,6 +110,8 @@ impl Default for Settings {
             vivid_colors: default_vivid(),
             actions_collapsed: false,
             controls_docked: false,
+            two_tab_rows: false,
+            compact_tabs: false,
             primary_receive: false,
             pinned: false,
             width: 260,
@@ -368,6 +374,28 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tab_preferences_preserve_old_settings_and_omit_unused_keys() {
+        let old: Settings = serde_json::from_str(r#"{"schema":3,"pinned":true,"width":320,"term_size_pt":14,"collapsed_groups":["Generated/Group"]}"#).unwrap();
+        assert!(!old.two_tab_rows && !old.compact_tabs && old.validate());
+        let compatible = serde_json::to_value(&old).unwrap();
+        assert!(
+            compatible.get("two_tab_rows").is_none() && compatible.get("compact_tabs").is_none()
+        );
+        let mut changed = old;
+        changed.two_tab_rows = true;
+        changed.compact_tabs = true;
+        let restored: Settings =
+            serde_json::from_value(serde_json::to_value(&changed).unwrap()).unwrap();
+        assert!(
+            restored.two_tab_rows
+                && restored.compact_tabs
+                && restored.pinned
+                && restored.validate()
+        );
+        assert_eq!((restored.width, restored.term_size_pt), (320, 14));
+        assert!(restored.collapsed_groups.contains("Generated/Group"));
+    }
     #[test]
     fn old_default_spacing_migrates_once_to_standard() {
         let old: Settings =

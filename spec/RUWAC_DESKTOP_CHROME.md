@@ -1,6 +1,12 @@
 # Desktop controls and machine shortcuts
 
-The desktop uses a compact single-row header with session tabs. Collapse actions at
+The desktop uses a compact header whose session tabs shrink to fit available width.
+Controls offers **Two rows of tabs** and **Compact tabs**; both are saved privately
+and apply to detached windows. The new-terminal + stays outside the scrollable
+rows. Extremely crowded rows scroll horizontally and reveal the selected tab.
+Full titles remain in tooltips. Header layout never recreates session content.
+
+The default is one row. Collapse actions at
 its left edge to give tabs more room. Labels adapt to narrow windows. Controls opens
 session, clipboard and layout actions for the selected view. F10 or Ctrl+. opens it;
 Dock makes it a normal row below the header. There are no hover toggles over session
@@ -58,3 +64,11 @@ resizes. That compositor path remains unqualified; isolated Mutter results do no
 substitute for physical desktop acceptance.
 
 GTK terminal multiplexer commands use Ctrl+Alt+A by default. Plain Ctrl+A reaches the child application, including tmux and Readline. CLI RUWAC continues to use Ctrl+A. Existing explicit shortcut overrides are retained. Main menu → About RUWAC / Support exposes the installed version, source, license and donation QR.
+
+
+`tests/integration/tab_layout.py` exercises 20 and 40 generated terminal tabs on
+an isolated 1800×1000 Mutter display, maximized and half-width. It checks both
+row counts and densities, the visible + action, native pointer and keyboard
+menus, reorder, drag-out, detach/return, selected-tab reveal, private preference
+persistence and unchanged PTY PIDs. It does not use an owner desktop or claim
+physical-device acceptance.

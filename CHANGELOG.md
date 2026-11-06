@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Fit desktop tabs to the available header width. Add **Two rows of tabs** and
+  **Compact tabs** under Controls, retaining the visible new-terminal + action,
+  full titles in tooltips, keyboard navigation, menus and tab transfer.
+- Keep the selected tab visible when a crowded row needs horizontal scrolling.
+  Tab layout changes preserve existing views, connections and terminal processes.
+- Document COPR installation and explicit DNF metadata refresh for CLI/GUI updates.
+
 ## v0.4.63 — 2026-11-06 — Stable source release
 
 - Scroll GUI terminal history while holding a selection in the first or last
