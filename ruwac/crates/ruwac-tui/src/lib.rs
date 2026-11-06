@@ -1866,6 +1866,7 @@ pub fn attach_with_role(
                                                 c.point(offset + sy, sx);
                                                 c.mark();
                                                 c.point(offset + y, x);
+                                                copy_drag = Some((offset + y, x, Instant::now()));
                                                 mode = Mode::Copy(c);
                                             }
                                             Err(e) => {
