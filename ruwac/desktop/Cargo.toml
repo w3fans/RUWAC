@@ -34,6 +34,7 @@ rusqlite = { version = "=0.39.0", default-features = false }
 webkit6 = "=0.6.1"
 url = "=2.5.8"
 unicode-width = "=0.2.2"
+unicode-segmentation = "=1.13.3"
 [dev-dependencies]
 ironrdp-server = { version = "=0.13.0", default-features = false, features = ["helper"] }
 async-trait = "0.1"

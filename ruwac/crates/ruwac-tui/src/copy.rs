@@ -357,6 +357,26 @@ impl Copy {
         self.cursor.col = (self.left + col).min(self.cols.saturating_sub(1));
         self.desired = self.cursor.col;
     }
+    /// Select the Unicode word under the current copy cursor.
+    pub fn select_word(&mut self, byte: usize, expected_row: &str) -> bool {
+        if !self.lines.get(self.cursor.row).is_some_and(|line| {
+            line.text.trim_end_matches(' ') == expected_row.trim_end_matches(' ')
+        }) {
+            return false;
+        }
+        let rows: Vec<_> = self
+            .lines
+            .iter()
+            .map(|line| (line.text.as_str(), line.wrapped))
+            .collect();
+        let Some((a, z)) = crate::word::selection(&rows, (self.cursor.row, byte)) else {
+            return false;
+        };
+        self.anchor = Some(Position { row: a.0, col: a.1 });
+        self.cursor = Position { row: z.0, col: z.1 };
+        self.rectangle = false;
+        true
+    }
     /// Begin a mouse selection at the cursor.
     pub fn mark(&mut self) {
         self.anchor = Some(self.cursor);

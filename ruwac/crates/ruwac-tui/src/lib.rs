@@ -1,8 +1,10 @@
 mod copy;
+mod double_click;
 mod local_image;
 mod output_wakeup;
 mod refresh;
 mod status_commands;
+mod word;
 use ruwac_protocol::{MAX_TEXT, request, write_frame};
 use serde_json::{Value, json};
 use std::{
@@ -718,6 +720,36 @@ fn mouse_request(v: &Value) -> Option<u16> {
     } else {
         Some(1000)
     }
+}
+/// Bind a live display cell to its UTF-8 position before reading canonical history.
+fn mouse_word_source(
+    snapshot: &Value,
+    pane: &str,
+    row: usize,
+    col: usize,
+) -> Option<(String, usize)> {
+    let grid = &snapshot["panes"]
+        .as_array()?
+        .iter()
+        .find(|p| p["id"] == pane)?["grid"];
+    let cells = grid["cells"].as_array()?.get(row)?.as_array()?;
+    cells.get(col)?;
+    let mut first = col;
+    while first > 0 && cells[first][1] == true {
+        first -= 1;
+    }
+    let mut text = String::new();
+    let mut byte = None;
+    for (n, cell) in cells.iter().enumerate() {
+        if cell[1] == true {
+            continue;
+        }
+        if n == first {
+            byte = Some(text.len());
+        }
+        text.push_str(cell[0].as_str()?);
+    }
+    Some((text, byte?))
 }
 /// (button, column, row, release) from an SGR mouse report; 1-based.
 fn sgr_mouse(bytes: &[u8]) -> Option<(u64, u64, u64, bool)> {
@@ -1657,6 +1689,7 @@ pub fn attach_with_role(
     let mut screen_size = terminal_dimensions();
     // Left-button press on a pane without mouse support: (pane, column, row).
     let mut drag: Option<(String, usize, usize)> = None;
+    let mut clicks = double_click::Clicks::default();
     // Middle-click awaiting the outer terminal's selection: (pane, asked at).
     let mut primary_paste: Option<(String, Instant)> = None;
     let mut size = dimensions(limits);
@@ -1752,6 +1785,9 @@ pub fn attach_with_role(
             dirty = true;
         }
         for event in events {
+            if !matches!(&event, Input::Mouse(_)) {
+                clicks.clear();
+            }
             // Any subsequent user action revokes an unfinished image paste.
             local_image = None;
             match event {
@@ -1775,6 +1811,7 @@ pub fn attach_with_role(
                 }
                 Input::Mouse(b) => {
                     if let Mode::Copy(c) = &mut mode {
+                        clicks.clear();
                         // Scrollback opened by the wheel or a drag.
                         let Some((button, x, y, release)) = sgr_mouse(&b) else {
                             continue;
@@ -1835,6 +1872,7 @@ pub fn attach_with_role(
                             &format!("{} · {}", config.label(), status),
                         );
                         if bar {
+                            clicks.clear();
                             if let Some(window) = target {
                                 call(&mut s, "window.select", json!({"window":window}))?;
                                 snapshot = call(&mut s, "client.render", json!({}))?;
@@ -1855,6 +1893,7 @@ pub fn attach_with_role(
                             snapshot = call(&mut s, "client.render", json!({}))?;
                         }
                         if wants {
+                            clicks.clear();
                             let result = call(
                                 &mut s,
                                 "client.input",
@@ -1874,7 +1913,13 @@ pub fn attach_with_role(
                             event["y"].as_u64().unwrap_or(1).saturating_sub(1) as usize,
                         );
                         let release = event["release"] == true;
-                        match event["button"].as_u64().unwrap_or(0) {
+                        let button = event["button"].as_u64().unwrap_or(0);
+                        if button == 0 && release {
+                            clicks.release(&pane, x, y, Instant::now());
+                        } else if button != 0 {
+                            clicks.clear();
+                        }
+                        match button {
                             64 => match history(&mut s, &pane) {
                                 Ok(mut c) => {
                                     c.align_bottom(height);
@@ -1883,7 +1928,49 @@ pub fn attach_with_role(
                                 }
                                 Err(e) => status = format!("Scrollback unavailable: {e}"),
                             },
-                            0 if !release => drag = Some((pane.clone(), x, y)),
+                            0 if !release => {
+                                if clicks.press(&pane, x, y, Instant::now()) {
+                                    drag = None;
+                                    let rows = snapshot["panes"]
+                                        .as_array()
+                                        .and_then(|p| p.iter().find(|p| p["id"] == pane.as_str()))
+                                        .and_then(|p| p["rect"]["rows"].as_u64())
+                                        .unwrap_or(height as u64)
+                                        as usize;
+                                    match history(&mut s, &pane) {
+                                        Ok(mut c) => {
+                                            c.align_bottom(height);
+                                            c.point(height.saturating_sub(rows) + y, x);
+                                            if let Some((text, byte)) =
+                                                mouse_word_source(&snapshot, &pane, y, x)
+                                                && c.select_word(byte, &text)
+                                            {
+                                                match c.selected(MAX_TEXT) {
+                                                    Ok(text) => {
+                                                        let bytes = text.len();
+                                                        offer_selection(&text);
+                                                        call(
+                                                            &mut s,
+                                                            "buffer.set",
+                                                            json!({"session":session,"text":text}),
+                                                        )?;
+                                                        status = format!(
+                                                            "Copied {bytes} bytes; middle-click pastes"
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        status =
+                                                            format!("Selection unavailable: {e}")
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Err(e) => status = format!("Selection unavailable: {e}"),
+                                    }
+                                } else {
+                                    drag = Some((pane.clone(), x, y));
+                                }
+                            }
                             32 => {
                                 if let Some((start_pane, sx, sy)) = drag.take() {
                                     if start_pane == pane {

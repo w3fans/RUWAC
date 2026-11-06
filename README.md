@@ -220,6 +220,13 @@ Launch the desktop from the same external build directory and socket:
 
 Create windows with Ctrl-Alt-A c, split with Ctrl-Alt-A S or |, move between panes with Ctrl-Alt-A Tab, and zoom/restore with Ctrl-Alt-A z. Drag dividers to change persistent ratios. Ctrl-Alt-A [ opens canonical history: arrows/hjkl, Page Up/Down, g/G, Space to mark, Enter to save internally, / to search and Escape to return. Ctrl-Alt-A ] pastes that buffer. Ctrl-Shift-C/V use desktop CLIPBOARD separately. Ctrl-Alt-A d detaches; opening the same session again retains running programs and layout. Plain Ctrl-A is forwarded to the terminal application.
 
+Double-click a word in a GUI terminal to select it into the mouse-selection
+clipboard; hold Shift when an application handles mouse input. The terminal
+client also copies double-clicked words in ordinary shell panes into its session
+buffer and mouse selection. Applications that request mouse input keep their
+normal double-click behavior. Unicode graphemes and genuine soft wraps stay
+intact; Ctrl-Shift-C uses desktop CLIPBOARD separately.
+
 Private configuration may set RUWAC_SCROLLBACK_LINES (default 50000) and RUWAC_SCROLLBACK_MIB (default 256; approximate cell budget). Copy view has an 8 MiB cap with visible truncation. RUWAC_SHORTCUTS remaps GTK accelerators for prefix/copy/paste; RUWAC_KEYMAP remaps prefix commands. Both remapping variables contain JSON objects, for example `RUWAC_SHORTCUTS='{"prefix":"<Control>b"}'` and `RUWAC_KEYMAP='{"x":"z"}'` (x invokes zoom). The TUI supports Control prefixes and prefix-command remapping. `v` toggles rectangular selection, `w/b/e` move by Unicode words, and `n/N` repeat searches. Oversized selections and cancellation preserve the existing internal buffer. See client help for the current configuration.
 
 “New RDP tab” opens the in-process client. Supply an authorized host:port, username, a Secret Service profile reference and optional trusted CA PEM. The lookup uses attributes application=RUWAC and profile=the reference; secrets are not stored in the project. System certificate/hostname validation is mandatory. Fit/native/stretch/fullscreen and explicit send-key actions are implemented. Text and PNG CLIPRDR works in both directions with five clipboard policies, explicit send/receive and remote paste. Authenticated loopback sessions are tested; dynamic resizing is qualified against authenticated loopback sessions; external Windows/GNOME hosts remain unqualified.

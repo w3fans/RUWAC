@@ -1,3 +1,5 @@
+#[path = "../../crates/ruwac-tui/src/word_boundary.rs"]
+mod word;
 use crate::terminal_history::History;
 use crate::{
     clipboard::{self, Broker},
@@ -195,6 +197,70 @@ fn selection_text(grid: &Value, mut a: (usize, usize), mut z: (usize, usize)) ->
         }
     }
     result
+}
+fn selected_word(grid: &Value, at: (usize, usize)) -> Option<(word::Point, word::Point)> {
+    let rows = grid["cells"].as_array()?;
+    rows.get(at.0)?.as_array()?.get(at.1)?;
+    let mut first = at.0;
+    while first > 0 && grid["wrapped"][first - 1] == true {
+        first -= 1;
+    }
+    let mut last = at.0;
+    while grid["wrapped"][last] == true && last + 1 < rows.len() {
+        last += 1;
+    }
+    let mut text = String::new();
+    let mut spans = Vec::new();
+    let mut clicked = None;
+    for (row, cells) in rows.iter().enumerate().take(last + 1).skip(first) {
+        let cells = cells.as_array()?;
+        for (col, cell) in cells.iter().enumerate() {
+            if cell[1] == true {
+                continue;
+            }
+            let start = text.len();
+            text.push_str(cell[0].as_str()?);
+            let mut end_col = col;
+            while end_col + 1 < cells.len() && cells[end_col + 1][1] == true {
+                end_col += 1;
+            }
+            if row == at.0 && (col..=end_col).contains(&at.1) {
+                clicked = Some(start);
+            }
+            spans.push((start, text.len(), (row, col), (row, end_col)));
+        }
+    }
+    let (start, end) = word::byte_span(&text, clicked?)?;
+    let first = spans
+        .iter()
+        .find(|(a, z, _, _)| *a <= start && start < *z)?
+        .2;
+    let last = spans
+        .iter()
+        .rev()
+        .find(|(a, z, _, _)| *a < end && end <= *z)?
+        .3;
+    Some((first, last))
+}
+#[cfg(test)]
+mod word_cell_tests {
+    use super::*;
+    #[test]
+    fn joined_emoji_uses_actual_terminal_cells_instead_of_estimated_width() {
+        let grid = json!({"cells":[[["👩‍",false],["",true],["💻",false],["",true],[" ",false]]],"wrapped":[false]});
+        for col in 0..4 {
+            let (a, z) = selected_word(&grid, (0, col)).unwrap();
+            assert_eq!((a, z), ((0, 0), (0, 3)));
+            assert_eq!(selection_text(&grid, a, z), "👩‍💻");
+        }
+    }
+    #[test]
+    fn wide_word_wraps_only_where_the_terminal_says_it_wrapped() {
+        let mut grid = json!({"cells":[[["a",false],["b",false]],[["c",false],["d",false]]],"wrapped":[true,false]});
+        assert_eq!(selected_word(&grid, (1, 0)), Some(((0, 0), (1, 1))));
+        grid["wrapped"][0] = json!(false);
+        assert_eq!(selected_word(&grid, (1, 0)), Some(((1, 0), (1, 1))));
+    }
 }
 fn selection_changed(old: &Value, new: &Value, a: (usize, usize), z: (usize, usize)) -> bool {
     old["rows"] != new["rows"]
@@ -447,6 +513,7 @@ pub struct View {
     selection: RefCell<Option<((usize, usize), (usize, usize))>>,
     history_selection: RefCell<Option<((usize, usize), (usize, usize))>>,
     selection_dragging: Cell<bool>,
+    word_click: Cell<bool>,
     selection_seed: RefCell<Option<Value>>,
     /// Mouse-up may precede the canonical snapshot. Keep only one bounded
     /// copy intent; generation/target checks also guard the snapshot reply.
@@ -627,6 +694,7 @@ impl View {
             selection: RefCell::new(None),
             history_selection: RefCell::new(None),
             selection_dragging: Cell::new(false),
+            word_click: Cell::new(false),
             selection_seed: RefCell::new(None),
             selection_scroll_at: Cell::new(std::time::Instant::now()),
             selection_motion_at: Cell::new(std::time::Instant::now()),
@@ -768,14 +836,40 @@ impl View {
         let click = gtk::GestureClick::new();
         click.set_button(0);
         let w = Rc::downgrade(&v);
-        click.connect_pressed(move |g, _, x, y| {
+        click.connect_pressed(move |g, count, x, y| {
             if let Some(v) = w.upgrade() {
-                v.click(x, y, g.current_button(), g.current_event_state(), false)
+                let mods = g.current_event_state();
+                if count == 2
+                    && g.current_button() == 1
+                    && !mods.contains(gdk::ModifierType::CONTROL_MASK)
+                    && (!v.mouse_enabled() || mods.contains(gdk::ModifierType::SHIFT_MASK))
+                    && v.select_word(x, y)
+                {
+                    return;
+                }
+                v.click(x, y, g.current_button(), mods, false)
             }
         });
         let w = Rc::downgrade(&v);
         click.connect_released(move |g, _, x, y| {
             if let Some(v) = w.upgrade() {
+                if g.current_button() == 1 && v.word_click.get() {
+                    if v.area.has_focus() {
+                        v.copy_clipboard(true);
+                        if v.copy_on_select.get() {
+                            v.copy_clipboard(false);
+                        }
+                    }
+                    // Both gestures see this release. Preserve the completed
+                    // word until GestureDrag's end callback has also run.
+                    let weak = Rc::downgrade(&v);
+                    glib::idle_add_local_once(move || {
+                        if let Some(v) = weak.upgrade() {
+                            v.word_click.set(false);
+                        }
+                    });
+                    return;
+                }
                 v.click(x, y, g.current_button(), g.current_event_state(), true)
             }
         });
@@ -784,6 +878,9 @@ impl View {
         let w = Rc::downgrade(&v);
         drag.connect_drag_begin(move |g, x, y| {
             if let Some(v) = w.upgrade() {
+                if v.word_click.get() {
+                    return;
+                }
                 if g.current_event_state()
                     .contains(gdk::ModifierType::CONTROL_MASK)
                     && v.url_at(x, y).is_some()
@@ -829,6 +926,9 @@ impl View {
         let w = Rc::downgrade(&v);
         drag.connect_drag_update(move |g, dx, dy| {
             if let Some(v) = w.upgrade() {
+                if v.word_click.get() {
+                    return;
+                }
                 let (x, y) = v.drag_start.get();
                 v.mouse_position.set((x + dx, y + dy));
                 v.selection_motion_at.set(std::time::Instant::now());
@@ -850,6 +950,9 @@ impl View {
         let w = Rc::downgrade(&v);
         drag.connect_drag_end(move |g, dx, dy| {
             if let Some(v) = w.upgrade() {
+                if v.word_click.get() {
+                    return;
+                }
                 if let Some((id, vertical, start, size, initial)) = v.divider.borrow_mut().take() {
                     let movement = if vertical { dx } else { dy };
                     let ratio =
@@ -945,6 +1048,7 @@ impl View {
         focus.connect_leave(move |_| {
             if let Some(v) = w.upgrade() {
                 v.cancel_image_paste();
+                v.word_click.set(false);
                 if v.selection_copy_pending.get().is_some() {
                     v.clear_selection();
                     v.cancel_inline_history();
@@ -2712,6 +2816,39 @@ impl View {
             body.append(&button);
         }
         body
+    }
+    fn select_word(&self, x: f64, y: f64) -> bool {
+        let Some((pane, row, col)) = self.point(x, y) else {
+            return false;
+        };
+        if pane != *self.target.borrow() {
+            return false;
+        }
+        let Some(grid) = self.grid() else {
+            return false;
+        };
+        let Some((a, z)) = selected_word(&grid, (row, col)) else {
+            return false;
+        };
+        self.clear_selection();
+        // A click may have started an asynchronous drag snapshot. The word
+        // is bound to this already displayed frame, not a later history reply.
+        if self.history_inline.get() && self.history_pending.get() {
+            self.cancel_inline_history();
+        }
+        *self.selection.borrow_mut() = Some((a, z));
+        if !self.history_lines.borrow().is_empty() {
+            let height = grid["rows"].as_u64().unwrap_or(24) as usize;
+            let mut history = self.history_lines.borrow_mut();
+            history.pin();
+            *self.history_selection.borrow_mut() = Some((
+                history.point(height, self.history_offset.get(), a.0, a.1),
+                history.point(height, self.history_offset.get(), z.0, z.1),
+            ));
+        }
+        self.word_click.set(true);
+        self.area.queue_draw();
+        true
     }
     pub fn selected(&self) -> String {
         if let Some((a, z)) = *self.history_selection.borrow() {

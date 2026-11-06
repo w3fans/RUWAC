@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Double-click terminal words in the GUI or an ordinary shell in the terminal
+  client. Preserve Unicode graphemes and soft-wrapped words; use Shift in the
+  GUI when the application owns mouse input.
+- Keep application mouse handling, held-drag scrollback and persistent sessions.
+  Refuse oversized word copies without detaching the terminal or replacing its
+  previous copy buffer.
+
 ## v0.4.67 — 2026-11-06 — Stable source release
 
 - Attach clipboard PNGs to a local nested RUWAC agent through a private,
