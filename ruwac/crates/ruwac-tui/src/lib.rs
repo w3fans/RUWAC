@@ -1,4 +1,5 @@
 mod copy;
+mod refresh;
 mod status_commands;
 use ruwac_protocol::{MAX_TEXT, request, write_frame};
 use serde_json::{Value, json};
@@ -1694,9 +1695,8 @@ pub fn attach_with_role(
     while !STOP.load(Ordering::Relaxed) {
         // Briefly poll faster after input so local echo is not delayed by the
         // ordinary output refresh cadence. Quiet terminals keep their old rate.
-        let interactive = input_at.elapsed() < Duration::from_millis(150);
-        let events = match rx.recv_timeout(Duration::from_millis(if interactive { 4 } else { 10 }))
-        {
+        let wait = refresh::input_wait(input_at.elapsed(), rendered.elapsed());
+        let events = match rx.recv_timeout(wait) {
             Ok(Some(b)) => {
                 input_at = Instant::now();
                 decoder.feed(&b)
@@ -2348,12 +2348,7 @@ pub fn attach_with_role(
             )?;
             dirty = true;
         }
-        let render_interval = if input_at.elapsed() < Duration::from_millis(150) {
-            8
-        } else {
-            25
-        };
-        if rendered.elapsed() > Duration::from_millis(render_interval) {
+        if rendered.elapsed() >= refresh::interval(input_at.elapsed()) {
             if matches!(mode, Mode::Live) {
                 // Navigation can already have replaced the frame with an idle
                 // live shell. Observe it before a revision-only poll skips it.

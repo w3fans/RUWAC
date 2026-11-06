@@ -42,6 +42,36 @@ serialization/transfer and frontend scheduling as candidates for further profili
 it does not isolate each cost or establish physical keystroke latency. Preserve
 legacy framing and semantic snapshots when investigating optimizations.
 
+## Terminal input-wait deadline comparison (2026-11-06)
+
+An A/B/A comparison used the v0.4.61 build, a candidate that bounds the input
+wait by the remaining frame deadline, then the unchanged v0.4.61 build again.
+The existing 8/25ms frame and 4/10ms input-poll budgets were retained. The
+candidate changes neither the protocol nor terminal state or SSH settings.
+
+Each run interleaved tmux and RUWAC in blocks of20, with active ASCII pacing and
+the same palette encoding. A bounded Fedora44 job used at most two CPU cores
+and4GiB RAM. The busy scenario had20 windows per multiplexer, including19
+hidden windows; every window generated50Hz output. All1800 measured keys
+completed without timeouts. Generated PTYs and daemons were cleaned up.
+
+| Scenario | Build | TUI p50 / p95 / p99 ms | Whole-fixture CPU seconds |
+| --- | --- | ---: | ---: |
+| One quiet window,200 keys/path | Baseline A1 | 8.739 / 11.689 / 12.449 | 1.32 |
+| | Candidate | 6.601 / 10.542 / 10.919 | 1.41 |
+| | Baseline A2 | 7.594 / 11.320 / 11.871 | 1.20 |
+| Twenty busy windows,100 keys/path | Baseline A1 | 10.831 / 13.534 / 15.260 | 6.51 |
+| | Candidate | 7.514 / 12.473 / 12.908 | 6.17 |
+| | Baseline A2 | 7.876 / 12.992 / 13.986 | 6.35 |
+
+The tmux control p50 stayed at0.21–0.23ms. Candidate terminal bytes per key
+remained within the baseline range or its run-to-run variation. CPU covers both
+multiplexers and all fixture processes, including hidden-window noise. Quiet
+runs lasted about34seconds: the extra0.09–0.21CPU seconds is a small cost for
+honouring the existing frame deadline, not a CPU reduction claim. Busy runs
+lasted about16.5seconds. This is a modest local viewer-latency improvement;
+GTK painting, real network delay and physical owner acceptance remain separate.
+
 ## Historical original results (GUI figures unverified)
 
 

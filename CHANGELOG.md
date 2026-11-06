@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Avoid sleeping past a due terminal-viewer frame while waiting for input. Keep
+  the existing active and quiet refresh budgets, input handling and scrollback.
+
 ## v0.4.61 — 2026-11-05 — Stable source release
 
 - Add an always-visible + button after the tabs to open and focus a new terminal,
