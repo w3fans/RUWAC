@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.4.64 — 2026-11-06 — Stable source release
+
 - Fit desktop tabs to the available header width. Add **Two rows of tabs** and
   **Compact tabs** under Controls, retaining the visible new-terminal + action,
   full titles in tooltips, keyboard navigation, menus and tab transfer.
