@@ -1,21 +1,25 @@
-RUWAC v0.4.64
+RUWAC v0.4.65
 
-Workspace tabs shrink to the available header width. Controls now offers
-Two rows of tabs and Compact tabs, saved for main and detached windows.
-The new-terminal + stays visible. Full tab titles remain in tooltips;
-very crowded rows can scroll horizontally and reveal the selected tab.
+Starting a selection on a live shell and holding the drag at the top or bottom
+edge now scrolls the terminal history. The terminal frontend arms its existing
+selection-scroll state as the drag enters copy mode.
+Scrolling follows vertical pointer movement, keeping horizontal first-row
+selections on their original text.
 
-The change preserves the existing tab model, terminal processes and connections.
-Native isolated tests cover 20 and 40 generated terminals, both row counts and
-densities, menus and keyboard navigation, reorder, drag-out, detach/return,
-new-terminal creation, close and saved preferences. Physical-owner input
-acceptance remains separate.
+Application mouse handling, Shift selection, refresh timing and existing terminal
+processes are preserved. Isolated checks cover held drags, ordinary copying,
+nested clients, Unicode and mouse routing while retaining the child processes.
+Physical-owner RDP acceptance remains separate.
 
 COPR provides both ruwac and ruwac-desktop for Fedora 43, 44, 45 and Rawhide
 on x86_64. For immediate updates, use:
 
     sudo dnf upgrade --refresh ruwac ruwac-desktop
 
-Reopen the GUI after updating. Existing terminal engines and their programs
-can remain running. This is a development patch; the existing RSA advisory
-remains open and unsuppressed.
+An already attached terminal frontend keeps its old code after installation.
+Detach that frontend (default: Ctrl+A, then d), then reattach the same session
+with ruwac -r SESSION. Its engine and running programs can stay alive.
+Reopen the GUI to load its installed version.
+
+This is a development patch; the existing RSA advisory remains open and
+unsuppressed.

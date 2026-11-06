@@ -2,9 +2,13 @@
 
 ## Unreleased
 
+## v0.4.65 — 2026-11-06 — Stable source release
+
 - Keep scrolling terminal history when a drag starts on the live shell and is
   held at the top or bottom edge. Preserve application mouse handling and the
   existing terminal processes.
+- Require movement toward an edge before scrolling; horizontal first-row
+  selections stay on their original text.
 
 ## v0.4.64 — 2026-11-06 — Stable source release
 
