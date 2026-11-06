@@ -49,13 +49,20 @@ def peer(action, **kw):
   except(OSError,ValueError):return None
  return eventually(response,10)
 def focus(who,view=0):
- for _ in range(8):
-  if command('inspect')['active']==(who=='gui'):
+ # GTK present()/peer-ready can precede mapping and later steal activation.
+ # Prove native delivery with the fixture-only F24 capture on the intended
+ # window before sending any clipboard/control chord; never fake active state.
+ probe=command if who=='gui' else peer
+ for _ in range(12):
+  before=probe('input-probe')['events']
+  key(194,True);key(194,False)
+  observed=probe('input-probe')
+  if observed['events']>before and observed['active']:
    if who=='gui':
     info=command('inspect',view=view);ox,oy=info['area_origin'];move(ox+30,oy+40);button(272,True);button(272,False);command('focus-view',view=view)
    return
   key(56,True);key(15,True);key(15,False);key(56,False);time.sleep(.2)
- raise AssertionError('owned compositor focus failed')
+ raise AssertionError('owned compositor native keyboard focus failed')
 def png(path,n):
  def chunk(t,b):return struct.pack('!I',len(b))+t+b+struct.pack('!I',zlib.crc32(t+b))
  raw=b''.join(b'\0'+bytes([n,40,90,255])*8 for _ in range(5))
@@ -101,7 +108,7 @@ try:
  eventually(lambda:command('inspect')['tabs']==3,15)
  start([sys.executable,str(Path(__file__).parents[1]/'fixtures/desktop_clipboard.py'),root],'peer')
  eventually(lambda:(root/'peer-ready.json').exists())
- focus('gui');command('tab-select',tab=0);command('focus-view',view=0)
+ focus('peer');focus('gui');command('tab-select',tab=0);command('focus-view',view=0)
  key(100,True);key(100,False)
  chord(20,shift=True);time.sleep(.3)
  assert command('inspect')['tabs']==3, 'Mapped shortcut opened a host tab'
