@@ -396,6 +396,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
   if let Some(id)=selected.as_ref(){if let Some(v)=all.borrow().iter().find(|v|&v.session==id){if let Some(page)=tiles::page(&tabs,&v.root){tabs.set_selected_page(&page);}}}
   let terminal_controls=sessions::controls(tabs.clone(),all.clone(),socket.clone(),broker.clone());
   let new_terminal=terminal_controls.first_child().and_downcast::<gtk::Button>().expect("New terminal action");
+  chrome::terminal_tab_action(&bar,&new_terminal);
   chrome.actions.append(&terminal_controls);
   let job_button=jobs::control(app,tabs.clone(),all.clone(),socket.clone(),broker.clone());chrome.actions.append(&job_button);
   let (vv,rv,fv,ph,t,b)=(all.clone(),rdp_views.clone(),file_views.clone(),placeholders.clone(),tabs.clone(),broker.clone());

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v0.4.61 — 2026-11-05 — Stable source release
+
+- Add an always-visible + button after the tabs to open and focus a new terminal,
+  including when the toolbar actions are collapsed. It shares the existing
+  terminal-creation action and busy state.
+
 ## v0.4.60 — 2026-11-05 — Stable source release
 
 - Make engine-coexistence acceptance choose the backend socket explicitly,

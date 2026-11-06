@@ -37,6 +37,24 @@ pub fn action(button: &gtk::Button, icon: &str, label: &str, tooltip: &str) {
     button.add_css_class("flat");
     button.update_property(&[gtk::accessible::Property::Label(tooltip)]);
 }
+/// Keep terminal creation available even when the header actions are collapsed.
+pub fn terminal_tab_action(bar: &adw::TabBar, action: &gtk::Button) {
+    let add = gtk::Button::from_icon_name("list-add-symbolic");
+    add.set_widget_name("terminal-tab-new");
+    add.set_tooltip_text(Some("New terminal"));
+    add.update_property(&[gtk::accessible::Property::Label("New terminal")]);
+    action
+        .bind_property("sensitive", &add, "sensitive")
+        .sync_create()
+        .build();
+    let action = action.downgrade();
+    add.connect_clicked(move |_| {
+        if let Some(action) = action.upgrade().filter(|b| b.is_sensitive()) {
+            action.emit_clicked();
+        }
+    });
+    bar.set_end_action_widget(Some(&add));
+}
 pub fn detach(w: &impl IsA<gtk::Widget>) {
     let w = w.as_ref();
     if let Some(p) = w.parent() {
@@ -594,7 +612,7 @@ impl Chrome {
                 tree.borrow_mut().push(serde_json::json!({"type":w.type_().name(),"name":w.widget_name().as_str(),"height":w.height(),"width":w.width(),"css":w.css_classes().iter().map(|s|s.to_string()).collect::<Vec<_>>()}));
             }
         });
-        serde_json::json!({"header_tree":tree.into_inner(),"header_height":self.header.height(),"tab_bar_width":self.bar.width(),"actions_revealed":self.reveal.reveals_child(),"docked":p.controls_docked,"dock_height":self.dock.height(),"scheme":p.scheme,"term_font":p.term_font,"term_size_pt":p.term_size_pt,"terminal_shortcuts":p.terminal_shortcuts,"copy_selection_to_clipboard":p.copy_selection_to_clipboard,"content_height":content.as_ref().height(),"maximized":window.is_maximized(),"fullscreen":window.is_fullscreen(),"window_height":window.height(),"window_width":window.width(),"terminal_background":schemes::current().colors[8],"open":self.pop.is_visible()})
+        serde_json::json!({"tab_new_terminal":self.bar.end_action_widget().map(|w|serde_json::json!({"name":w.widget_name().as_str(),"mapped":w.is_mapped(),"sensitive":w.is_sensitive(),"width":w.width(),"height":w.height(),"origin":w.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()])})),"header_tree":tree.into_inner(),"header_height":self.header.height(),"tab_bar_width":self.bar.width(),"actions_revealed":self.reveal.reveals_child(),"docked":p.controls_docked,"dock_height":self.dock.height(),"scheme":p.scheme,"term_font":p.term_font,"term_size_pt":p.term_size_pt,"terminal_shortcuts":p.terminal_shortcuts,"copy_selection_to_clipboard":p.copy_selection_to_clipboard,"content_height":content.as_ref().height(),"maximized":window.is_maximized(),"fullscreen":window.is_fullscreen(),"window_height":window.height(),"window_width":window.width(),"terminal_background":schemes::current().colors[8],"open":self.pop.is_visible()})
     }
 }
 pub fn controls_shortcut(key: gdk::Key, mods: gdk::ModifierType) -> bool {
