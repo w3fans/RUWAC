@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Keep scrolling terminal history when a drag starts on the live shell and is
+  held at the top or bottom edge. Preserve application mouse handling and the
+  existing terminal processes.
+
 ## v0.4.64 — 2026-11-06 — Stable source release
 
 - Fit desktop tabs to the available header width. Add **Two rows of tabs** and
