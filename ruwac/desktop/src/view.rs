@@ -1151,8 +1151,16 @@ impl View {
         // need not leave space for dragging beyond its drawing area.
         let edge = self.cell_height.get().min((bottom - y) / 2.0);
         let delta = if py < y + edge {
+            // A selection that starts in this row may be horizontal. Require
+            // movement toward the edge before interpreting it as a scroll.
+            if py >= y && py >= self.drag_start.get().1 - self.cell_height.get() / 4.0 {
+                return;
+            }
             ((y - py) / self.cell_height.get()).ceil().clamp(1.0, 8.0) as isize
         } else if py >= bottom - edge {
+            if py < bottom && py <= self.drag_start.get().1 + self.cell_height.get() / 4.0 {
+                return;
+            }
             -((py - bottom) / self.cell_height.get())
                 .ceil()
                 .clamp(1.0, 8.0) as isize

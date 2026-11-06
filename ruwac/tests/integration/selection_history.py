@@ -136,6 +136,8 @@ try:
  key(42,not a.plain_shell);move(ox+2*cw,oy+ch*.5)
  control('NotifyPointerButton',GLib.Variant('(ib)',(272,True)))
  for col in [8,12,16,20]:move(ox+col*cw,oy+ch*.5)
+ time.sleep(.3)
+ assert command(root,'history-viewport')['offset']==0,'Horizontal first-row selection was mistaken for an edge-scroll request'
  move(ox+20*cw,oy+ch*1.5)
  control('NotifyPointerButton',GLib.Variant('(ib)',(272,False)));key(42,False)
  eventually(lambda:not command(root,'history-viewport')['pending'])
