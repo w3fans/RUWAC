@@ -8,6 +8,13 @@ p=argparse.ArgumentParser()
 for name in ['binary','gui','evidence']:p.add_argument('--'+name,required=True)
 p.add_argument('--tui')
 a=p.parse_args();assert os.environ.get('WAYLAND_DISPLAY')=='ruwac-test'
+# Published frontends before67 forward native Ctrl+V;67 and newer explicitly
+# hand off the PNG to their own verified pane. Exercise both contracts.
+tui_version=subprocess.check_output([a.tui or a.binary,'--version'],text=True)
+match=re.search(r'\b(\d+)\.(\d+)\.(\d+)\b',tui_version);assert match,tui_version
+explicit_handoff=tuple(map(int,match.groups())) >= (0,4,67)
+nested_paths=[]
+
 root=Path(tempfile.mkdtemp(prefix='ergonomics-',dir=a.evidence));root.chmod(0o700)
 env={**os.environ,'GTK_A11Y':'none','GSETTINGS_BACKEND':'memory','LP_NUM_THREADS':'2','TOKIO_WORKER_THREADS':'2','SHELL':'/bin/bash'}
 for key,leaf in [('HOME','home'),('XDG_CONFIG_HOME','config'),('XDG_DATA_HOME','data'),('XDG_CACHE_HOME','cache')]:
@@ -144,9 +151,21 @@ try:
    return p.exists() and json.loads(p.read_text())['count']==n
   eventually(nested_attached,15)
   receipt=json.loads((root/'consumer2/image.json').read_text())
-  assert receipt['native'] and receipt['sha256']==hashlib.sha256((root/('image'+str(n)+'.png')).read_bytes()).hexdigest()
-  assert (root/'consumer2/raw').read_bytes()==b'\x16'*n, 'Nested route injected a path or submitted a draft'
-  mark('REAL-NESTED-TUI-CTRL-V-'+mode.upper()+'-NATIVE-CLIPBOARD-NO-SUBMIT')
+  assert receipt['sha256']==hashlib.sha256((root/('image'+str(n)+'.png')).read_bytes()).hexdigest()
+  raw=(root/'consumer2/raw').read_bytes()
+  if explicit_handoff:
+   assert not receipt.get('native',False) and isinstance(receipt.get('path'),str),receipt
+   path=Path(receipt['path']);assert path.is_relative_to(stage)and path.is_file()
+   assert path.stat().st_uid==os.getuid()and path.stat().st_mode&0o777==0o600
+   nested_paths.append(str(path).encode())
+   assert raw==b''.join(b'\x1b[200~'+path+b'\x1b[201~'for path in nested_paths),'Nested handoff sent extra keys or submitted a draft'
+   route='EXPLICIT-PNG-HANDOFF'
+  else:
+   assert receipt.get('native')is True,receipt
+   assert raw==b'\x16'*n,'Legacy nested route injected a path or submitted a draft'
+   route='NATIVE-CLIPBOARD'
+  assert b'\r'not in raw and b'\n'not in raw
+  mark('REAL-NESTED-TUI-CTRL-V-'+mode.upper()+'-'+route+'-NO-SUBMIT')
 finally:
  for child in reversed(children):
   if child.poll() is None:child.terminate()
