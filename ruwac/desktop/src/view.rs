@@ -452,6 +452,7 @@ pub struct View {
     /// copy intent; generation/target checks also guard the snapshot reply.
     selection_copy_pending: Cell<Option<(u64, bool)>>,
     selection_scroll_at: Cell<std::time::Instant>,
+    selection_motion_at: Cell<std::time::Instant>,
     primary_provider: RefCell<Option<gdk::ContentProvider>>,
     link_click: Cell<bool>,
     /// Last handled OSC 52 PRIMARY (offer, request) serials of the target pane.
@@ -628,6 +629,7 @@ impl View {
             selection_dragging: Cell::new(false),
             selection_seed: RefCell::new(None),
             selection_scroll_at: Cell::new(std::time::Instant::now()),
+            selection_motion_at: Cell::new(std::time::Instant::now()),
             primary_provider: RefCell::new(None),
             link_click: Cell::new(false),
             selection_serials: Cell::new((0, 0)),
@@ -789,6 +791,7 @@ impl View {
                     return;
                 }
                 v.drag_start.set((x, y));
+                v.selection_motion_at.set(std::time::Instant::now());
                 if let Some(divider) = v.find_divider(x, y) {
                     *v.divider.borrow_mut() = Some(divider);
                     return;
@@ -828,6 +831,7 @@ impl View {
             if let Some(v) = w.upgrade() {
                 let (x, y) = v.drag_start.get();
                 v.mouse_position.set((x + dx, y + dy));
+                v.selection_motion_at.set(std::time::Instant::now());
                 if v.divider.borrow().is_some() {
                     return;
                 }
@@ -1135,6 +1139,14 @@ impl View {
         };
         let (_, py) = self.mouse_position.get();
         let bottom = y + rows as f64 * self.cell_height.get();
+        // Moving across the first row is an ordinary text selection. Only a
+        // stationary hold inside the pane requests edge scrolling.
+        if py >= y
+            && py < bottom
+            && self.selection_motion_at.get().elapsed() < std::time::Duration::from_millis(150)
+        {
+            return;
+        }
         // Start in the visible edge row: a maximized terminal or a split pane
         // need not leave space for dragging beyond its drawing area.
         let edge = self.cell_height.get().min((bottom - y) / 2.0);

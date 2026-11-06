@@ -132,6 +132,15 @@ try:
   (r/'acceptance.json').write_text(json.dumps({'PASS':True,'history_delay_ms':a.history_delay_ms,'historical_markers':sorted(historical_markers),'selected_bytes':len(selected.encode()),'selected_logical_lines':len(selected.splitlines()),'offset':viewport['offset'],'primary_sha256':expected_hash,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'gui_sha256':hashlib.sha256(gui.read_bytes()).hexdigest(),'scope':'Actual Mutter Shift+drag+wheel+immediate release; real frozen RPC reply delayed by proxy'},indent=2)+'\n')
   print('Fast history release PASS',a.history_delay_ms,flush=True)
   raise SystemExit(0)
+ # Moving along the first row must not scroll before the pointer is held there.
+ key(42,not a.plain_shell);move(ox+2*cw,oy+ch*.5)
+ control('NotifyPointerButton',GLib.Variant('(ib)',(272,True)))
+ for col in [8,12,16,20]:move(ox+col*cw,oy+ch*.5)
+ move(ox+20*cw,oy+ch*1.5)
+ control('NotifyPointerButton',GLib.Variant('(ib)',(272,False)));key(42,False)
+ eventually(lambda:not command(root,'history-viewport')['pending'])
+ assert command(root,'history-viewport')['offset']==0,'Moving across the first row scrolled the selection'
+ assert command(root,'copy-state')['selection'],'Moving first-row selection was lost'
  key(42,not a.plain_shell);move(ox+10*cw,oy+6*ch);control('NotifyPointerButton',GLib.Variant('(ib)',(272,True)));time.sleep(.08)
  move(ox+15*cw,oy+3*ch);time.sleep(.2)
  pinned=command(root,'history-viewport');assert any(c[2]!=256 for row in pinned['cells']for c in row),'Starting-screen colours disappeared'
