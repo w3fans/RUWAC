@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.4.66 — 2026-11-06 — Stable source release
+
 - Wake terminal views promptly after input using the engine's existing change
   notifications. Bound extra render work to two wakeups per input batch, retaining
   polling fallback for older engines and disconnected notification streams.
