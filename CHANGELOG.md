@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Attach clipboard PNGs to a local nested RUWAC agent through a private,
+  bounded frontend handoff, including persisted agents without desktop clipboard
+  access. Keep the running engine and agent alive, and never send Enter.
+- Revalidate the selected pane and foreground process before delivery; cancel
+  unfinished image handoffs on input, navigation or GUI focus loss. Retain
+  ordinary native Ctrl+V, older frontend behavior and SSH image transfer.
+
 ## v0.4.66 — 2026-11-06 — Stable source release
 
 - Wake terminal views promptly after input using the engine's existing change
