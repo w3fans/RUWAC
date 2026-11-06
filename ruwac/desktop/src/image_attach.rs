@@ -57,6 +57,78 @@ fn target(rpc: &mut Rpc, session: &str, pane: &str, pid: Option<u64>) -> io::Res
     }
     Ok(current)
 }
+#[path = "../../crates/ruwac-pty/src/image_offer.rs"]
+mod offer;
+
+/// Bind the offer before forwarding Ctrl+V. The nested client claims using its
+/// actual process identity and attaches through its existing authenticated RPC.
+/// This worker returns immediately; focus cancellation stays with the GTK ticket.
+pub fn start_nested(
+    rpc: &mut Rpc,
+    session: &str,
+    pane: &str,
+    path: &Path,
+    ticket: std::sync::Arc<AtomicBool>,
+    done: std::sync::mpsc::SyncSender<Result<Value, String>>,
+) -> io::Result<bool> {
+    allowed(&ticket)?;
+    let pid = target(rpc, session, pane, None)?;
+    if !local_ruwac_foreground(pid) {
+        return Ok(false);
+    }
+    let expected = offer::Process::read(
+        u32::try_from(pid).map_err(|_| io::Error::other("Invalid local TUI PID"))?,
+    )?;
+    let worker = offer::Worker::reserve()?;
+    let offer = offer::Offer::new(expected)?;
+    let message = serde_json::to_vec(&json!({"version":1,"path":path}))?;
+    if message.len() > offer::MAX_MESSAGE {
+        return Err(io::Error::other("PNG handoff path too long"));
+    }
+    target(rpc, session, pane, Some(pid))?;
+    allowed(&ticket)?;
+    rpc.call(
+        "client.input",
+        json!({"pane":pane,"kind":"keyboard","text":"\u{16}"}),
+    )?;
+    let pane = pane.to_owned();
+    std::thread::spawn(move || {
+        let _worker = worker;
+        let result = (|| -> io::Result<Value> {
+            let Some(mut stream) = offer.accept(|| ticket.load(Ordering::Acquire))? else {
+                allowed(&ticket)?;
+                // An older local TUI already received its native Ctrl+V. Keep
+                // that compatibility route; absence of a claim is not proof
+                // that the native clipboard failed or that the image attached.
+                return Ok(json!({"pane":pane,"native_clipboard_key_forwarded":true,
+                    "queued":true,"submitted":false,"consumed":false,
+                    "draft_attachment_observed":false,"legacy_TUI":true}));
+            };
+            let request: Value = serde_json::from_slice(&offer::receive(&mut stream, || {
+                ticket.load(Ordering::Acquire)
+            })?)?;
+            if request != json!({"version":1,"kind":"local-image"}) {
+                return Err(io::Error::other("PNG handoff request rejected"));
+            }
+            allowed(&ticket)?;
+            offer::send(&mut stream, &message)?;
+            let mut result: Value = serde_json::from_slice(&offer::receive(&mut stream, || {
+                ticket.load(Ordering::Acquire)
+            })?)?;
+            if result["version"] != 1 || result["queued"] != true || result["submitted"] != false {
+                return Err(io::Error::other("PNG handoff receipt rejected"));
+            }
+            result["pane"] = json!(pane);
+            result["local_nested_handoff"] = json!(true);
+            result["draft_attachment_observed"] = json!(false);
+            Ok(result)
+        })()
+        .map_err(|error| error.to_string());
+        let _ = done.try_send(result);
+    });
+    Ok(true)
+}
+
 pub fn attach(
     rpc: &mut Rpc,
     session: &str,
@@ -368,6 +440,12 @@ pub fn try_clipboard_paste(
                 return;
             }
             match result {
+                Ok(receipt)
+                    if receipt["local_nested_handoff"] == true
+                        && receipt["focus_current"] == true =>
+                {
+                    view.warn("PNG sent to the nested agent draft; inspect it before submitting.")
+                }
                 Ok(receipt) if receipt["native_clipboard_key_forwarded"] == true => view
                     .warn("Ctrl+V forwarded to the nested RUWAC session; check the agent draft."),
                 Ok(receipt)

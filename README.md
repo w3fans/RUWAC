@@ -450,7 +450,19 @@ sudo dnf upgrade --refresh ruwac ruwac-desktop
 the GUI to load its new executable. Package installation preserves running
 terminal engines and their programs; the installed CLI, running GUI and running
 engine can therefore have different versions. Use `ruwac engine status` to inspect
-the engine without replacing it. COPR packages use DNF for updates and do not ship
+the engine without replacing it. An attached CLI frontend also keeps its old code:
+detach with Ctrl+A then `d`, then run `ruwac -r SESSION` to load the updated
+frontend while keeping its engine and programs alive.
+
+For PNG paste into a local nested RUWAC terminal, update both frontends: reopen
+the GUI and detach/reattach the nested CLI. The GUI hands its staged PNG to that
+specific terminal, which checks its selected Codex/Claude pane before attaching
+the image to the draft. A displayless agent does not need `DISPLAY` or X11 access,
+and no Enter is sent. Typing, switching pane/view or losing GUI focus cancels an
+unfinished handoff. An older nested CLI retains its native Ctrl+V behavior; it
+cannot use this explicit local image handoff until reattached.
+
+COPR packages use DNF for updates and do not ship
 the upstream testing-update timer. These community packages are separate from
 inclusion in the official Fedora repositories.
 

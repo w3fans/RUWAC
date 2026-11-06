@@ -647,6 +647,27 @@ impl Worker {
                                 let native_api = schema["methods"]
                                     .as_array()
                                     .is_some_and(|m| m.iter().any(|m| m == "pane.attachImage"));
+                                if native_clipboard_key {
+                                    match crate::image_attach::start_nested(
+                                        &mut rpc,
+                                        &session,
+                                        &pane,
+                                        &path,
+                                        allowed.clone(),
+                                        done.clone(),
+                                    ) {
+                                        Ok(true) => {
+                                            budget.fetch_sub(size, Ordering::Relaxed);
+                                            continue;
+                                        }
+                                        Ok(false) => (),
+                                        Err(error) => {
+                                            let _ = done.try_send(Err(error.to_string()));
+                                            budget.fetch_sub(size, Ordering::Relaxed);
+                                            continue;
+                                        }
+                                    }
+                                }
                                 let result = crate::image_attach::attach(
                                     &mut rpc,
                                     &session,

@@ -1,4 +1,5 @@
 pub mod attachment;
+pub mod image_offer;
 pub mod shell;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 use std::{

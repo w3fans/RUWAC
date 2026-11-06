@@ -1,4 +1,5 @@
 mod copy;
+mod local_image;
 mod output_wakeup;
 mod refresh;
 mod status_commands;
@@ -1689,6 +1690,7 @@ pub fn attach_with_role(
             }
         }
     });
+    let mut local_image: Option<local_image::Pending> = None;
     let mut decoder = Decoder::default();
     let mut prefix = false;
     let mut mode = Mode::Live;
@@ -1750,6 +1752,8 @@ pub fn attach_with_role(
             dirty = true;
         }
         for event in events {
+            // Any subsequent user action revokes an unfinished image paste.
+            local_image = None;
             match event {
                 Input::Selection(text) => {
                     if let Some((pane, _)) = primary_paste.take() {
@@ -1968,6 +1972,26 @@ pub fn attach_with_role(
                     let text = String::from_utf8(b).map_err(io::Error::other)?;
                     let mut pending = String::new();
                     for key in copy::keys(&text) {
+                        local_image = None;
+                        if matches!(mode, Mode::Live)
+                            && !prefix
+                            && matches!(key, copy::Key::Char('\x16'))
+                        {
+                            if !pending.is_empty() {
+                                plain(&mut s, &snapshot, &mut pending)?;
+                            }
+                            match local_image::Pending::begin(&mut s, &snapshot) {
+                                Ok(Some(image)) => {
+                                    local_image = Some(image);
+                                    continue;
+                                }
+                                Ok(None) => (),
+                                Err(error) => {
+                                    status = error.to_string();
+                                    continue;
+                                }
+                            }
+                        }
                         let mut refresh = false;
                         let result = (|| -> io::Result<()> {
                             match &mut mode {
@@ -2364,6 +2388,23 @@ pub fn attach_with_role(
         }
         if STOP.load(Ordering::Relaxed) {
             break;
+        }
+        if local_image
+            .as_ref()
+            .is_some_and(|pending| !matches!(mode, Mode::Live) || !pending.current(&snapshot))
+        {
+            local_image = None;
+        }
+        if let Some(result) = local_image
+            .as_ref()
+            .and_then(|pending| pending.poll(&mut s))
+        {
+            status = match result {
+                Ok(_) => "PNG attached to agent draft; not submitted".into(),
+                Err(error) => error.to_string(),
+            };
+            local_image = None;
+            dirty = true;
         }
         if let Mode::Copy(copy) = &mut mode {
             if let Some((row, col, at, direction)) = copy_drag.as_mut() {
