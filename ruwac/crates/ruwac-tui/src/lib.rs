@@ -1939,8 +1939,8 @@ pub fn attach_with_role(
                                         as usize;
                                     match history(&mut s, &pane) {
                                         Ok(mut c) => {
-                                            c.align_bottom(height);
-                                            c.point(height.saturating_sub(rows) + y, x);
+                                            c.align_bottom(rows);
+                                            c.point(y, x);
                                             if let Some((text, byte)) =
                                                 mouse_word_source(&snapshot, &pane, y, x)
                                                 && c.select_word(byte, &text)
