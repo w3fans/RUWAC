@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.4.62 — 2026-11-06 — Stable source release
+
 - Avoid sleeping past a due terminal-viewer frame while waiting for input. Keep
   the existing active and quiet refresh budgets, input handling and scrollback.
 
