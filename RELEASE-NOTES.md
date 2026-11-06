@@ -1,29 +1,22 @@
-RUWAC v0.4.66
+RUWAC v0.4.67
 
-Terminal views now wake promptly after input using existing engine change
-notifications. Extra render work is capped at two wakeups per input batch;
-older engines and disconnected streams retain the existing polling fallback.
+PNG paste into a local nested RUWAC terminal now hands the staged image to
+that specific terminal, which validates its selected agent and attaches through
+its existing engine connection. Displayless persisted Codex/Claude processes no
+longer need direct X11 clipboard access for this route. No Enter is sent.
 
-Isolated A/B/A tests against the published v0.4.65 engine reduced typical TUI
-echo latency from about 6–8 ms to 3 ms, including 20-window fixtures. All 3,150
-measured keystrokes completed without timeouts. History-heavy tails remain.
-The busy-output fixture used about 5% more CPU per key (11% more per second);
-quiet CPU/memory stayed close to baseline. GTK paint and physical RDP/WAN
-latency are outside these measurements. See the typing-wakeup report for scope.
+The handoff is private, short-lived and bounded. Typing, changing pane/view or
+losing GUI focus revokes unfinished delivery. Ordinary native Ctrl+V, SSH image
+transfer and older nested frontends retain their existing routes.
 
-Unicode, bracketed paste, mouse routing, scrollback and persistent application
-processes are preserved. Validation covers notification failure, bounded queues,
-Escape decoding, attach/startup races, paste boundaries and stable child PIDs.
+Update and reopen the GUI, then detach the nested CLI with Ctrl+A followed by d
+and reattach with ruwac -r SESSION. The engine, agent and terminal programs can
+keep running. Updating only the package files does not reload an attached CLI.
 
-COPR provides both ruwac and ruwac-desktop for Fedora 43, 44, 45 and Rawhide
-on x86_64. For immediate updates, use:
+Generated displayless-agent tests use an actual published v0.4.59 engine and
+preserve its agent PID/start identity. Native GDK/PTY comparison retains the
+published v0.4.66 GUI as a negative control. Frozen release and actual-public
+acceptance remain separate from candidate results; owner physical/provider
+image consumption and external Windows acceptance are not claimed.
 
-    sudo dnf upgrade --refresh ruwac ruwac-desktop
-
-An already attached terminal frontend keeps its old code after installation.
-Detach that frontend (default: Ctrl+A, then d), then reattach the same session
-with ruwac -r SESSION. Its engine and running programs can stay alive.
-Reopen the GUI to load its installed version.
-
-This is a development patch; the existing RSA advisory remains open and
-unsuppressed. Stable milestone acceptance remains separate.
+The known RSA Marvin advisory and maintenance warnings remain unsuppressed.

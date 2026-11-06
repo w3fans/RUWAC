@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.4.67 — 2026-11-06 — Stable source release
+
 - Attach clipboard PNGs to a local nested RUWAC agent through a private,
   bounded frontend handoff, including persisted agents without desktop clipboard
   access. Keep the running engine and agent alive, and never send Enter.
