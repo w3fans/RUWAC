@@ -1691,7 +1691,9 @@ pub fn attach_with_role(
     let mut rendered = Instant::now();
     let mut commands_refreshed = Instant::now();
     let mut input_at = Instant::now();
-    let mut copy_drag: Option<(usize, usize, Instant)> = None;
+    // Pointer row/column, scroll tick and last vertical movement. A horizontal
+    // selection along an edge must not turn into a request to scroll history.
+    let mut copy_drag: Option<(usize, usize, Instant, std::cmp::Ordering)> = None;
     while !STOP.load(Ordering::Relaxed) {
         // Briefly poll faster after input so local echo is not delayed by the
         // ordinary output refresh cadence. Quiet terminals keep their old rate.
@@ -1764,11 +1766,16 @@ pub fn attach_with_role(
                             0 if !release => {
                                 c.point(row, col);
                                 c.mark();
-                                copy_drag = Some((row, col, Instant::now()));
+                                copy_drag =
+                                    Some((row, col, Instant::now(), std::cmp::Ordering::Equal));
                             }
                             0 | 32 => {
                                 c.point(row, col);
-                                if let Some((last_row, last_col, _)) = copy_drag.as_mut() {
+                                if let Some((last_row, last_col, _, direction)) = copy_drag.as_mut()
+                                {
+                                    if row != *last_row {
+                                        *direction = row.cmp(last_row);
+                                    }
                                     *last_row = row;
                                     *last_col = col;
                                 }
@@ -1866,7 +1873,17 @@ pub fn attach_with_role(
                                                 c.point(offset + sy, sx);
                                                 c.mark();
                                                 c.point(offset + y, x);
-                                                copy_drag = Some((offset + y, x, Instant::now()));
+                                                // Copy mode fills the client, so retain the
+                                                // physical pointer position rather than the
+                                                // source pane's history-alignment offset.
+                                                copy_drag = sgr_mouse(&b).map(|(_, px, py, _)| {
+                                                    (
+                                                        py.saturating_sub(1) as usize,
+                                                        px.saturating_sub(1) as usize,
+                                                        Instant::now(),
+                                                        y.cmp(&sy),
+                                                    )
+                                                });
                                                 mode = Mode::Copy(c);
                                             }
                                             Err(e) => {
@@ -2323,9 +2340,13 @@ pub fn attach_with_role(
             break;
         }
         if let Mode::Copy(copy) = &mut mode {
-            if let Some((row, col, at)) = copy_drag.as_mut() {
+            if let Some((row, col, at, direction)) = copy_drag.as_mut() {
                 if at.elapsed() >= Duration::from_millis(35) {
-                    dirty |= copy.drag_scroll(*row, *col, size.0 as usize);
+                    if (*row == 0 && direction.is_lt())
+                        || (*row >= (size.0 as usize).saturating_sub(1) && direction.is_gt())
+                    {
+                        dirty |= copy.drag_scroll(*row, *col, size.0 as usize);
+                    }
                     *at = Instant::now();
                 }
             }

@@ -21,6 +21,12 @@ try:
  rpc('pane.wait',{'pane':row['pane'],'contains':'READY','timeout_ms':5000})
  ui=Tui(binary,sock,row['session'],root/'terminal.pty',rows=24,cols=80,env=env)
  eventually(lambda:b'READY'in ui.data)
+ # Selecting across the first row must not become an automatic history scroll.
+ mouse(0,1,1);mouse(32,6,1);time.sleep(.08);mouse(32,12,1);time.sleep(.65);mouse(0,12,1,True)
+ horizontal=eventually(lambda:rpc('buffer.get',{'session':row['session']})['text'])
+ assert '\n'not in horizontal and re.fullmatch(r'ROW\d{4} xyz',horizontal.rstrip()),{'reason':'HORIZONTAL_EDGE_SCROLL_REGRESSION','selected':horizontal}
+ checks.append('horizontal first-row hold does not scroll')
+ rpc('buffer.set',{'session':row['session'],'text':''})
  # No wheel, keyboard copy command, second press, or pointer movement while held.
  mouse(0,2,12);mouse(32,2,1);time.sleep(.65);mouse(0,2,1,True)
  text=eventually(lambda:rpc('buffer.get',{'session':row['session']})['text'])
@@ -34,6 +40,13 @@ try:
  inside_rows=[int(v)for v in re.findall(r'ROW(\d{4})',inside)]
  assert inside_rows and min(inside_rows)>=270,inside
  checks.append('interior hold does not scroll')
+ # A drag may start horizontally before the user moves toward an edge.
+ rpc('buffer.set',{'session':row['session'],'text':''})
+ mouse(0,2,12);mouse(32,10,12);time.sleep(.08);mouse(32,10,1);time.sleep(.65);mouse(0,10,1,True)
+ later=eventually(lambda:rpc('buffer.get',{'session':row['session']})['text'])
+ later_rows=[int(v)for v in re.findall(r'ROW(\d{4})',later)]
+ assert later_rows and min(later_rows)<270,later
+ checks.append('horizontal start can later scroll toward an edge')
  # Start from existing history and hold the bottom edge to reach newer output.
  for _ in range(12):mouse(64,2,10)
  time.sleep(.1);rpc('buffer.set',{'session':row['session'],'text':''})
@@ -42,6 +55,16 @@ try:
  bottom_rows=[int(v)for v in re.findall(r'ROW(\d{4})',bottom)]
  assert bottom_rows and max(bottom_rows)>=295,bottom
  checks.append('existing-history bottom edge reaches newer rows')
+ # Expanding a top split into full-client copy mode changes text alignment,
+ # but an unchanged physical pointer row is still horizontal movement.
+ split=rpc('pane.create',{'window':row['window'],'pane':row['pane'],'orientation':'horizontal','argv':[sys.executable,str(writer)]})
+ rpc('pane.wait',{'pane':split['pane'],'contains':'READY','timeout_ms':5000});time.sleep(.2)
+ rpc('buffer.set',{'session':row['session'],'text':''})
+ mouse(0,1,1);mouse(32,6,1);time.sleep(.08);mouse(32,12,1);time.sleep(.65);mouse(0,12,1,True)
+ split_text=eventually(lambda:rpc('buffer.get',{'session':row['session']})['text'])
+ split_rows=[int(v)for v in re.findall(r'ROW(\d{4})',split_text)]
+ assert split_rows and min(split_rows)>=270,{'reason':'SPLIT_EDGE_INVENTED_VERTICAL_MOTION','selected':split_text}
+ checks.append('split expansion does not invent vertical pointer movement')
  assert writer.with_suffix('.input').read_bytes()==b''
  checks.append('selection bytes never reach application PTY')
  panes=rpc('pane.list',{'session':row['session']});assert next(v for v in panes if v['id']==row['pane'])['pid']==row['pid']
@@ -51,7 +74,7 @@ finally:
  if ui is not None:ui.finish('term')
  if server is not None and server.poll()is None:
   rpc('daemon.stop');server.wait(timeout=5)
- (root/'receipt.json').write_text(json.dumps({'PASS':len(checks)==5,'checks':checks,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest()},indent=2)+'\n')
+ (root/'receipt.json').write_text(json.dumps({'PASS':len(checks)==8,'checks':checks,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest()},indent=2)+'\n')
  import shutil
  shutil.rmtree(runtime)
 print('Terminal held-drag regression PASS',flush=True)
