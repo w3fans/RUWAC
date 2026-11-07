@@ -140,7 +140,7 @@ jobs:
           cargo build --locked --manifest-path ruwac/Cargo.toml
           python3 ruwac/tests/integration/atomic_paste.py --binary "$CARGO_TARGET_DIR/debug/ruwac" --evidence "$RUNNER_TEMP"
           mkdir -p "$RUNNER_TEMP/ruwac-evidence"
-          for test in spike desktop_state client_focus jobs jobs_capacity recovery screen_previous multiplexer_commands screen_copy history_snapshot primary_history checkpoint_validation terminal_styles_apps mixed_nesting terminal_usability cli_user_shell cli_shell_contract natural_grid status_bar split_dividers; do
+          for test in spike desktop_state client_focus jobs jobs_capacity recovery screen_previous multiplexer_commands screen_copy history_snapshot primary_history checkpoint_validation terminal_styles_apps mobile_capture mixed_nesting terminal_usability cli_user_shell cli_shell_contract natural_grid status_bar split_dividers; do
             python3 "ruwac/tests/integration/$test.py" --binary "$CARGO_TARGET_DIR/debug/ruwac" --evidence "$RUNNER_TEMP/ruwac-evidence"
           done
       - name: Large independent zoomers and non-sizing viewer palette fallback

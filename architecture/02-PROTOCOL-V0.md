@@ -52,3 +52,12 @@ Remote use can pipe a JSON request into `ssh EXISTING_HOST ruwac request` using 
 Protocol 0 keeps the 1 MiB request/default-response ceiling. capabilities and schema now advertise terminal_size_limits (rows, cols, cells) and max_render_response_bytes. Current limits are 512 rows, 1024 columns and 262144 cells; session creation, attachment and resizing validate the whole area before mutation. Missing capability metadata selects the legacy 100-row/200-column client bounds.
 
 Only client.render may opt into a larger reply using max_response_bytes (1 MiB through 64 MiB). The client must read that explicit bound while continuing to validate version and request correlation. Invalid bounds return INVALID_PARAMS. An over-budget encoded reply returns a small correlated LIMIT response before any frame bytes are written. Other responses and all requests retain their existing limit. Outstanding large renders have a separate two-permit budget and bounded waiting/write deadlines; BUSY requests can retry reads later without replaying input. This does not alter PTY ownership, authentication, focus or endpoint identities.
+
+`pane.capture` accepts optional `format: "ansi"` (default `"plain"`). ANSI
+capture returns SGR styling only, never OSC, hyperlinks, cursor commands or input.
+It observes the selected active/primary buffer without attachment or resizing,
+and retains complete latest rows within 64 KiB. Saved checkpoint histories
+retain plain text only and therefore return plain text in this mode. Older
+daemons ignore the extra field and return their ordinary plain capture.
+`contains` is matched against plain captured text regardless of the output
+format. `pane.wait` remains plain so match semantics do not depend on style.

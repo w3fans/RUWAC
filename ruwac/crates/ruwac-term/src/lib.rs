@@ -7,7 +7,7 @@ use alacritty_terminal::{
         ClipboardType, Config, Osc52, TermMode,
         cell::{Cell, Flags},
     },
-    vte::ansi::{Color, Processor},
+    vte::ansi::{Color, NamedColor, Processor},
 };
 use ruwac_protocol::render_cells::valid_cell;
 use serde_json::{Value, json};
@@ -527,6 +527,80 @@ impl Terminal {
     pub fn capture_primary(&self, lines: usize) -> Option<String> {
         self.capture_buffer(lines, true)
     }
+    /// Non-sizing capture with SGR styles only. Historical checkpoint text has no retained styles.
+    /// Bound ANSI responses to 64 KiB, retaining complete newest rows.
+    pub fn capture_ansi(&self, lines: usize, primary: bool) -> Option<String> {
+        if self.archived.is_some() {
+            let text = self.capture_buffer(lines, primary)?;
+            let mut bytes = 0;
+            let mut rows = Vec::new();
+            for line in text.lines().rev() {
+                if bytes + line.len() + 1 > 65536 {
+                    break;
+                }
+                rows.push(format!("{line}\n"));
+                bytes += line.len() + 1;
+            }
+            rows.reverse();
+            return Some(rows.concat());
+        }
+        let g = if primary {
+            self.term.primary_grid()
+        } else {
+            self.term.grid()
+        };
+        let bottom = g.bottommost_line().0;
+        let start = (bottom + 1 - lines as i32).max(g.topmost_line().0);
+        let mut rows = Vec::new();
+        let mut bytes = 0;
+        for r in (start..=bottom).rev() {
+            let last = (0..self.cols as usize).rfind(|&c| {
+                let cell = &g[Point::new(Line(r), Column(c))];
+                (cell.c != ' '
+                    || cell.bg != Color::Named(NamedColor::Background)
+                    || cell.flags.contains(Flags::INVERSE))
+                    && !cell
+                        .flags
+                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            });
+            let mut row = String::new();
+            let mut previous = String::new();
+            let mut previous_style = None;
+            if let Some(last) = last {
+                for c in 0..=last {
+                    let cell = &g[Point::new(Line(r), Column(c))];
+                    if cell
+                        .flags
+                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    {
+                        continue;
+                    }
+                    let style = (cell.fg, cell.bg, cell.flags);
+                    if previous_style != Some(style) {
+                        let sgr = capture_sgr(cell);
+                        if sgr != previous {
+                            row.push_str(&sgr);
+                            previous = sgr;
+                        }
+                        previous_style = Some(style);
+                    }
+                    row.push(if cell.c.is_control() { ' ' } else { cell.c });
+                    if let Some(z) = cell.zerowidth() {
+                        row.extend(z.iter().filter(|c| !c.is_control()));
+                    }
+                }
+                row.push_str("\x1b[0m");
+            }
+            row.push('\n');
+            if bytes + row.len() > 65536 {
+                break;
+            }
+            bytes += row.len();
+            rows.push(row);
+        }
+        rows.reverse();
+        Some(rows.concat())
+    }
     fn capture_buffer(&self, lines: usize, primary: bool) -> Option<String> {
         let selected;
         let archived = if primary {
@@ -936,6 +1010,64 @@ fn history_limit(cols: u16) -> usize {
         )
         .max(1)
 }
+fn capture_sgr(cell: &Cell) -> String {
+    let mut codes = vec!["0".to_string()];
+    for (flag, code) in [
+        (Flags::BOLD, "1"),
+        (Flags::DIM, "2"),
+        (Flags::ITALIC, "3"),
+        (Flags::ALL_UNDERLINES, "4"),
+        (Flags::INVERSE, "7"),
+        (Flags::HIDDEN, "8"),
+        (Flags::STRIKEOUT, "9"),
+    ] {
+        if cell.flags.intersects(flag) {
+            codes.push(code.into());
+        }
+    }
+    for (color, foreground) in [(cell.fg, true), (cell.bg, false)] {
+        let prefix = if foreground { 38 } else { 48 };
+        match color {
+            Color::Spec(rgb) => codes.push(format!("{prefix};2;{};{};{}", rgb.r, rgb.g, rgb.b)),
+            Color::Indexed(i) => codes.push(format!("{prefix};5;{i}")),
+            Color::Named(n) => {
+                let n = n as u16;
+                match n {
+                    0..=15 => codes.push(format!(
+                        "{}",
+                        if n < 8 {
+                            if foreground { 30 + n } else { 40 + n }
+                        } else if foreground {
+                            90 + n - 8
+                        } else {
+                            100 + n - 8
+                        }
+                    )),
+                    259..=266 => {
+                        codes.push("2".into());
+                        codes.push(format!(
+                            "{}",
+                            if foreground {
+                                30 + n - 259
+                            } else {
+                                40 + n - 259
+                            }
+                        ));
+                    }
+                    _ => {
+                        if n == 267 {
+                            codes.push("1".into());
+                        } else if n == 268 {
+                            codes.push("2".into());
+                        }
+                        codes.push(if foreground { "39" } else { "49" }.into());
+                    }
+                }
+            }
+        }
+    }
+    format!("\x1b[{}m", codes.join(";"))
+}
 fn color(c: Color) -> Value {
     match c {
         Color::Spec(rgb) => json!([rgb.r, rgb.g, rgb.b]),
@@ -946,6 +1078,109 @@ fn color(c: Color) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ansi_capture_preserves_styles_without_resizing_or_controls() {
+        let mut t = Terminal::new(3, 40);
+        t.feed(b"\x1b[38;2;12;34;56;48;5;24;1mRGB\x1b[0m plain\r\n\x1b[31mred\x1b[0m");
+        let before = t.snapshot();
+        let styled = t.capture_ansi(3, false).unwrap();
+        assert!(styled.contains("38;2;12;34;56"));
+        assert!(styled.contains("48;5;24"));
+        assert!(styled.contains("RGB"));
+        assert!(styled.contains("31;49mred"));
+        assert_eq!(t.snapshot(), before);
+        let mut replay = Terminal::new(3, 40);
+        replay.feed(
+            styled
+                .trim_end_matches('\n')
+                .replace('\n', "\r\n")
+                .as_bytes(),
+        );
+        assert_eq!(replay.capture(3), t.capture(3));
+        assert_eq!(
+            replay.snapshot()["cells"][0][0][2],
+            before["cells"][0][0][2]
+        );
+    }
+    #[test]
+    fn ansi_capture_bounds_latest_rows_and_respects_primary_buffer() {
+        let mut t = Terminal::new(3, 80);
+        for _ in 0..1000 {
+            t.feed(b"\x1b[32mhistory\x1b[0m\r\n");
+        }
+        t.feed(b"latest");
+        let styled = t.capture_ansi(2000, false).unwrap();
+        assert!(styled.len() <= 65536);
+        assert!(styled.contains("latest"));
+        t.feed(b"\x1b[?1049hALT");
+        assert!(t.capture_ansi(3, false).unwrap().contains("ALT"));
+        assert!(t.capture_ansi(3, true).unwrap().contains("latest"));
+    }
+    #[test]
+    fn ansi_capture_keeps_unicode_and_only_exports_sgr_controls() {
+        let mut t = Terminal::new(3, 80);
+        t.feed("\x1b]0;private-title\x07\x1b]8;;https://example.invalid/hidden\x1b\\\x1b[3;4;7;9mž界e\u{301}👩\u{200d}💻\x1b[0m\x1b]8;;\x1b\\".as_bytes());
+        let before = t.snapshot();
+        let text = t.capture_ansi(3, false).unwrap();
+        assert!(text.contains("ž界e\u{301}"));
+        assert!(!text.contains("private-title"));
+        assert!(!text.contains("https://"));
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                assert_eq!(chars.next(), Some('['));
+                loop {
+                    let code = chars.next().expect("complete SGR");
+                    if code == 'm' {
+                        break;
+                    }
+                    assert!(code.is_ascii_digit() || code == ';');
+                }
+            } else {
+                assert!(!c.is_control() || c == '\n');
+            }
+        }
+        let mut replay = Terminal::new(3, 80);
+        replay.feed(text.trim_end_matches('\n').replace('\n', "\r\n").as_bytes());
+        assert_eq!(replay.capture(3), t.capture(3));
+        assert_eq!(t.snapshot(), before);
+    }
+    #[test]
+    fn ansi_capture_truncates_at_complete_rows_with_independent_styles() {
+        let mut t = Terminal::new(3, 80);
+        for n in 0..1600 {
+            t.feed(
+                format!(
+                    "\x1b[38;2;{};20;30mrow-{n:04}-{}\x1b[0m\r\n",
+                    n % 255,
+                    "界".repeat(25)
+                )
+                .as_bytes(),
+            );
+        }
+        t.feed(b"LATEST-ANSI-END");
+        let text = t.capture_ansi(2000, false).unwrap();
+        assert!(text.len() <= 65536);
+        assert!(text.len() > 60000);
+        assert!(text.contains("LATEST-ANSI-END"));
+        assert!(!text.contains("row-0000-"));
+        assert!(text.ends_with("\x1b[0m\n"));
+        assert!(text.lines().all(|row| row.is_empty()
+            || (row.starts_with("\x1b[") && row.ends_with("\x1b[0m"))));
+    }
+    #[test]
+    fn ansi_capture_of_restored_archives_retains_plain_primary_fallback() {
+        let mut t = Terminal::new(3, 30);
+        t.feed(b"\x1b[31mPRIMARY\x1b[0m\x1b[?1049h\x1b[32mALTERNATE\x1b[0m");
+        let restored = Terminal::restore(t.checkpoint_archive()).unwrap();
+        assert_eq!(
+            restored.capture_ansi(3, false).unwrap(),
+            restored.capture(3)
+        );
+        assert_eq!(restored.capture_ansi(3, true), restored.capture_primary(3));
+        assert!(!restored.capture_ansi(3, false).unwrap().contains('\x1b'));
+        assert!(restored.capture_ansi(3, true).unwrap().contains("PRIMARY"));
+    }
     #[test]
     fn grid_modes_unicode() {
         let mut t = Terminal::new(4, 20);

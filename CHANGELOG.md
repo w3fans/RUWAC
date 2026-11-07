@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Preserve terminal foreground/background colors and emphasis in opt-in ANSI
+  captures for non-sizing mobile observers. Default capture and waits stay plain;
+  saved history retains its plain fallback. No attach, resize or terminal input.
+
 ## v0.4.68 — 2026-11-06 — Stable source release
 
 - Double-click terminal words in the GUI or an ordinary shell in the terminal
