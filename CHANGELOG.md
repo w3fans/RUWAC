@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Avoid rebuilding decoded terminal cells into a second JSON value tree. Reduce
+  frontend allocations and measured typing latency while preserving cell styles,
+  Unicode, selection, validation budgets and older-engine compatibility.
+
 ## v0.4.70 — 2026-11-07 — Stable source release
 
 - Reuse immutable checkpoint snapshots for unchanged terminal panes, reducing

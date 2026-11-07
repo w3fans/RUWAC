@@ -1,6 +1,6 @@
 //! Opt-in full-frame palette cells. Decode before any drawing/history consumer.
 use crate::{MAX_RENDER_FRAME, TerminalLimits};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::io;
 
 pub fn valid_cell(cell: &Value) -> bool {
@@ -136,7 +136,12 @@ pub fn expand_frame(frame: &mut Value) -> io::Result<()> {
         object.remove("cell_encoding");
         object.remove("cell_palette");
         object.remove("cell_indices");
-        object.insert("cells".into(), json!(rows));
+        // The cells are already owned JSON values. Move their row vectors into
+        // the frame instead of serializing a second copy of every cell.
+        object.insert(
+            "cells".into(),
+            Value::Array(rows.into_iter().map(Value::Array).collect()),
+        );
     }
     Ok(())
 }
@@ -144,6 +149,7 @@ pub fn expand_frame(frame: &mut Value) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     fn frame() -> Value {
         json!({"revision":42,"panes":[{"id":"pane-fixture","grid":{"rows":1,"cols":2,"cursor":{"visible":true},"cell_encoding":"palette-v1","cell_palette":[["界",false,[1,2,3],257,true,false,{"italic":true,"dim":false,"hidden":false,"strike":false,"width":2,"underline":"curly","underline_color":[4,5,6]}],["",true,256,257,false,false]],"cell_indices":[[0,1]]}}]})
     }
