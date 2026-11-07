@@ -11,7 +11,7 @@ use std::{
         io::AsRawFd,
     },
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 const MAX_FILE: u64 = 128 * 1024 * 1024;
 #[derive(Serialize, Deserialize)]
@@ -28,8 +28,44 @@ struct Checkpoint {
 struct SavedPane {
     id: String,
     window: String,
-    terminal: Archive,
+    #[serde(with = "shared_terminal")]
+    terminal: Arc<Archive>,
     exit_code: Option<u32>,
+}
+
+// Sharing is only an in-memory checkpoint implementation detail. Keep the
+// existing canonical JSON/schema and its ordinary Archive deserializer.
+mod shared_terminal {
+    use super::*;
+    pub fn serialize<S: serde::Serializer>(
+        terminal: &Arc<Archive>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        terminal.as_ref().serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Arc<Archive>, D::Error> {
+        Archive::deserialize(deserializer).map(Arc::new)
+    }
+}
+
+impl Pane {
+    fn checkpoint_archive(&mut self) -> Arc<Archive> {
+        // Feed (including mode resets) and resize advance this canonical epoch.
+        // Selection replies change neither cells nor archived terminal modes.
+        // At most one current snapshot is retained per pane; an in-flight writer
+        // holds immutable references. Removing the pane releases its cache.
+        let epoch = self.term.history_epoch;
+        if self
+            .checkpoint
+            .as_ref()
+            .is_none_or(|(saved, _)| *saved != epoch)
+        {
+            self.checkpoint = Some((epoch, Arc::new(self.term.checkpoint_archive())));
+        }
+        Arc::clone(&self.checkpoint.as_ref().unwrap().1)
+    }
 }
 
 pub struct Store {
@@ -184,7 +220,7 @@ impl Write for LimitedWriter {
     }
 }
 impl State {
-    fn saved(&self) -> Checkpoint {
+    fn saved(&mut self) -> Checkpoint {
         // Clipboard registers, requests, input, argv, client identities and
         // authentication are intentionally absent from this schema.
         let mut checkpoint = Checkpoint {
@@ -219,11 +255,11 @@ impl State {
                 .collect(),
             panes: self
                 .panes
-                .values()
+                .values_mut()
                 .map(|p| SavedPane {
                     id: p.id.clone(),
                     window: p.window.clone(),
-                    terminal: p.term.checkpoint_archive(),
+                    terminal: p.checkpoint_archive(),
                     exit_code: p
                         .exit_code
                         .or_else(|| p.pty.as_ref().and_then(Pty::exit_code)),
@@ -289,7 +325,8 @@ impl State {
             if !valid_id(&p.id, "pane") || self.panes.contains_key(&p.id) {
                 return Err(invalid());
             }
-            let term = Terminal::restore(p.terminal).map_err(|_| invalid())?;
+            let archive = Arc::try_unwrap(p.terminal).unwrap_or_else(|a| a.as_ref().clone());
+            let term = Terminal::restore(archive).map_err(|_| invalid())?;
             self.panes.insert(
                 p.id.clone(),
                 Pane {
@@ -298,6 +335,7 @@ impl State {
                     pty: None,
                     exit_code: p.exit_code,
                     term,
+                    checkpoint: None,
                     ended: true,
                     foreground: None,
                     job: None,
@@ -408,4 +446,99 @@ fn validate_layout(l: &Layout, depth: usize, out: &mut Vec<String>) -> std::resu
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod checkpoint_snapshot_tests {
+    use super::*;
+
+    fn pane() -> Pane {
+        Pane {
+            id: id("pane"),
+            window: id("window"),
+            pty: None,
+            exit_code: None,
+            term: Terminal::new(4, 24),
+            checkpoint: None,
+            ended: false,
+            foreground: None,
+            job: None,
+        }
+    }
+
+    #[test]
+    fn unchanged_snapshots_share_without_changing_an_inflight_writer() {
+        let mut p = pane();
+        p.term.feed(b"before");
+        let old = p.checkpoint_archive();
+        let old_json = serde_json::to_value(old.as_ref()).unwrap();
+        assert!(Arc::ptr_eq(&old, &p.checkpoint_archive()));
+        p.term.feed(b"\r\nafter");
+        let new = p.checkpoint_archive();
+        assert!(!Arc::ptr_eq(&old, &new));
+        assert_eq!(serde_json::to_value(old.as_ref()).unwrap(), old_json);
+        assert_ne!(serde_json::to_value(new.as_ref()).unwrap(), old_json);
+        let weak = Arc::downgrade(&new);
+        drop(new);
+        drop(p);
+        assert!(weak.upgrade().is_none(), "no cache survives its pane");
+    }
+
+    #[test]
+    fn snapshots_follow_output_modes_resize_and_independent_panes() {
+        let mut p = pane();
+        let mut other = pane();
+        let quiet = other.checkpoint_archive();
+        for bytes in [
+            "Že\u{301}界\r\n".as_bytes(),
+            b"\x1b[?1049h\x1b[1;38;2;1;2;3mALT",
+            b"\x1b[?2004h\x1b[?1006h",
+            b"\x1b[?1049lPRIMARY",
+        ] {
+            let prior = p.checkpoint_archive();
+            p.term.feed(bytes);
+            let snapshot = p.checkpoint_archive();
+            assert!(!Arc::ptr_eq(&prior, &snapshot));
+            assert_eq!(
+                serde_json::to_value(snapshot.as_ref()).unwrap(),
+                serde_json::to_value(p.term.checkpoint_archive()).unwrap()
+            );
+            assert!(Arc::ptr_eq(&quiet, &other.checkpoint_archive()));
+        }
+        for mutation in 0..2 {
+            let prior = p.checkpoint_archive();
+            if mutation == 0 {
+                p.term.resize(6, 18);
+            } else {
+                p.term.reset_input_modes();
+            }
+            let snapshot = p.checkpoint_archive();
+            assert!(!Arc::ptr_eq(&prior, &snapshot));
+            assert_eq!(
+                serde_json::to_value(snapshot.as_ref()).unwrap(),
+                serde_json::to_value(p.term.checkpoint_archive()).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn shared_snapshots_keep_the_existing_plain_archive_wire_shape() {
+        let mut p = pane();
+        p.term.feed(b"\x1b[31mprimary\r\n\x1b[?1049halternate");
+        let expected = serde_json::to_value(p.term.checkpoint_archive()).unwrap();
+        let saved = SavedPane {
+            id: p.id.clone(),
+            window: p.window.clone(),
+            terminal: p.checkpoint_archive(),
+            exit_code: Some(0),
+        };
+        let encoded = serde_json::to_value(&saved).unwrap();
+        assert_eq!(encoded["terminal"], expected);
+        assert_eq!(encoded.as_object().unwrap().len(), 4);
+        let decoded: SavedPane = serde_json::from_value(encoded).unwrap();
+        decoded.terminal.validate().unwrap();
+        let restored = Terminal::restore(decoded.terminal.as_ref().clone()).unwrap();
+        assert_eq!(restored.capture(20), p.term.capture(20));
+        assert_eq!(restored.capture_primary(20), p.term.capture_primary(20));
+    }
 }

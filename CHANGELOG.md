@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Reuse immutable checkpoint snapshots for unchanged terminal panes, reducing
+  long typing stalls and repeated allocation with many history-filled terminals.
+  Preserve checkpoint contents, validation, file format and persistence timing.
+
 ## v0.4.69 — 2026-11-07 — Stable source release
 
 - Preserve terminal foreground/background colors and emphasis in opt-in ANSI

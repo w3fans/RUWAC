@@ -18,6 +18,7 @@ struct Pane {
     pty: Option<Pty>,
     exit_code: Option<u32>,
     term: Terminal,
+    checkpoint: Option<(u64, std::sync::Arc<ruwac_term::Archive>)>,
     ended: bool,
     foreground: Option<i32>,
     job: Option<jobs::Job>,
@@ -421,6 +422,7 @@ impl State {
                 pty: Some(pty),
                 exit_code: None,
                 term: Terminal::new(rows, cols),
+                checkpoint: None,
                 ended: false,
             },
         );
