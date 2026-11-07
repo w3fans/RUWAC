@@ -12,7 +12,8 @@ one persistent terminal daemon. Closing a frontend detaches it; your terminal
 programs keep running until they exit or you explicitly stop them.
 
 - **Try it:** [download a release](https://github.com/w3fans/RUWAC/releases/latest),
-  then follow [Fedora testing RPMs](#fedora-testing-rpms) or the
+  then follow [Fedora testing RPMs](#fedora-testing-rpms),
+  [Ubuntu/Debian/Proxmox CLI packages](#ubuntudebianproxmox-cli), or the
   [source installation](#install-and-open-the-workspace).
 - **Learn the controls:** [first terminal session](#first-terminal-session),
   [desktop navigation](#desktop-navigation-and-diagnostics),
@@ -29,8 +30,9 @@ programs keep running until they exit or you explicitly stop them.
 
 RUWAC is an **engineering preview**. Release assets include upstream Fedora 44
 x86_64 testing packages and bundles; these are not official Fedora repository
-packages. Other distributions can try the source build, but are not covered by
-that package qualification. A version number or passing fixture is not a claim
+packages. Starting with v0.4.71, releases also include a headless Linux x86_64
+CLI archive and Debian package, tested in Ubuntu 22.04/24.04 and Debian 12/13
+userspaces. This does not qualify the GTK desktop or a physical Proxmox host. A version number or passing fixture is not a claim
 of production security or universal RDP interoperability.
 
 The desktop inherits the unresolved
@@ -62,6 +64,44 @@ selection stays with that frontend/engine and is cleared from new PTY shells. A 
 `ruwac --host HOST engine status` checks an updated remote CLI and its running
 engine through the existing verified SSH route. Older remote CLIs need updating
 before they can provide this report; no remote engine is restarted automatically.
+
+## Ubuntu/Debian/Proxmox CLI
+
+Starting with v0.4.71, each tagged release builds the portable **CLI only** in
+parallel with the Fedora packages. One x86_64 binary targets glibc 2.35 or newer.
+The same Debian package is installed and exercised in pinned Ubuntu 22.04,
+Ubuntu 24.04, Debian 12 and Debian 13 containers before publication. Tests cover
+Unicode PTY input, native terminal attach/detach, history recovery and package
+reinstallation without restarting the existing engine or shell. Debian userspace
+coverage is useful for Proxmox; actual hypervisor-host acceptance remains pending.
+
+Download the `.deb` and its checksum from the same
+[release](https://github.com/w3fans/RUWAC/releases). For example:
+
+```sh
+version=0.4.71
+package="ruwac_${version}-1_amd64.deb"
+base="https://github.com/w3fans/RUWAC/releases/download/v${version}"
+curl -fLO "$base/$package"
+curl -fLO "$base/$package.sha256"
+sha256sum -c "$package.sha256"
+sudo apt install "./$package"
+ruwac -v
+ruwac -S work
+```
+
+When logged in as root on Proxmox, omit `sudo`. No GUI, RDP client, kernel
+module or hypervisor service is installed. The package does not restart running
+RUWAC engines. Use `ruwac engine status` to distinguish installed and running
+versions. Follow the same download/install steps for subsequent releases: there
+is **no RUWAC APT repository yet**, so `apt upgrade` alone cannot fetch them.
+
+For an installation without root, download
+`ruwac-VERSION-linux-x86_64.tar.gz` and its `.sha256` companion, verify the checksum,
+extract it, and copy its `bin/ruwac` to a directory on your PATH such as
+`~/.local/bin`. The archive includes dependency license notices and a source
+manifest. Releases also include an OS test receipt and Sigstore provenance for
+the archive, Debian package and receipt. ARM binaries are not provided by this lane.
 
 ## First terminal session
 

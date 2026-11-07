@@ -1,0 +1,22 @@
+[
+  {
+    "distribution": "debian",
+    "version": "12",
+    "image": "docker.io/library/debian@sha256:c67e92c8099ba22853ab4cfda7cfb494d253d6012ca82dee98ba8976772af018"
+  },
+  {
+    "distribution": "debian",
+    "version": "13",
+    "image": "docker.io/library/debian@sha256:7378260c0a098d27ac206225db5e7d92b8c7c84ea7afccc86eeb513756bbd392"
+  },
+  {
+    "distribution": "ubuntu",
+    "version": "22.04",
+    "image": "docker.io/library/ubuntu@sha256:8a2321a92b438238f93b4346fff61bc4259c99fdd4d9b52ee86f153fee0c344f"
+  },
+  {
+    "distribution": "ubuntu",
+    "version": "24.04",
+    "image": "docker.io/library/ubuntu@sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d"
+  }
+]

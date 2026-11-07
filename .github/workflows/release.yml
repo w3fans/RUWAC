@@ -189,3 +189,107 @@ jobs:
               release = json.loads(subprocess.check_output(['gh','api','repos/'+os.environ['GITHUB_REPOSITORY']+'/releases/tags/'+tag],text=True))
               assert any(a['name']==path.name and a['digest']==digest and a['state']=='uploaded' for a in release['assets'])
           PYCODE
+
+  portable-cli-build-test:
+    if: github.repository == 'w3fans/RUWAC' && startsWith(github.ref, 'refs/tags/')
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Validate portable packaging contracts
+        run: python3 ruwac/tests/integration/test_portable_cli.py
+      - name: Build one headless CLI with the older glibc baseline
+        run: |
+          mkdir -p "$RUNNER_TEMP/portable-work" "$RUNNER_TEMP/portable-cargo"
+          docker run --rm --cpus=2 --memory=4g --memory-swap=4g --pids-limit=256 \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/src,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/portable-work,dst=/work" \
+            --mount "type=bind,src=$RUNNER_TEMP/portable-cargo,dst=/cargo" \
+            --env CARGO_HOME=/cargo \
+            registry.fedoraproject.org/fedora@sha256:05e3c351a7e762aca8fb067a9a92c1f775a7c4fbb1382c97cdd87bd6fb5b162c \
+            /bin/bash -euc 'dnf install -y git rust cargo gcc python3 curl tar xz binutils; python3 /src/scripts/portable-cli.py build --root /src --work /work --zig-archive /work/zig.tar.xz'
+      - name: Package the exact tagged binary with dependency notices and privacy checks
+        run: |
+          curl -fsSL --retry 3 https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o "$RUNNER_TEMP/portable-gitleaks.tar.gz"
+          printf '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  %s\n' "$RUNNER_TEMP/portable-gitleaks.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/portable-tools"
+          tar -xzf "$RUNNER_TEMP/portable-gitleaks.tar.gz" -C "$RUNNER_TEMP/portable-tools" gitleaks
+          RUWAC_GITLEAKS="$RUNNER_TEMP/portable-tools/gitleaks" python3 scripts/portable-cli.py pack \
+            --work "$RUNNER_TEMP/portable-work" --output "$RUNNER_TEMP/portable-output" --commit "$GITHUB_SHA"
+      - name: Install and test the same packages on Ubuntu and Debian userspaces
+        run: |
+          python3 ruwac/tests/integration/portable_cli.py --artifacts "$RUNNER_TEMP/portable-output" --evidence "$RUNNER_TEMP/portable-tests"
+          python3 scripts/portable-cli.py finish --output "$RUNNER_TEMP/portable-output" --results "$RUNNER_TEMP/portable-tests/results.json"
+          python3 scripts/portable-cli.py verify --output "$RUNNER_TEMP/portable-output" --commit "$GITHUB_SHA"
+      # Keep qualified bytes across a publisher-only retry; never recompile to
+      # repair an attestation/upload failure after the runtime matrix passed.
+      - name: Retain qualified portable artifacts for publication
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: portable-cli-${{ github.sha }}
+          path: ${{ runner.temp }}/portable-output/
+          if-no-files-found: error
+          retention-days: 30
+
+  portable-cli-publish:
+    if: github.repository == 'w3fans/RUWAC' && startsWith(github.ref, 'refs/tags/')
+    needs: portable-cli-build-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: portable-cli-${{ github.sha }}
+          path: ${{ runner.temp }}/portable-output
+      - name: Reverify source, all OS receipts and artifact bytes
+        run: python3 scripts/portable-cli.py verify --output "$RUNNER_TEMP/portable-output" --commit "$GITHUB_SHA"
+      - name: Attest the tested archive, Debian package and OS receipt
+        id: portable-provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-checksums: ${{ runner.temp }}/portable-output/subjects.sha256
+          show-summary: false
+      - name: Verify provenance and publish immutable portable assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          ATTESTATION_BUNDLE: ${{ steps.portable-provenance.outputs.bundle-path }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, runpy, shutil, subprocess, tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path('ruwac/Cargo.toml').read_text())['workspace']['package']['version']
+          assert os.environ['GITHUB_REF_NAME'] == 'v' + version
+          directory = Path(os.environ['RUNNER_TEMP']) / 'portable-output'
+          names = runpy.run_path('scripts/portable-cli.py')['names'](version)
+          for name in names:
+              path = directory / name
+              subprocess.run(['gh','attestation','verify',str(path),'--repo','w3fans/RUWAC','--signer-workflow','w3fans/RUWAC/.github/workflows/release.yml','--source-ref',os.environ['GITHUB_REF'],'--source-digest',os.environ['GITHUB_SHA'],'--deny-self-hosted-runners','--bundle',os.environ['ATTESTATION_BUNDLE']],check=True)
+              shutil.copyfile(os.environ['ATTESTATION_BUNDLE'],directory/(name+'.sigstore.json'))
+          for name in sorted(n + suffix for n in names for suffix in ['', '.sha256', '.sigstore.json']):
+              path = directory / name
+              digest = 'sha256:' + hashlib.sha256(path.read_bytes()).hexdigest()
+              command = ['gh','api','repos/'+os.environ['GITHUB_REPOSITORY']+'/releases/tags/'+os.environ['GITHUB_REF_NAME']]
+              release = json.loads(subprocess.check_output(command,text=True))
+              existing = [a for a in release['assets'] if a['name'] == name]
+              if existing:
+                  assert len(existing) == 1 and existing[0]['digest'] == digest, 'Preserve differing immutable asset'
+              else:
+                  subprocess.run(['gh','release','upload',os.environ['GITHUB_REF_NAME'],str(path)],check=True)
+              published = json.loads(subprocess.check_output(command,text=True))
+              assert any(a['name']==name and a['digest']==digest and a['state']=='uploaded' for a in published['assets'])
+          PY
