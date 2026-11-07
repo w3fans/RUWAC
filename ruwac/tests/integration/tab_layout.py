@@ -59,8 +59,11 @@ def layout_check(count,two,compact,half):
  t=s['tab_layout'];b=s['tab_new_terminal'];x,y=b['origin']
  assert b['mapped']and b['sensitive']and x>=0 and x+b['width']<=s['window_width']
  assert t['two_rows']==two and t['compact']==compact
+ assert not any(n['type']=='GtkScrollbar'and n['height']>0 for n in s['header_tree'])
  assert all(x['role']=='Tab'and x['title']for x in t['tabs'])
- if count==20 or two or not half:assert all(x['inside_viewport']for x in t['tabs']),[(x['width'],x['origin'])for x in t['tabs']if not x['inside_viewport']]
+ # Preserve readable controls/fonts; crowded rows may scroll instead of hiding X.
+ assert next(x for x in t['tabs']if x['selected'])['inside_viewport']
+ assert all(x['close_visible']and x['icon_size']==16 and x['indicator_size']==16 for x in t['tabs'])
  assert panes()==baseline
  if (count,two,compact,half)in [(20,False,False,False),(20,False,False,True),(40,True,True,True)]:
   shot=command('snapshot');assert shot['saved'];(r/'native-rust.png').replace(r/f'tabs-{count}-{two}-{compact}-{half}.png')

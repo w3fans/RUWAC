@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Keep tab widths steady during hover, selection and title/status changes. Restore
+  visible close buttons, inactive borders and readable fonts/status icons in both
+  layouts; show the first ten shortcut numbers while Alt is held. Preserve native
+  close cancellation, pinning, drag/detach and crowded-row navigation.
+- Keep the ended last local terminal open with Recreate, New terminal and New &
+  close controls. Create a replacement before closing the old tab, and preserve
+  the old tab if creation fails.
+
 ## v0.4.71 — 2026-11-07 — Stable source release
 
 - Build and test a headless Linux x86_64 CLI archive and Debian package with

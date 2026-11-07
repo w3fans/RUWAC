@@ -252,6 +252,13 @@ impl Windows {
         window.set_content(Some(&body));
         let memory: tiles::FocusMemory = Rc::new(RefCell::new(Default::default()));
         self.bind(&window, &tabs, memory.clone());
+        crate::sessions::install_recovery(
+            &window,
+            &tabs,
+            &self.terminal,
+            &self.socket,
+            &self.broker,
+        );
         let group = self.clone();
         let focus: tiles::FocusView = Rc::new(move |root| group.focus(root));
         let (m, f) = (memory.clone(), focus.clone());

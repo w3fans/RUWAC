@@ -494,6 +494,7 @@ pub struct View {
     dead_reason: gtk::Label,
     /// The card offers to reopen an ended remote session rather than reattach.
     ended: Cell<bool>,
+    reconnect_button: gtk::Button,
     pub frame: RefCell<Option<Value>>,
     pub target: RefCell<String>,
     pub drawn: Cell<u64>,
@@ -634,12 +635,18 @@ impl View {
         reconnect.add_css_class("suggested-action");
         reconnect.add_css_class("pill");
         reconnect.set_halign(gtk::Align::Center);
+        let new_terminal = gtk::Button::with_label("New terminal");
+        new_terminal.set_widget_name("terminal-new-ended");
+        let replace_terminal = gtk::Button::with_label("New & close");
+        replace_terminal.set_widget_name("terminal-replace-ended");
         let close_tab = gtk::Button::with_label("Close tab");
         close_tab.set_widget_name("terminal-close-ended");
         close_tab.add_css_class("pill");
         let dead_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         dead_actions.set_halign(gtk::Align::Center);
         dead_actions.append(&reconnect);
+        dead_actions.append(&new_terminal);
+        dead_actions.append(&replace_terminal);
         dead_actions.append(&close_tab);
         dead.append(&dead_title);
         dead.append(&dead_reason);
@@ -678,6 +685,7 @@ impl View {
             dead_title,
             dead_reason,
             ended: Cell::new(false),
+            reconnect_button: reconnect.clone(),
             frame: RefCell::new(None),
             target: RefCell::new(String::new()),
             drawn: Cell::new(0),
@@ -777,7 +785,11 @@ impl View {
         reconnect.connect_clicked(move |_| {
             if let Some(v) = weak.upgrade() {
                 if v.ended.get() {
-                    if !crate::launches::reopen(&v.session, &v.target.borrow()) {
+                    if !crate::launches::is_remote(&v.session, &v.target.borrow()) {
+                        let _ = v
+                            .root
+                            .activate_action("terminal.replace", Some(&v.session.to_variant()));
+                    } else if !crate::launches::reopen(&v.session, &v.target.borrow()) {
                         v.status
                             .set_text("This session cannot be reopened; use New term");
                     }
@@ -786,6 +798,22 @@ impl View {
                 }
             }
         });
+        for (button, action) in [
+            (new_terminal, "terminal.new"),
+            (replace_terminal, "terminal.replace"),
+        ] {
+            let weak = Rc::downgrade(&v);
+            button.connect_clicked(move |_| {
+                if let Some(v) = weak.upgrade() {
+                    if let Err(error) = v
+                        .root
+                        .activate_action(action, Some(&v.session.to_variant()))
+                    {
+                        v.warn(&format!("New terminal unavailable: {error}"));
+                    }
+                }
+            });
+        }
         let weak = Rc::downgrade(&v);
         close_tab.connect_clicked(move |_| {
             if let Some(v) = weak.upgrade() {
@@ -2038,6 +2066,7 @@ impl View {
         if s.disconnected && !self.detached.get() && !self.dead.is_visible() {
             self.ended.set(false);
             self.dead_title.set_text("Terminal disconnected");
+            self.reconnect_button.set_label("Reconnect");
             self.dead.set_valign(gtk::Align::Center);
             self.dead_reason.set_text(&format!(
                 "{}\nThe session may still be running. Reconnect starts the daemon if needed and reattaches; closing this tab does not end the session.",
@@ -2070,6 +2099,11 @@ impl View {
                 if self.seen_running.get()
                     && self.typed.get()
                     && !crate::launches::is_remote(&self.session, &self.target.borrow())
+                    && self
+                        .root
+                        .ancestor(adw::TabView::static_type())
+                        .and_then(|w| w.downcast::<adw::TabView>().ok())
+                        .is_some_and(|tabs| tabs.n_pages() > 1)
                 {
                     let ids: Vec<_> = panes
                         .iter()
@@ -2090,10 +2124,11 @@ impl View {
                 } else if !self.dead.is_visible() {
                     self.ended.set(true);
                     self.dead_title.set_text("Session ended");
+                    self.reconnect_button.set_label("Recreate");
                     self.dead_reason.set_text(if crate::launches::is_remote(&self.session,&self.target.borrow()) {
-                        "The remote program or SSH connection ended. Reconnect opens it again in a new tab."
+                        "The remote program or SSH connection ended. Recreate opens its saved launch again; New terminal opens a local shell."
                     } else {
-                        "The program ended. Its output stays readable above this card."
+                        "The program ended. Recreate starts a fresh local shell. New terminal keeps this output; New & close replaces this tab."
                     });
                     self.dead.set_valign(gtk::Align::End);
                     self.dead.set_margin_bottom(24);
@@ -3307,6 +3342,31 @@ impl View {
         } else {
             json!({"queued":false})
         }
+    }
+    pub fn fixture_recovery(&self, operation: &str) -> Value {
+        let buttons = RefCell::new(Vec::new());
+        crate::chrome::walk(self.dead.upcast_ref(), &|w| {
+            if let Some(button) = w.downcast_ref::<gtk::Button>() {
+                let name = button.widget_name();
+                if matches!(
+                    name.as_str(),
+                    "terminal-reconnect"
+                        | "terminal-new-ended"
+                        | "terminal-replace-ended"
+                        | "terminal-close-ended"
+                ) {
+                    let origin = button
+                        .root()
+                        .and_then(|r| button.compute_point(&r, &gtk::graphene::Point::new(0., 0.)))
+                        .map(|p| [p.x(), p.y()]);
+                    buttons.borrow_mut().push(json!({"name":name.as_str(),"label":button.label().map(|s|s.to_string()),"origin":origin,"width":button.width(),"height":button.height()}));
+                    if operation == name.as_str() {
+                        button.emit_clicked();
+                    }
+                }
+            }
+        });
+        json!({"visible":self.dead.is_visible(),"ended":self.ended.get(),"buttons":buttons.into_inner()})
     }
     pub fn fixture_reconnect(&self) -> Value {
         let visible = self.dead.is_visible();

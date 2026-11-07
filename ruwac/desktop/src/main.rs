@@ -395,6 +395,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
   });
   for session in &sessions{sessions::append(&tabs,&all,&socket,&broker,session,session_names.get(session).map(String::as_str).unwrap_or("Terminal"));}
   if let Some(id)=selected.as_ref(){if let Some(v)=all.borrow().iter().find(|v|&v.session==id){if let Some(page)=tiles::page(&tabs,&v.root){tabs.set_selected_page(&page);}}}
+  sessions::install_recovery(&window,&tabs,&all,&socket,&broker);
   let terminal_controls=sessions::controls(tabs.clone(),all.clone(),socket.clone(),broker.clone());
   let new_terminal=terminal_controls.first_child().and_downcast::<gtk::Button>().expect("New terminal action");
   chrome::terminal_tab_action(&bar,&new_terminal);
@@ -616,6 +617,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
    tick.set(tick.get()+1);let now=Instant::now();max_gap.set(max_gap.get().max(now.duration_since(last.replace(now)).as_millis()));for v in vv.borrow().iter(){v.update();}
    if let Some(dir)=fixture.as_ref(){let request=dir.join("gui-request.json");if let Ok(bytes)=std::fs::read(&request){if let Ok(q)=serde_json::from_slice::<Value>(&bytes){let seq=q["seq"].as_u64().unwrap_or(0);if seq>sequence.get(){sequence.set(seq);let index=q["view"].as_u64().unwrap_or(0)as usize;let view=vv.borrow().get(index).cloned();let reply_dir=dir.clone();let reply=move|result:Value|{let path=reply_dir.join("gui-response.json");let temp=reply_dir.join("gui-response.tmp");let _=std::fs::write(&temp,json!({"seq":seq,"result":result}).to_string());let _=std::fs::rename(temp,path);};if view.is_none(){match q["action"].as_str().unwrap_or(""){
     "web-preview"=>reply(web::fixture(&tabs,&q)),
+    "tab-presentation"=>{if let Some(i)=q["tab"].as_i64().filter(|i|*i>=0&&*i<(tabs.n_pages()as i64)){let p=tabs.nth_page(i as i32);if let Some(pinned)=q["pinned"].as_bool(){tabs.set_page_pinned(&p,pinned);}if let Some(title)=q["title"].as_str().filter(|s|s.len()<=256){p.set_title(title);}if let Some(loading)=q["loading"].as_bool(){p.set_loading(loading);}if let Some(indicator)=q["indicator"].as_bool(){if indicator{tiles::set_page_status(&p,tiles::TabStatus::Ready);}else{p.set_indicator_icon(None::<&gtk::gio::Icon>);}}reply(json!({"updated":true}));}else{reply(json!({"updated":false}));}},
     "tab-status"=>reply(json!({"tabs":(0..tabs.n_pages()).map(|i|{let p=tabs.nth_page(i);let icon=p.indicator_icon().and_downcast::<gtk::gio::BytesIcon>();json!({"title":p.title().as_str(),"colour_icon":icon.is_some(),"svg":icon.map(|i|String::from_utf8_lossy(i.bytes().as_ref()).to_string())})}).collect::<Vec<_>>()})),
     "compact-controls"=>reply(compact::fixture(window.upcast_ref(),&q)),
     "chrome"=>reply(chrome.fixture(&window,&machine_shell.view,&q)),
@@ -681,6 +683,7 @@ v.set_display(q["mode"].as_str().unwrap_or("fit"),q["zoom"].as_f64().unwrap_or(1
     "profiles"=>{let path=q["file"].as_str().filter(|s|!s.contains('/')&&!s.contains("..")).map(|s|dir.join(s));reply(profiles::fixture(&sidebar,path.as_deref(),q["search"].as_str(),q["favorite"]==true,q["open"]==true));},
     "command"=>{v.run_command(q["text"].as_str().unwrap_or(""));reply(json!({"queued":true}));},
     "divider-drag"=>{reply(v.fixture_root_drag());},
+    "terminal-recovery"=>reply(v.fixture_recovery(q["operation"].as_str().unwrap_or("inspect"))),
     "reconnect"=>{reply(v.fixture_reconnect());},
     "search"=>{v.search.set_text(q["text"].as_str().unwrap_or(""));reply(json!({"queued":true}));},
     "history-viewport"=>reply(v.fixture_history_viewport()),
@@ -701,6 +704,7 @@ v.set_display(q["mode"].as_str().unwrap_or("fit"),q["zoom"].as_f64().unwrap_or(1
     "cancel"=>{v.broker.borrow_mut().local_copy();reply(json!({"epoch":v.broker.borrow().epoch()}));},
     "snapshot"=>{if let Some(clock)=window.frame_clock(){let paint=gtk::WidgetPaintable::new(Some(&window));let window=window.clone();let dir=dir.clone();let slot=Rc::new(RefCell::new(None));let owned=slot.clone();let attempts=Rc::new(Cell::new(0u8));window.queue_draw();let id=clock.connect_after_paint(move|clock|{attempts.set(attempts.get()+1);let snap=gtk::Snapshot::new();paint.snapshot(&snap,window.width()as f64,window.height()as f64);let node=snap.to_node();let renderer=window.renderer();let mut saved=false;if let(Some(node),Some(renderer))=(&node,&renderer){let texture=renderer.render_texture(node,None);saved=texture.save_to_png(dir.join("native-rust.png")).is_ok();}if saved||attempts.get()>=5{if let Some(id)=owned.borrow_mut().take(){clock.disconnect(id);}reply(json!({"image":"native-rust.png","saved":saved,"mapped":window.is_mapped(),"width":window.width(),"height":window.height(),"node":node.is_some(),"renderer":renderer.is_some(),"after_paint":true}));}else{window.queue_draw();}});*slot.borrow_mut()=Some(id);}else{reply(json!({"saved":false,"error":"Frame clock unavailable"}));}},
     "web-preview"=>reply(web::fixture(&tabs,&q)),
+    "tab-presentation"=>{if let Some(i)=q["tab"].as_i64().filter(|i|*i>=0&&*i<(tabs.n_pages()as i64)){let p=tabs.nth_page(i as i32);if let Some(pinned)=q["pinned"].as_bool(){tabs.set_page_pinned(&p,pinned);}if let Some(title)=q["title"].as_str().filter(|s|s.len()<=256){p.set_title(title);}if let Some(loading)=q["loading"].as_bool(){p.set_loading(loading);}if let Some(indicator)=q["indicator"].as_bool(){if indicator{tiles::set_page_status(&p,tiles::TabStatus::Ready);}else{p.set_indicator_icon(None::<&gtk::gio::Icon>);}}reply(json!({"updated":true}));}else{reply(json!({"updated":false}));}},
     "tab-status"=>reply(json!({"tabs":(0..tabs.n_pages()).map(|i|{let p=tabs.nth_page(i);let icon=p.indicator_icon().and_downcast::<gtk::gio::BytesIcon>();json!({"title":p.title().as_str(),"colour_icon":icon.is_some(),"svg":icon.map(|i|String::from_utf8_lossy(i.bytes().as_ref()).to_string())})}).collect::<Vec<_>>()})),
     "compact-controls"=>reply(compact::fixture(window.upcast_ref(),&q)),
     "chrome"=>reply(chrome.fixture(&window,&machine_shell.view,&q)),

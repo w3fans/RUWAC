@@ -26,6 +26,62 @@ pub fn append(
     tabs.set_selected_page(&page);
     v.focus();
 }
+/// Create the replacement before closing an ended view, including the only tab.
+pub fn install_recovery(
+    window: &adw::ApplicationWindow,
+    tabs: &adw::TabView,
+    views: &Rc<RefCell<Vec<Rc<View>>>>,
+    socket: &PathBuf,
+    broker: &Broker,
+) {
+    let group = gtk::gio::SimpleActionGroup::new();
+    let busy = Rc::new(std::cell::Cell::new(false));
+    for (name, replace) in [("new", false), ("replace", true)] {
+        let action = gtk::gio::SimpleAction::new(name, Some(&String::static_variant_type()));
+        let (t, v, s, b) = (
+            tabs.downgrade(),
+            views.clone(),
+            socket.clone(),
+            broker.clone(),
+        );
+        let busy = busy.clone();
+        action.connect_activate(move |_, parameter| {
+            let Some(old) = parameter.and_then(|p| p.str()).map(str::to_owned) else { return; };
+            let Some(tabs) = t.upgrade() else { return; };
+            let previous = v.borrow().iter().find(|view| view.session == old && crate::tiles::page(&tabs, &view.root).is_some()).cloned();
+            let Some(previous) = previous else { return; };
+            if busy.replace(true) { return; }
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let worker_socket = s.clone();
+            std::thread::spawn(move || {
+                let result = (|| {
+                    let mut rpc = Rpc::connect(&worker_socket)?;
+                    rpc.call("session.create", json!({"name":"Terminal","argv":crate::shell::default_terminal_argv().map_err(std::io::Error::other)?}))
+                })();
+                let _ = tx.send(result);
+            });
+            let (t, v, s, b) = (t.clone(), v.clone(), s.clone(), b.clone());
+            let busy = busy.clone();
+            glib::timeout_add_local(Duration::from_millis(20), move || match rx.try_recv() {
+                Ok(Ok(reply)) => {
+                    busy.set(false);
+                    if let (Some(tabs), Some(id)) = (t.upgrade(), reply["session"].as_str()) {
+                        append(&tabs, &v, &s, &b, id, "Terminal");
+                        if replace {
+                            if let Some(page) = crate::tiles::page(&tabs, &previous.root) { tabs.close_page(&page); }
+                        }
+                    } else { previous.warn("New terminal was not created; the previous tab remains open"); }
+                    glib::ControlFlow::Break
+                }
+                Ok(Err(error)) => { busy.set(false); previous.warn(&format!("New terminal failed: {error}")); glib::ControlFlow::Break }
+                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(_) => { busy.set(false); previous.warn("New terminal request failed; the previous tab remains open"); glib::ControlFlow::Break }
+            });
+        });
+        group.add_action(&action);
+    }
+    window.insert_action_group("terminal", Some(&group));
+}
 pub fn controls(
     tabs: adw::TabView,
     views: Rc<RefCell<Vec<Rc<View>>>>,

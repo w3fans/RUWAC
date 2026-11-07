@@ -16,11 +16,13 @@ struct Tab {
     page: glib::WeakRef<adw::TabPage>,
     button: gtk::ToggleButton,
     label: gtk::Label,
+    fitting: FittingLabel,
     icon: gtk::Image,
     indicator: gtk::Image,
     spinner: gtk::Spinner,
     close: gtk::Button,
-    hover: Cell<bool>,
+    number: gtk::Label,
+    hint: gtk::Revealer,
     notify: Option<glib::SignalHandlerId>,
 }
 struct Inner {
@@ -35,6 +37,8 @@ struct Inner {
     two: Cell<bool>,
     compact: Cell<bool>,
     reveal_pending: Cell<bool>,
+    widths_pending: Cell<bool>,
+    hints: Cell<bool>,
 }
 impl Drop for Inner {
     fn drop(&mut self) {
@@ -64,10 +68,11 @@ impl TabStrip {
         let scroll = std::array::from_fn(|i| {
             let s = gtk::ScrolledWindow::builder()
                 .child(&rows[i])
-                .hscrollbar_policy(gtk::PolicyType::Automatic)
+                .hscrollbar_policy(gtk::PolicyType::External)
                 .vscrollbar_policy(gtk::PolicyType::Never)
                 .propagate_natural_height(true)
-                .hexpand(true)
+                .propagate_natural_width(true)
+                .hexpand(false)
                 .build();
             hosts[i].append(&s);
             root.append(&hosts[i]);
@@ -85,6 +90,8 @@ impl TabStrip {
             two: Cell::new(false),
             compact: Cell::new(false),
             reveal_pending: Cell::new(false),
+            widths_pending: Cell::new(false),
+            hints: Cell::new(false),
         });
         let strip = Self(inner.clone());
         // The window retains presentation state. It holds only weak model/page
@@ -111,6 +118,13 @@ impl TabStrip {
         let id = view.connect_page_reordered(move |_, _, _| {
             if let Some(s) = weak.upgrade() {
                 Self(s).rebuild();
+            }
+        });
+        inner.handlers.borrow_mut().push(id);
+        let weak = Rc::downgrade(&inner);
+        let id = view.connect_notify_local(Some("n-pinned-pages"), move |_, _| {
+            if let Some(inner) = weak.upgrade() {
+                Self(inner).rebuild();
             }
         });
         inner.handlers.borrow_mut().push(id);
@@ -213,13 +227,16 @@ impl TabStrip {
                 .accessible_role(gtk::AccessibleRole::Tab)
                 .build();
             button.add_css_class("flexible-tab");
-            button.set_hexpand(true);
-            let body = gtk::Box::new(gtk::Orientation::Horizontal, 1);
+            button.set_hexpand(false);
+            let body = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             let icon = gtk::Image::new();
+            icon.set_size_request(16, 16);
             let indicator = gtk::Image::new();
+            indicator.set_size_request(16, 16);
             let spinner = gtk::Spinner::new();
             let label = gtk::Label::new(None);
             label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            label.set_single_line_mode(true);
             label.set_width_chars(0);
             label.set_max_width_chars(18);
             label.set_hexpand(true);
@@ -227,13 +244,50 @@ impl TabStrip {
             let close = gtk::Button::from_icon_name("window-close-symbolic");
             close.add_css_class("tab-close");
             close.set_focusable(false);
+            // Keep the nested close control's pointer sequence away from the
+            // surrounding toggle/drag gestures. Keyboard activation still uses clicked.
+            let close_click = gtk::GestureClick::new();
+            close_click.set_button(1);
+            close_click.set_propagation_phase(gtk::PropagationPhase::Capture);
+            close_click.connect_pressed(|gesture, _, _, _| {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+            });
+            let weak_close = close.downgrade();
+            close_click.connect_released(move |_, _, x, y| {
+                if let Some(close) = weak_close.upgrade() {
+                    if x >= 0. && y >= 0. && x < close.width() as f64 && y < close.height() as f64 {
+                        close.emit_clicked();
+                    }
+                }
+            });
+            close.add_controller(close_click);
             close.set_tooltip_text(Some("Close tab"));
-            body.append(&icon);
-            body.append(&spinner);
+            let activity = gtk::Overlay::new();
+            activity.set_child(Some(&icon));
+            spinner.set_halign(gtk::Align::Center);
+            spinner.set_valign(gtk::Align::Center);
+            activity.add_overlay(&spinner);
+            activity.set_measure_overlay(&spinner, false);
+            body.append(&activity);
             body.append(&indicator);
-            body.append(&FittingLabel::new(&label));
+            let fitting = FittingLabel::new(&label);
+            body.append(&fitting);
             body.append(&close);
-            button.set_child(Some(&body));
+            let number = gtk::Label::new(None);
+            number.add_css_class("tab-shortcut-hint");
+            let hint = gtk::Revealer::builder()
+                .child(&number)
+                .transition_type(gtk::RevealerTransitionType::Crossfade)
+                .transition_duration(120)
+                .halign(gtk::Align::Start)
+                .valign(gtk::Align::Center)
+                .can_target(false)
+                .build();
+            let overlay = gtk::Overlay::new();
+            overlay.set_child(Some(&body));
+            overlay.add_overlay(&hint);
+            overlay.set_measure_overlay(&hint, false);
+            button.set_child(Some(&overlay));
             let v = view.downgrade();
             let p = page.downgrade();
             button.connect_clicked(move |b| {
@@ -320,22 +374,6 @@ impl TabStrip {
                 glib::Propagation::Stop
             });
             button.add_controller(keys);
-            let motion = gtk::EventControllerMotion::new();
-            let weak = Rc::downgrade(&self.0);
-            let p = page.downgrade();
-            motion.connect_enter(move |_, _, _| {
-                if let (Some(s), Some(p)) = (weak.upgrade(), p.upgrade()) {
-                    Self(s).hover(&p, true);
-                }
-            });
-            let weak = Rc::downgrade(&self.0);
-            let p = page.downgrade();
-            motion.connect_leave(move |_| {
-                if let (Some(s), Some(p)) = (weak.upgrade(), p.upgrade()) {
-                    Self(s).hover(&p, false);
-                }
-            });
-            button.add_controller(motion);
             let drag = gtk::DragSource::new();
             drag.set_actions(gdk::DragAction::MOVE);
             let p = page.downgrade();
@@ -379,11 +417,13 @@ impl TabStrip {
                 page: page.downgrade(),
                 button,
                 label,
+                fitting,
                 icon,
                 indicator,
                 spinner,
                 close,
-                hover: Cell::new(false),
+                number,
+                hint,
                 notify: Some(notify),
             });
         }
@@ -398,18 +438,53 @@ impl TabStrip {
         *self.0.tabs.borrow_mut() = next;
         self.layout();
         self.sync();
+        self.sync_hint_numbers();
+        self.queue_widths();
     }
-    fn hover(&self, page: &adw::TabPage, hovering: bool) {
-        if let Some(tab) = self
-            .0
-            .tabs
-            .borrow()
-            .iter()
-            .find(|t| t.page.upgrade().as_ref() == Some(page))
-        {
-            tab.hover.set(hovering);
+    fn queue_widths(&self) {
+        if self.0.widths_pending.replace(true) {
+            return;
         }
-        self.sync_page(page);
+        // Freeze title space only after an add/remove/reorder completes. Launch
+        // handlers set the initial title immediately after attaching the page.
+        // Later status/title/selection changes must never move adjacent tabs.
+        let weak = Rc::downgrade(&self.0);
+        glib::timeout_add_local_once(std::time::Duration::from_millis(80), move || {
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            inner.widths_pending.set(false);
+            for tab in inner.tabs.borrow().iter() {
+                if let Some(page) = tab.page.upgrade() {
+                    let width = tab
+                        .label
+                        .create_pango_layout(Some(&page.title()))
+                        .pixel_size()
+                        .0;
+                    tab.fitting.set_natural_width(width.clamp(12, 160));
+                }
+            }
+            Self(inner).queue_reveal();
+        });
+    }
+    fn sync_hint_numbers(&self) {
+        for (index, tab) in self.0.tabs.borrow().iter().enumerate() {
+            let shortcut = match index {
+                0..=8 => (index + 1).to_string(),
+                9 => "0".to_owned(),
+                _ => String::new(),
+            };
+            tab.number.set_text(&shortcut);
+            tab.hint.set_reveal_child(self.0.hints.get() && index < 10);
+        }
+    }
+    fn set_hints(&self, shown: bool) {
+        if self.0.hints.replace(shown) == shown {
+            return;
+        }
+        for (index, tab) in self.0.tabs.borrow().iter().enumerate() {
+            tab.hint.set_reveal_child(shown && index < 10);
+        }
     }
     fn layout(&self) {
         let buttons = self
@@ -548,7 +623,7 @@ impl TabStrip {
         serde_json::json!({"two_rows":self.0.two.get(),"compact":self.0.compact.get(),"rows":self.0.hosts.iter().filter(|h|h.is_visible()).count(),"tabs":self.0.tabs.borrow().iter().map(|tab|{
             let page=tab.page.upgrade();let row=usize::from(tab.button.parent().as_ref()==Some(self.0.rows[1].upcast_ref()));
             let bounds=tab.button.compute_bounds(&self.0.scroll[row]);
-            serde_json::json!({"id":page.as_ref().map(|p|p.child().widget_name().to_string()),"title":page.as_ref().map(|p|p.title().to_string()),"selected":tab.button.is_active(),"role":format!("{:?}",tab.button.accessible_role()),"row":row,"width":tab.button.width(),"height":tab.button.height(),"origin":tab.button.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"inside_viewport":bounds.is_some_and(|r|r.x()>=-0.5&&r.y()>=-0.5&&r.x()+r.width()<=self.0.scroll[row].width() as f32+0.5&&r.y()+r.height()<=self.0.scroll[row].height() as f32+0.5)})
+            serde_json::json!({"id":page.as_ref().map(|p|p.child().widget_name().to_string()),"title":page.as_ref().map(|p|p.title().to_string()),"selected":tab.button.is_active(),"close_visible":tab.close.is_visible(),"close_width":tab.close.width(),"close_height":tab.close.height(),"close_pick":tab.close.compute_point(window,&gtk::graphene::Point::new(tab.close.width() as f32/2.,tab.close.height() as f32/2.)).and_then(|p|window.pick(p.x()as f64,p.y()as f64,gtk::PickFlags::DEFAULT)).map(|w|w.type_().name().to_string()),"close_origin":tab.close.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"font_size":tab.label.pango_context().font_description().map(|d|d.size()),"icon_size":tab.icon.pixel_size(),"indicator_size":tab.indicator.pixel_size(),"hint":tab.number.text().to_string(),"hint_visible":tab.hint.reveals_child(),"role":format!("{:?}",tab.button.accessible_role()),"row":row,"width":tab.button.width(),"height":tab.button.height(),"origin":tab.button.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"inside_viewport":bounds.is_some_and(|r|r.x()>=-0.5&&r.y()>=-0.5&&r.x()+r.width()<=self.0.scroll[row].width() as f32+0.5&&r.y()+r.height()<=self.0.scroll[row].height() as f32+0.5)})
         }).collect::<Vec<_>>()})
     }
     fn render_tab(&self, tab: &Tab, page: &adw::TabPage, active: bool) {
@@ -557,13 +632,18 @@ impl TabStrip {
             .update_state(&[gtk::accessible::State::Selected(Some(active))]);
         tab.label.set_text(&page.title());
         tab.label.set_visible(!page.is_pinned());
+        tab.fitting.set_visible(!page.is_pinned());
         if let Some(icon) = page.icon() {
             tab.icon.set_from_gicon(&icon);
         } else {
             tab.icon.clear();
         }
         tab.icon
-            .set_visible(page.icon().is_some() && !page.is_loading());
+            .set_opacity(if page.icon().is_some() && !page.is_loading() {
+                1.0
+            } else {
+                0.0
+            });
         tab.spinner.set_visible(page.is_loading());
         tab.spinner.set_spinning(page.is_loading());
         if let Some(icon) = page.indicator_icon() {
@@ -571,12 +651,15 @@ impl TabStrip {
         } else {
             tab.indicator.clear();
         }
-        tab.indicator.set_visible(page.indicator_icon().is_some());
-        tab.icon
-            .set_pixel_size(if self.0.compact.get() { 12 } else { 14 });
-        tab.indicator.set_pixel_size(10);
-        tab.close
-            .set_visible(!page.is_pinned() && (active || tab.hover.get()));
+        tab.indicator
+            .set_opacity(if page.indicator_icon().is_some() {
+                1.0
+            } else {
+                0.0
+            });
+        tab.icon.set_pixel_size(16);
+        tab.indicator.set_pixel_size(16);
+        tab.close.set_visible(!page.is_pinned());
         if let Some(tooltip) = page.tooltip() {
             tab.button.set_tooltip_markup(Some(&tooltip));
         } else {
@@ -586,6 +669,53 @@ impl TabStrip {
             .update_property(&[gtk::accessible::Property::Label(page.title().as_str())]);
     }
 }
+/// Passive overlays follow the existing window-local Map keys policy. They never
+/// consume a key, change selection, or retain a repeating animation/timer.
+pub fn bind_key_hints(window: &gtk::Window, mode: &Rc<crate::shortcuts::LocalMode>) {
+    fn show(window: &gtk::Window, shown: bool) {
+        STRIPS.with(|all| {
+            for inner in all.borrow().iter().filter_map(Weak::upgrade) {
+                if inner.root.root().and_downcast::<gtk::Window>().as_ref() == Some(window) {
+                    TabStrip(inner).set_hints(shown);
+                }
+            }
+        });
+    }
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let weak = window.downgrade();
+    let mode = Rc::downgrade(mode);
+    keys.connect_key_pressed(move |_, key, _, mods| {
+        if let (Some(window), Some(mode)) = (weak.upgrade(), mode.upgrade()) {
+            let modifiers = mods - gdk::ModifierType::LOCK_MASK;
+            let plain_alt = modifiers == gdk::ModifierType::ALT_MASK
+                || (key == gdk::Key::Alt_L && modifiers.is_empty());
+            show(
+                &window,
+                plain_alt && !crate::shortcuts::altgr(key) && !mode.active(),
+            );
+        }
+        glib::Propagation::Proceed
+    });
+    let weak = window.downgrade();
+    keys.connect_key_released(move |_, key, _, _| {
+        if matches!(
+            key,
+            gdk::Key::Alt_L | gdk::Key::Alt_R | gdk::Key::ISO_Level3_Shift
+        ) {
+            if let Some(window) = weak.upgrade() {
+                show(&window, false);
+            }
+        }
+    });
+    window.add_controller(keys);
+    window.connect_is_active_notify(|window| {
+        if !window.is_active() {
+            show(window, false);
+        }
+    });
+}
+
 fn popup(view: &adw::TabView, page: &adw::TabPage, button: &gtk::ToggleButton, x: f64, y: f64) {
     let Some(model) = view.menu_model() else {
         return;
@@ -632,15 +762,16 @@ fn place(view: &adw::TabView, position: i32, value: &glib::Value) -> bool {
     true
 }
 
-// GtkLabel reserves space for an ellipsis even when a tab needs less room.
-// Keep its natural width, but permit allocation down to zero without scaling
-// glyphs or icons. The button's tooltip and accessible name retain the title.
+// Cache the natural title width at structural changes. Metadata updates may
+// change the text, but cannot change horizontal requisition. Crowded rows may
+// ellipsize the label without scaling its glyphs or icons.
 mod fitting_label {
     use super::*;
     use gtk::subclass::prelude::*;
     #[derive(Default)]
     pub struct Label {
         pub child: RefCell<Option<gtk::Label>>,
+        pub natural: Cell<i32>,
     }
     #[glib::object_subclass]
     impl ObjectSubclass for Label {
@@ -657,16 +788,15 @@ mod fitting_label {
     }
     impl WidgetImpl for Label {
         fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
-            let measured = self
-                .child
-                .borrow()
-                .as_ref()
-                .map(|c| c.measure(orientation, for_size))
-                .unwrap_or((0, 0, -1, -1));
             if orientation == gtk::Orientation::Horizontal {
-                (0, measured.1, -1, -1)
+                let width = self.natural.get();
+                (width.min(12), width, -1, -1)
             } else {
-                measured
+                self.child
+                    .borrow()
+                    .as_ref()
+                    .map(|child| child.measure(orientation, for_size))
+                    .unwrap_or((0, 0, -1, -1))
             }
         }
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
@@ -683,6 +813,12 @@ mod fitting_label {
 }
 glib::wrapper! {pub struct FittingLabel(ObjectSubclass<fitting_label::Label>) @extends gtk::Widget, @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;}
 impl FittingLabel {
+    fn set_natural_width(&self, width: i32) {
+        use gtk::subclass::prelude::ObjectSubclassIsExt;
+        if self.imp().natural.replace(width) != width {
+            self.queue_resize();
+        }
+    }
     fn new(label: &gtk::Label) -> Self {
         use gtk::subclass::prelude::ObjectSubclassIsExt;
         let widget: Self = glib::Object::new();

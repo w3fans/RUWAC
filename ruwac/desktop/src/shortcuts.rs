@@ -134,6 +134,7 @@ impl LocalMode {
 
 /// Track cancellation and pointer chords consistently in main and detached windows.
 pub fn bind_mode(window: &gtk::Window, mode: &std::rc::Rc<LocalMode>) {
+    crate::tab_strip::bind_key_hints(window, mode);
     let cancelled = mode.clone();
     window.connect_is_active_notify(move |w| {
         if !w.is_active() {

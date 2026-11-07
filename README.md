@@ -357,6 +357,10 @@ archives; the Cargo commands above do not require them.
 
 The per-user installer adds a RUWAC desktop launcher and commands in the standard user binary directory. `ruwac gui` starts or reuses the persistent daemon. Use New terminal for another session and Sessions to reopen a running one. Closing a terminal tab detaches it; automatic checkpoints and normal window close save terminal/RDP/Files tabs, split geometry and selected tab. RDP restores disconnected, and Files restores its directory without automatic authentication. `ruwac start` starts the daemon without a graphical client.
 
+Tab widths stay steady during title/status updates, hovering and switching. Short names use shorter tabs when the tab set changes; long titles ellipsize within the existing width. Inactive tabs have borders and visible close buttons. **Compact tabs** reduces padding while keeping text and status icons readable; **Two tab rows** is also available in Preferences. Hold **Alt** to show the first ten shortcuts (**1–9**, then **0**); Map keys mode continues to send them to the application.
+
+When the last local shell ends, its tab keeps the output and offers **Recreate**, **New terminal**, and **New & close**. Recreate starts a fresh local shell or uses the saved remote launch. New terminal keeps the ended tab; New & close creates a local terminal before closing it. If creation fails, the old tab remains open.
+
 The full headless suite and three genuine SSH remote-PTY detach/reattach cycles also pass on an authorized Fedora host. This does not establish external RDP login or physical-desktop acceptance. See [all remaining product gates](spec/RUWAC_PRODUCT_COMPLETION.md).
 
 Use **Split tabs…** to place existing terminal, RDP or Files views side by side or above/below each other. **Separate views** returns them to tabs while preserving connections. RDP reconnect/disconnect, fit, dynamic resolution, zoom and fullscreen are visible in the native toolbar. Additional connection, remote-key and clipboard actions are under **RDP controls**. Clipboard ownership follows the focused canvas; local controls and Files cannot let inactive RDP sessions take over CLIPBOARD.
