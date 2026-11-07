@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v0.4.71 — 2026-11-07 — Stable source release
+
+- Build and test a headless Linux x86_64 CLI archive and Debian package with
+  every tagged release, alongside Fedora. Verify the same binary on Ubuntu
+  22.04/24.04 and Debian 12/13 before publishing checksums and provenance.
 - Avoid rebuilding decoded terminal cells into a second JSON value tree. Reduce
   frontend allocations and measured typing latency while preserving cell styles,
   Unicode, selection, validation budgets and older-engine compatibility.

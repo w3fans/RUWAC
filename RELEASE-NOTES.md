@@ -1,20 +1,31 @@
-RUWAC v0.4.70
+RUWAC v0.4.71
 
-Reuse immutable checkpoint snapshots for terminal panes whose canonical state has
-not changed. This reduces repeated reconstruction of hidden histories while another
-terminal is active, preserving file validation, history, styles, schema, persistence
-timing and full-file writes.
+Move already-owned decoded terminal rows directly into render frames, avoiding a
+second JSON value tree. Keep the cell shape, styles, Unicode, selection behavior,
+validation/expansion budgets and preserved-engine fallback unchanged. No protocol,
+refresh timer, RDP transport or terminal lifecycle changes.
 
-Three bounded A/B/A prototype comparisons with a fixed published frontend reduced
-history-filled TUI p99 from 55–93 ms to 5.5–5.7 ms, with lower fixture CPU and
-sampled engine RSS. Shallow controls stayed close to baseline. Continuously changing
-panes still require reconstruction: the all-busy workload retained its long tail.
-See spec/RUWAC_CHECKPOINT_SNAPSHOTS_2026-11-07.md for method and limits; this is not
-a physical, GTK or WAN latency claim.
+Three bounded A/B/A frontend comparisons with a fixed public engine reduced
+ordinary TUI median echo by 20–26 percent and aggregate fixture CPU by 5–10 percent.
+Additional public-baseline, Unicode, busy-history and frontend-memory controls
+passed their budgets. The public-baseline control used 3.8 percent more CPU than
+its worse adjacent baseline; no universal CPU/p99 improvement is claimed.
+See spec/RUWAC_RENDER_EXPANSION_2026-11-07.md for methods and limits. These are
+received-output measurements, not physical, GTK, RDP or WAN latency acceptance.
+Continuously busy history still has checkpoint-related stalls.
 
-The change requires an engine using the new code. Package updates preserve existing
-engines and their terminals; no owner engine, GUI, agent or transport is restarted.
-Real-PTY canonical/hidden/resize/restore checks and dense64-pane dual-buffer recovery
-have targeted qualification. Full128-live-pane, physical/external and endurance
-acceptance remain open. Published artifacts receive their normal separate integrity
-and runtime checks. The known RSA advisory remains unsuppressed.
+Reopen the GUI and detach/reattach terminal frontends to load this client change.
+Existing engines and their programs can stay running. No owner GUI, engine,
+agent, clipboard, profile or transport was restarted or changed for qualification.
+All 161 headless unit tests and palette/legacy-fallback, large-grid, projection,
+history and atomic-paste PTY suites passed before integration. Public artifacts
+receive separate normal integrity/runtime checks. The known RSA advisory remains
+unsuppressed; physical acceptance and broader product milestones remain open.
+
+Every tagged release now also builds a headless Linux x86_64 CLI archive and
+Debian package in parallel with Fedora. The same portable binary is tested on
+Ubuntu 22.04/24.04 and Debian 12/13, including installation, Unicode PTY input,
+attach/detach, persistence and reinstallation without restarting running programs.
+Checksums, source provenance and an OS test receipt accompany the packages.
+See README.md for installation. Actual Proxmox host acceptance and the portable
+GTK desktop remain pending; no RUWAC APT repository is provided yet.
