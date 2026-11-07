@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.4.69 — 2026-11-07 — Stable source release
+
 - Preserve terminal foreground/background colors and emphasis in opt-in ANSI
   captures for non-sizing mobile observers. Default capture and waits stay plain;
   saved history retains its plain fallback. No attach, resize or terminal input.
