@@ -1,4 +1,6 @@
-RUWAC v0.4.72 — stable tabs and terminal recovery
+RUWAC v0.4.72 — stable tabs, working tab actions and terminal recovery
+
+- Fix tab context-menu actions being discarded when the popover closes: Reconnect, Disconnect and Close tab now dispatch before menu cleanup. Native-input regression coverage includes cancellation, the selected target and neighboring connections.
 
 Keep tab widths steady while hovering, changing titles/status or switching tabs.
 Short names use shorter tabs when the tab set changes. Keep close buttons visible

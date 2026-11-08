@@ -39,6 +39,7 @@ struct Inner {
     reveal_pending: Cell<bool>,
     widths_pending: Cell<bool>,
     hints: Cell<bool>,
+    menu_generation: Cell<u64>,
 }
 impl Drop for Inner {
     fn drop(&mut self) {
@@ -92,6 +93,7 @@ impl TabStrip {
             reveal_pending: Cell::new(false),
             widths_pending: Cell::new(false),
             hints: Cell::new(false),
+            menu_generation: Cell::new(0),
         });
         let strip = Self(inner.clone());
         // The window retains presentation state. It holds only weak model/page
@@ -319,9 +321,12 @@ impl TabStrip {
             let v = view.downgrade();
             let p = page.downgrade();
             let b = button.downgrade();
+            let inner = Rc::downgrade(&self.0);
             menu.connect_pressed(move |_, _, x, y| {
-                if let (Some(v), Some(p), Some(b)) = (v.upgrade(), p.upgrade(), b.upgrade()) {
-                    popup(&v, &p, &b, x, y);
+                if let (Some(v), Some(p), Some(b), Some(inner)) =
+                    (v.upgrade(), p.upgrade(), b.upgrade(), inner.upgrade())
+                {
+                    popup(&inner, &v, &p, &b, x, y);
                 }
             });
             button.add_controller(menu);
@@ -341,7 +346,7 @@ impl TabStrip {
                 if key == gdk::Key::Menu
                     || (key == gdk::Key::F10 && modifiers == gdk::ModifierType::SHIFT_MASK)
                 {
-                    popup(&view, &page, &button, 0.0, button.height() as f64);
+                    popup(&inner, &view, &page, &button, 0.0, button.height() as f64);
                     return glib::Propagation::Stop;
                 }
                 if modifiers.intersects(
@@ -620,7 +625,23 @@ impl TabStrip {
         ));
     }
     pub fn inspect(&self, window: &adw::ApplicationWindow) -> serde_json::Value {
-        serde_json::json!({"two_rows":self.0.two.get(),"compact":self.0.compact.get(),"rows":self.0.hosts.iter().filter(|h|h.is_visible()).count(),"tabs":self.0.tabs.borrow().iter().map(|tab|{
+        fn items(
+            w: &gtk::Widget,
+            window: &adw::ApplicationWindow,
+            out: &mut Vec<serde_json::Value>,
+        ) {
+            if w.type_().name() == "GtkModelButton" && w.is_mapped() {
+                out.push(serde_json::json!({"label":w.property::<String>("text"),"sensitive":w.is_sensitive(),"focused":w.has_focus(),"width":w.width(),"height":w.height(),"origin":w.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()])}));
+            }
+            let mut child = w.first_child();
+            while let Some(w) = child {
+                child = w.next_sibling();
+                items(&w, window, out);
+            }
+        }
+        let mut menu_items = Vec::new();
+        items(self.0.root.upcast_ref(), window, &mut menu_items);
+        serde_json::json!({"menu_items":menu_items,"two_rows":self.0.two.get(),"compact":self.0.compact.get(),"rows":self.0.hosts.iter().filter(|h|h.is_visible()).count(),"tabs":self.0.tabs.borrow().iter().map(|tab|{
             let page=tab.page.upgrade();let row=usize::from(tab.button.parent().as_ref()==Some(self.0.rows[1].upcast_ref()));
             let bounds=tab.button.compute_bounds(&self.0.scroll[row]);
             serde_json::json!({"id":page.as_ref().map(|p|p.child().widget_name().to_string()),"title":page.as_ref().map(|p|p.title().to_string()),"selected":tab.button.is_active(),"close_visible":tab.close.is_visible(),"close_width":tab.close.width(),"close_height":tab.close.height(),"close_pick":tab.close.compute_point(window,&gtk::graphene::Point::new(tab.close.width() as f32/2.,tab.close.height() as f32/2.)).and_then(|p|window.pick(p.x()as f64,p.y()as f64,gtk::PickFlags::DEFAULT)).map(|w|w.type_().name().to_string()),"close_origin":tab.close.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"font_size":tab.label.pango_context().font_description().map(|d|d.size()),"icon_size":tab.icon.pixel_size(),"indicator_size":tab.indicator.pixel_size(),"hint":tab.number.text().to_string(),"hint_visible":tab.hint.reveals_child(),"role":format!("{:?}",tab.button.accessible_role()),"row":row,"width":tab.button.width(),"height":tab.button.height(),"origin":tab.button.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"inside_viewport":bounds.is_some_and(|r|r.x()>=-0.5&&r.y()>=-0.5&&r.x()+r.width()<=self.0.scroll[row].width() as f32+0.5&&r.y()+r.height()<=self.0.scroll[row].height() as f32+0.5)})
@@ -716,24 +737,41 @@ pub fn bind_key_hints(window: &gtk::Window, mode: &Rc<crate::shortcuts::LocalMod
     });
 }
 
-fn popup(view: &adw::TabView, page: &adw::TabPage, button: &gtk::ToggleButton, x: f64, y: f64) {
+fn popup(
+    inner: &Rc<Inner>,
+    view: &adw::TabView,
+    page: &adw::TabPage,
+    button: &gtk::ToggleButton,
+    x: f64,
+    y: f64,
+) {
     let Some(model) = view.menu_model() else {
         return;
     };
+    let generation = inner.menu_generation.get().wrapping_add(1);
+    inner.menu_generation.set(generation);
     view.emit_by_name::<()>("setup-menu", &[&Some(page.clone())]);
     let pop = gtk::PopoverMenu::from_model(Some(&model));
     pop.set_parent(button);
     pop.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
     let weak = view.downgrade();
-    let anchor = button.downgrade();
+    let owner = Rc::downgrade(inner);
     pop.connect_closed(move |p| {
-        if let Some(v) = weak.upgrade() {
-            v.emit_by_name::<()>("setup-menu", &[&None::<adw::TabPage>]);
-        }
-        p.unparent();
-        if let Some(button) = anchor.upgrade().filter(|b| b.is_mapped()) {
-            button.grab_focus();
-        }
+        // GtkPopoverMenu closes before dispatching the chosen action. Keep its
+        // action ancestry and selected page alive until that dispatch finishes.
+        let (p, weak, owner) = (p.clone(), weak.clone(), owner.clone());
+        glib::idle_add_local_once(move || {
+            if owner
+                .upgrade()
+                .is_some_and(|s| s.menu_generation.get() == generation)
+            {
+                if let Some(v) = weak.upgrade() {
+                    v.emit_by_name::<()>("setup-menu", &[&None::<adw::TabPage>]);
+                }
+            }
+            // A dismissed older menu must never clear a newly opened target.
+            p.unparent();
+        });
     });
     pop.popup();
 }

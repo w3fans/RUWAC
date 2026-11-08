@@ -39,6 +39,20 @@ def focus(who):
    focus_keys();time.sleep(.06);return
   focus_keys(True);time.sleep(.3)
  raise AssertionError('Isolated compositor focus failed')
+def native_tab_action(tab,choice):
+ header=command('gui','chrome')['tab_layout']['tabs'][tab];x,y=header['origin']
+ mutter_input('NotifyPointerMotionRelative',GLib.Variant('(dd)',(-10000.,-10000.)))
+ mutter_input('NotifyPointerMotionRelative',GLib.Variant('(dd)',(x+header['width']/2,y+header['height']/2)))
+ for down in [True,False]:mutter_input('NotifyPointerButton',GLib.Variant('(ib)',(273,down)))
+ time.sleep(.2)
+ menu=command('gui','chrome')['tab_layout']['menu_items']
+ label={'reconnect':'Reconnect','disconnect':'Disconnect','close':'Close tab'}[choice]
+ item=next(i for i in menu if i['label']==label);assert item['sensitive'],item
+ x,y=item['origin'];(root/('native-menu-'+choice+'.json')).write_text(json.dumps(menu,indent=2))
+ mutter_input('NotifyPointerMotionRelative',GLib.Variant('(dd)',(-10000.,-10000.)))
+ mutter_input('NotifyPointerMotionRelative',GLib.Variant('(dd)',(x+item['width']/2,y+item['height']/2)))
+ for down in [True,False]:mutter_input('NotifyPointerButton',GLib.Variant('(ib)',(272,down)))
+ time.sleep(.2)
 def case(name,fn):
  if a.case and name not in a.case and name!='RDP-NATIVE-AUTH-3':return
  if a.mixed_only and name not in {'RDP-NATIVE-AUTH-3','MIXED-NATIVE-RDP-TERMINAL','FILES-CLIPBOARD-OWNERSHIP','GUI-IPC-BACKGROUND-RDP-OWNERSHIP'}:return
@@ -806,6 +820,7 @@ try:
 
 
  def center_reconnect():
+  if mutter_input:command('gui','chrome',maximized=True);time.sleep(.3)
   extra=root/'center-reconnect-server';extra.mkdir(mode=0o700)
   for name in ['cert.pem','key.pem']:(extra/name).write_bytes((root/name).read_bytes());(extra/name).chmod(0o600)
   start([a.server,str(extra)],'center-reconnect-server');spike.eventually(lambda:(extra/'server-ready.json').exists(),10)
@@ -831,14 +846,19 @@ try:
    # saved settings and the real RDP connection, not a remote desktop account.
    subprocess.run([a.gui,'--receive-primary',item['id'],'fixture','wayland-77','1'],env=env,check=True,stdout=subprocess.DEVNULL)
    subprocess.run([a.gui,'--paste-primary',item['id']],env=env,check=True,stdout=subprocess.DEVNULL)
-   menu=command('gui','rdp-tab-menu',tab=tab,control='disconnect');assert menu['title']=='Generated reconnect host',menu
+   if mutter_input:native_tab_action(tab,'disconnect')
+   else:
+    menu=command('gui','rdp-tab-menu',tab=tab,control='disconnect');assert menu['title']=='Generated reconnect host',menu
    lost=spike.eventually(lambda:r if (r:=command('gui','rdp-inspect',rdp=3)).get('reconnect_visible') else False,8)
    assert lost['viewport']==viewport
-   command('gui','rdp-tab-menu',tab=tab,control='reconnect')
+   if mutter_input:native_tab_action(tab,'reconnect')
+   else:command('gui','rdp-tab-menu',tab=tab,control='reconnect')
    fresh=spike.eventually(lambda:r if (r:=decoded()) and r['transport_id']!=before and not r['reconnect_visible'] else None,20)
    assert fresh['selection_settings']=={'enabled':True,'paste':True},fresh
    assert [command('gui','rdp-inspect',rdp=i)['transport_id']for i in range(3)]==neighbors
-   command('gui','close-rdp',rdp=3)
+   if mutter_input:
+    count=command('gui','inspect')['tabs'];native_tab_action(tab,'close');spike.eventually(lambda:command('gui','inspect')['tabs']==count-1,5)
+   else:command('gui','close-rdp',rdp=3)
    # A status message may belong to an earlier write (or earlier test). Wait
    # for the actual editor snapshot to include BOTH external CLI changes.
    # Cancel stale forms without saving; retain the production stale-save guard.
@@ -858,12 +878,13 @@ try:
     again=spike.eventually(decoded,20)
     assert [command('gui','rdp-inspect',rdp=i)['transport_id']for i in range(3)]==neighbors
     command('gui','close-rdp',rdp=3)
-   return {'editor_connect_cycles':4,'configured_profile':True,'center_card_visible_when_disconnected':True,'overlay_preserves_viewport':True,'tab_reconnect_actual_CredSSP_and_frame':True,'neighbors_preserved':True,'saved_selection_options_reloaded':True}
+   return {'native_popup_mouse_disconnect_reconnect_close':bool(mutter_input),'editor_connect_cycles':4,'configured_profile':True,'center_card_visible_when_disconnected':True,'overlay_preserves_viewport':True,'tab_reconnect_actual_CredSSP_and_frame':True,'neighbors_preserved':True,'saved_selection_options_reloaded':True}
   except Exception:
    (root/'center-reconnect-failure.json').write_text(json.dumps({'frame':command('gui','rdp-inspect',rdp=3),'editor':command('gui','profile-editor',operation='inspect'),'last_save':saved},indent=2)+'\n')
    raise
   finally:
    command('gui','close-rdp',rdp=3)
+   if mutter_input:command('gui','chrome',maximized=False)
  case('RDP-NATIVE-CENTER-RECONNECT',center_reconnect)
 
  def profile_keyring_preferences():

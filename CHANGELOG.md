@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Dispatch tab context-menu actions before popover cleanup, restoring Reconnect,
+  Disconnect and Close tab. Native-input coverage checks cancellation, the target
+  page and neighboring connections.
+
 - Keep tab widths steady during hover, selection and title/status changes. Restore
   visible close buttons, inactive borders and readable fonts/status icons in both
   layouts; show the first ten shortcut numbers while Alt is held. Preserve native

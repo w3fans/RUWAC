@@ -103,6 +103,19 @@ try:
  pinned=tabs()[4]['id'];normal=tabs()[4]['width'];command('tab-presentation',tab=4,pinned=True);time.sleep(.25)
  assert tabs()[0]['id']==pinned and not tabs()[0]['close_visible']and tabs()[0]['width']<normal
  command('tab-presentation',tab=0,pinned=False);time.sleep(.25);assert tabs()[0]['close_visible'];assert set(baseline.items())<=set(panes().items())
+ # Use the actual popover and native key dispatch, not the action-group fixture.
+ # GTK closes the popover before activating its selected GMenu action.
+ count=len(tabs());cancel=tabs()[2];click(cancel,273);press(1);time.sleep(.2)
+ assert len(tabs())==count,'Dismissing the tab menu must not close a tab'
+ victim=tabs()[4];active=selected()['id'];click(victim,273)
+ save('native-menu-open',chrome());assert command('snapshot')['saved'];(r/'native-rust.png').replace(r/'native-menu-open.png')
+ menu=chrome()['tab_layout']['menu_items'];save('native-menu-items',menu)
+ item=next(i for i in menu if i['label']=='Close tab');assert item['sensitive']
+ x,y=item['origin'];pointer(x+item['width']/2,y+item['height']/2);button();button(down=False)
+ assert command('snapshot')['saved'];(r/'native-rust.png').replace(r/'native-menu-activated.png')
+ eventually(lambda:len(tabs())==count-1,5)
+ assert victim['id']not in[t['id']for t in tabs()],'Native tab menu closed the wrong page'
+ assert selected()['id']==active and set(baseline.items())<=set(panes().items())
  mark('pinned-tabs-retain-compact-presentation-and-session-identity')
  (Path(a.evidence)/'acceptance.json').write_text(json.dumps({'PASS':True,'checks':checks,'owner_desktop_or_sessions_used':False,'scope':'Real isolated native pointer/key events and actual TabPage metadata changes; no owner acceptance claim'},indent=2)+'\n')
 finally:
