@@ -176,7 +176,8 @@ try:
 
  restore_ports=[urlsplit(command('web-preview',index=i)['origin']).port for i in range(2)]
  command('workspace-close');gui.wait(timeout=10)
- assert all(closed(port)for port in restore_ports)
+ # The forward helper handles frontend EOF asynchronously, as on tab close.
+ eventually(lambda:all(closed(port)for port in restore_ports),10)
  for context in contexts:assert Path('/proc',str(next(p for p in rpc('pane.list',{'session':context['session']})if p['id']==context['pane'])['pid'])).exists()
  for n in ['gui-request.json','gui-response.json']:(root/n).unlink(missing_ok=True)
  seq=0
