@@ -760,6 +760,10 @@ fn popup(
         // GtkPopoverMenu closes before dispatching the chosen action. Keep its
         // action ancestry and selected page alive until that dispatch finishes.
         let (p, weak, owner) = (p.clone(), weak.clone(), owner.clone());
+        // Close tab can remove the toggle before this idle runs. Keep the
+        // parent alive until its popover is unparented, including GTK focus /
+        // accessibility cleanup during action dispatch.
+        let parent = p.parent();
         glib::idle_add_local_once(move || {
             if owner
                 .upgrade()
@@ -771,6 +775,7 @@ fn popup(
             }
             // A dismissed older menu must never clear a newly opened target.
             p.unparent();
+            drop(parent);
         });
     });
     pop.popup();

@@ -858,6 +858,7 @@ try:
    assert [command('gui','rdp-inspect',rdp=i)['transport_id']for i in range(3)]==neighbors
    if mutter_input:
     count=command('gui','inspect')['tabs'];native_tab_action(tab,'close');spike.eventually(lambda:command('gui','inspect')['tabs']==count-1,5)
+    assert 'Finalizing GtkToggleButton'not in(root/'gui.log').read_text(),'Tab menu finalized its parent with the popover still attached'
    else:command('gui','close-rdp',rdp=3)
    # A status message may belong to an earlier write (or earlier test). Wait
    # for the actual editor snapshot to include BOTH external CLI changes.

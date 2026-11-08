@@ -52,7 +52,7 @@ It reports both the installed CLI and the running engine without starting or
 restarting anything. The GUI terminal footer also identifies a preserved older
 local engine. An installed update does not change existing terminal processes.
 
-For new work on the updated engine, run `ruwac engine gui`. This opens a separate
+After updating, open **Updates → Open updated engine**, or run `ruwac engine gui`. This opens a separate
 GUI window with its own socket, workspace and durable terminal history. Your
 original window and terminals keep running. Sessions are not migrated between
 engines. For terminal-only use, `ruwac engine new` returns argument arrays for

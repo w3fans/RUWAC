@@ -4,6 +4,90 @@ use gtk::glib;
 use serde_json::Value;
 use std::{cell::Cell, rc::Rc, sync::mpsc, time::Duration};
 
+// Resolve the installed entry, rather than PATH or an old immutable release.
+fn installed_cli(executable: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let directory = executable
+        .parent()
+        .ok_or("GUI installation directory unavailable")?;
+    let cli = if directory
+        .parent()
+        .and_then(std::path::Path::file_name)
+        .is_some_and(|name| name == "releases")
+    {
+        directory
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or("Installation root unavailable")?
+            .join("current/ruwac")
+    } else {
+        directory.join("ruwac")
+    };
+    cli.canonicalize()
+        .map_err(|_| "Installed RUWAC CLI unavailable; finish the package update first".into())
+}
+fn engine_command(
+    executable: &std::path::Path,
+    socket: &std::path::Path,
+) -> Result<std::process::Command, String> {
+    let cli = installed_cli(executable)?;
+    // engine gui derives the versioned sibling from this private directory.
+    // A neutral base also permits reopening an already selected versioned engine.
+    let base = socket
+        .parent()
+        .ok_or("Engine socket directory unavailable")?
+        .join("control.sock");
+    let mut command = std::process::Command::new(cli);
+    command
+        .arg("--socket")
+        .arg(base)
+        .args(["engine", "gui"])
+        .env_remove("RUWAC_STATE_FILE")
+        .env_remove("RUWAC_SOCKET");
+    Ok(command)
+}
+fn engine_controls(content: &gtk::Box, status: &gtk::Label, socket: &std::path::Path) {
+    let detail = gtk::Label::new(Some(
+        "After installing an update, open a window on the installed engine version. Existing windows and terminal programs keep running on their current engine; sessions are not moved.",
+    ));
+    detail.set_wrap(true);
+    content.append(&detail);
+    let button = gtk::Button::with_label("Open updated engine");
+    button.set_widget_name("update-engine");
+    let socket = socket.to_path_buf();
+    let weak_status = status.downgrade();
+    button.connect_clicked(move |button| {
+        let launched = std::env::current_exe().map_err(|e|e.to_string())
+            .and_then(|exe| engine_command(&exe,&socket))
+            .and_then(|mut command|command.spawn().map_err(|e|e.to_string()));
+        let Some(status) = weak_status.upgrade() else {return};
+        match launched {
+            Err(error) => status.set_text(&format!("Unable to open updated engine: {error}")),
+            Ok(mut child) => {
+                button.set_sensitive(false);
+                status.set_text("Starting updated engine window. Existing terminals remain open; check the engine version in the new window's footer.");
+                let (tx,rx)=mpsc::channel();
+                std::thread::spawn(move|| {let _=tx.send(child.wait());});
+                let status=status.downgrade();let button=button.downgrade();let mut polls=0;
+                glib::timeout_add_local(Duration::from_millis(200),move||{
+                    polls+=1;
+                    match rx.try_recv() {
+                        Ok(result) => {
+                            if !result.as_ref().is_ok_and(|exit|exit.success()) {
+                                if let Some(status)=status.upgrade(){status.set_text("Updated engine launch failed. Run ruwac engine gui in an external terminal for diagnostics; existing sessions remain open.");}
+                                if let Some(button)=button.upgrade(){button.set_sensitive(true);}
+                            }
+                            glib::ControlFlow::Break
+                        }
+                        Err(mpsc::TryRecvError::Empty) if polls<25 => glib::ControlFlow::Continue,
+                        _ => glib::ControlFlow::Break,
+                    }
+                });
+            }
+        }
+    });
+    content.append(&button);
+}
+
 fn request(args: &[&str]) -> Result<Value, String> {
     let managed =
         std::env::current_exe().is_ok_and(|exe| ruwac_protocol::managed_rpm_installation(&exe));
@@ -97,7 +181,12 @@ fn task(args: &'static [&'static str], done: impl FnOnce(Result<Value, String>) 
     });
 }
 
-pub fn attach(header: &adw::HeaderBar, window: &adw::ApplicationWindow, automatic: bool) {
+pub fn attach(
+    header: &adw::HeaderBar,
+    window: &adw::ApplicationWindow,
+    automatic: bool,
+    socket: &std::path::Path,
+) {
     let button = gtk::Button::from_icon_name("software-update-available-symbolic");
     button.set_widget_name("ruwac-updates");
     button.set_tooltip_text(Some("Check GitHub for RUWAC updates"));
@@ -106,6 +195,7 @@ pub fn attach(header: &adw::HeaderBar, window: &adw::ApplicationWindow, automati
         // Distribution packages never contact GitHub or start RUWAC's updater.
         button.set_tooltip_text(Some(ruwac_protocol::DISTRIBUTION_UPDATE_HINT));
         let weak_window = window.downgrade();
+        let socket = socket.to_path_buf();
         button.connect_clicked(move |_| {
             if let Some(window) = weak_window.upgrade() {
                 let dialog = gtk::Window::builder()
@@ -121,13 +211,17 @@ pub fn attach(header: &adw::HeaderBar, window: &adw::ApplicationWindow, automati
                 label.set_margin_bottom(18);
                 label.set_margin_start(18);
                 label.set_margin_end(18);
-                dialog.set_child(Some(&label));
+                let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+                content.append(&label);
+                engine_controls(&content, &label, &socket);
+                dialog.set_child(Some(&content));
                 dialog.present();
             }
         });
         return;
     }
     let weak_window = window.downgrade();
+    let socket = socket.to_path_buf();
     button.connect_clicked(move |_| {
         let Some(window) = weak_window.upgrade() else { return };
         let dialog = gtk::Window::builder().title("RUWAC updates").transient_for(&window)
@@ -137,6 +231,7 @@ pub fn attach(header: &adw::HeaderBar, window: &adw::ApplicationWindow, automati
         let status = gtk::Label::new(Some("Checking GitHub…"));
         status.set_wrap(true); status.set_widget_name("update-status");
         content.append(&status);
+        engine_controls(&content,&status,&socket);
         if std::env::current_exe().is_ok_and(|exe| ruwac_protocol::managed_rpm_installation(&exe)) {
             status.set_text("Checking GitHub for RPM updates…");
             let detail = gtk::Label::new(Some("Installed with RPM. System updates verify the GitHub release build before using DNF. These are upstream testing packages; the known dependency advisory remains open. Administrator authorization is required to install or enable updates. Running sessions remain open."));
@@ -486,7 +581,7 @@ pub fn fixture(window: &adw::ApplicationWindow, command: &Value) -> Value {
                 .is_some_and(|w| w.is_active());
             let testing_bundles_enabled = find(dialog.upcast_ref(), "update-testing-bundles")
                 .is_some_and(|w| w.is_sensitive());
-            let result = serde_json::json!({"testing_bundles":testing_bundles,"testing_bundles_enabled":testing_bundles_enabled,"dialog":true,"status":status,"install_enabled":install,"automatic":automatic,"automatic_install":automatic_install,"automatic_install_enabled":automatic_install_enabled,"rollback_enabled":rollback_enabled});
+            let result = serde_json::json!({"testing_bundles":testing_bundles,"testing_bundles_enabled":testing_bundles_enabled,"dialog":true,"engine_enabled":find(dialog.upcast_ref(),"update-engine").is_some_and(|w|w.is_sensitive()),"status":status,"install_enabled":install,"automatic":automatic,"automatic_install":automatic_install,"automatic_install_enabled":automatic_install_enabled,"rollback_enabled":rollback_enabled});
             if command["operation"] == "close" {
                 dialog.close();
             }
@@ -494,4 +589,53 @@ pub fn fixture(window: &adw::ApplicationWindow, command: &Value) -> Value {
         }
     }
     serde_json::json!({"dialog":false})
+}
+
+#[cfg(test)]
+mod engine_tests {
+    use super::*;
+    #[test]
+    fn updated_engine_uses_current_installation_and_independent_state() {
+        let root = std::env::temp_dir().join(ruwac_protocol::id("engine_update"));
+        let old = root.join("lib/ruwac/releases/old");
+        let new = root.join("lib/ruwac/releases/new");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join("ruwac"), "old").unwrap();
+        std::fs::write(new.join("ruwac"), "new").unwrap();
+        std::os::unix::fs::symlink("releases/new", root.join("lib/ruwac/current")).unwrap();
+        let command =
+            engine_command(&old.join("ruwac-desktop"), &root.join("engine-0.4.73.sock")).unwrap();
+        assert_eq!(command.get_program(), new.join("ruwac"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![
+                std::ffi::OsStr::new("--socket"),
+                root.join("control.sock").as_os_str(),
+                std::ffi::OsStr::new("engine"),
+                std::ffi::OsStr::new("gui")
+            ]
+        );
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "RUWAC_STATE_FILE" && value.is_none())
+        );
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "RUWAC_SOCKET" && value.is_none())
+        );
+        assert_eq!(std::fs::read_to_string(old.join("ruwac")).unwrap(), "old");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn missing_installed_cli_never_falls_back_to_path() {
+        assert!(
+            installed_cli(std::path::Path::new(
+                "/nonexistent-ruwac-test/bin/ruwac-desktop"
+            ))
+            .is_err()
+        );
+    }
 }

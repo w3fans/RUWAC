@@ -332,7 +332,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
   let box_=gtk::Box::new(gtk::Orientation::Vertical,0);let header=adw::HeaderBar::new();box_.append(&header);let tabs=adw::TabView::new();tabs.remove_shortcuts(adw::TabViewShortcuts::ALT_DIGITS|adw::TabViewShortcuts::ALT_ZERO);/* Window capture handles Alt+digit according to Map keys. */let focus_memory:tiles::FocusMemory=Rc::new(RefCell::new(std::collections::HashMap::new()));tabs.set_vexpand(true);let bar=tab_strip::TabStrip::new(&tabs,&window);header.set_title_widget(Some(bar.widget()));let tools=gtk::Box::new(gtk::Orientation::Horizontal,6);tools.set_margin_start(6);tools.set_margin_end(6);tools.set_margin_top(4);tools.set_margin_bottom(4);let workspace_overlay=gtk::Overlay::new();workspace_overlay.set_vexpand(true);box_.append(&workspace_overlay);
   let appearance_views=all.clone();let chrome=chrome::Chrome::new(&window,&header,&bar,&box_,Rc::new(move|prefs|for view in appearance_views.borrow().iter(){view.apply_appearance(prefs);}));
-  updates::attach(&header,&window,fixture.is_none());
+  updates::attach(&header,&window,fixture.is_none(),&socket);
   if let Some(message)=workspace_warning.as_ref(){box_.append(&gtk::Label::new(Some(message)));}
   let new_window=gtk::Button::from_icon_name("window-new-symbolic");new_window.set_widget_name("new-workspace-window");new_window.set_tooltip_text(Some("New RUWAC window — independent tabs, same persistent daemon"));chrome.actions.append(&new_window);
   let window_socket=socket.clone();let window_theme=theme;new_window.connect_clicked(move|button|{

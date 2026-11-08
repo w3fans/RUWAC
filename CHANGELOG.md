@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v0.4.73 — 2026-11-08 — Stable source release
+
+- Keep a tab-menu parent alive until popover cleanup completes, preventing a
+  closing RDP tab from leaving GTK with a finalized menu parent.
+- Add **Open updated engine** to Updates, including COPR installations, so new
+  work can use the installed engine without ending existing terminals.
 - Preserve terminal colors and text attributes while scrolling or selecting live
   history, using bounded style runs and visible-row rendering. Older engines and
   previously plain recovery history remain compatible; reopen on the updated
