@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.4.72 — 2026-11-07 — Stable source release
+
 - Dispatch tab context-menu actions before popover cleanup, restoring Reconnect,
   Disconnect and Close tab. Native-input coverage checks cancellation, the target
   page and neighboring connections.
