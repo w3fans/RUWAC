@@ -29,28 +29,41 @@ pub const COPR_PROJECT: &str = "zvegelj/ruwac";
 /// per-user installation.
 fn copr_function() -> String {
     format!(
-        "copr_ruwac() {{ \
-           command -v dnf >/dev/null 2>&1 && grep -qx 'ID=fedora' /etc/os-release || return 1; \
-           repo=copr:copr.fedorainfracloud.org:{owner}:{name}; \
-           repos=\"--repo=$repo --repo=fedora --repo=updates\"; \
-           if grep -qs '\"kind\":\"distribution\"' /usr/share/ruwac/rpm-installation.json; then \
-             dnf -q --refresh check-upgrade --repo=$repo ruwac >/dev/null 2>&1; [ $? = 100 ] || return 0; \
-             echo 'Updating RUWAC from Fedora COPR {copr} (sudo may ask for your password)'; \
-             packages=ruwac; rpm -q ruwac-desktop >/dev/null 2>&1 && packages='ruwac ruwac-desktop'; \
-             sudo dnf -y --refresh upgrade $repos $packages; return; \
-           fi; \
-           echo 'Installing RUWAC from Fedora COPR {copr} (sudo may ask for your password)'; \
-           {{ dnf copr --help >/dev/null 2>&1 || sudo dnf -y install dnf5-plugins; }} || return 1; \
-           sudo dnf -y copr enable {copr} || return 1; \
-           packages=ruwac; rpm -q ruwac-desktop >/dev/null 2>&1 && packages='ruwac ruwac-desktop'; \
-           if rpm -q ruwac >/dev/null 2>&1; then \
-             sudo dnf -y --refresh upgrade $repos $packages && \
-             {{ grep -qs '\"kind\":\"distribution\"' /usr/share/ruwac/rpm-installation.json || \
-               sudo dnf -y reinstall $repos $packages; }}; \
-           else sudo dnf -y --refresh install $repos ruwac; fi && \
-           grep -qs '\"kind\":\"distribution\"' /usr/share/ruwac/rpm-installation.json || return 1; \
-           /usr/bin/ruwac update >/dev/null 2>&1; return 0; \
-         }}",
+        r#"copr_ruwac() {{
+        command -v dnf >/dev/null 2>&1 && grep -qx 'ID=fedora' /etc/os-release || return 1
+        repo=copr:copr.fedorainfracloud.org:{owner}:{name}
+        configured=$(dnf -q repolist --enabled) || {{ echo 'RUWAC: Fedora repository query failed.' >&2; return 2; }}
+        first_party=$(printf '%s\n' "$configured" | awk '$1 == "fedora" || $1 == "updates" || $1 == "rawhide" {{print $1}}')
+        [ -n "$first_party" ] || {{ echo 'RUWAC: no supported Fedora dependency repository is enabled.' >&2; return 2; }}
+        repos="--repo=$repo --setopt=$repo.skip_if_unavailable=0"
+        for id in $first_party; do repos="$repos --repo=$id"; done
+        if grep -qs '\"kind\":\"distribution\"' /usr/share/ruwac/rpm-installation.json; then
+            dnf -q --refresh check-upgrade --repo=$repo --setopt=$repo.skip_if_unavailable=0 ruwac
+            status=$?
+            case $status in
+                0) echo 'RUWAC: COPR package is current.'; return 0 ;;
+                100) ;;
+                *) echo "RUWAC: COPR upgrade query failed (DNF exit $status); no package was changed." >&2; return 2 ;;
+            esac
+            echo 'Updating RUWAC from Fedora COPR {copr} (sudo may ask for your password)'
+            packages=ruwac; rpm -q ruwac-desktop >/dev/null 2>&1 && packages='ruwac ruwac-desktop'
+            sudo dnf -y --refresh upgrade $repos $packages || return 2
+            return 0
+        fi
+        echo 'Installing RUWAC from Fedora COPR {copr} (sudo may ask for your password)'
+        {{ dnf copr --help >/dev/null 2>&1 || sudo dnf -y install dnf5-plugins; }} || return 2
+        sudo dnf -y copr enable {copr} || return 2
+        sudo dnf config-manager setopt "$repo.metadata_expire=300" || return 2
+        packages=ruwac; rpm -q ruwac-desktop >/dev/null 2>&1 && packages='ruwac ruwac-desktop'
+        if rpm -q ruwac >/dev/null 2>&1; then
+            sudo dnf -y --refresh upgrade $repos $packages &&
+            {{ grep -qs '\"kind\":\"distribution\"' /usr/share/ruwac/rpm-installation.json ||
+               sudo dnf -y reinstall $repos $packages; }} || return 2
+        else sudo dnf -y --refresh install $repos ruwac || return 2; fi
+        grep -qs '\"kind\":\"distribution\"' /usr/share/ruwac/rpm-installation.json || {{ echo 'RUWAC: distribution installation marker missing; refusing a parallel per-user install.' >&2; return 2; }}
+        /usr/bin/ruwac update >/dev/null 2>&1
+        return 0
+    }}"#,
         copr = COPR_PROJECT,
         owner = COPR_PROJECT.split('/').next().unwrap_or_default(),
         name = COPR_PROJECT.split('/').nth(1).unwrap_or_default()
@@ -67,7 +80,7 @@ fn install_ruwac_command(binary: &str) -> String {
                   else echo \"Install$missing with your package manager, then retry.\"; exit 1; fi; \
                 fi";
     format!(
-        "{copr}; copr_ruwac && exit 0; {deps}; python3 -c {} --remote-cli {} --bootstrap --headless --prebuilt",
+        "{copr}; copr_ruwac; status=$?; [ $status = 0 ] && exit 0; [ $status = 1 ] || exit $status; {deps}; python3 -c {} --remote-cli {} --bootstrap --headless --prebuilt",
         quote(include_str!("../../../scripts/update-user.py")),
         quote(binary)
     )
@@ -504,7 +517,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ruwac-copr-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let log = dir.join("calls");
-        for (name, body) in [("dnf", "exit 0"), ("rpm", "exit 1"), ("sudo", "exit 0")] {
+        for (name, body) in [
+            ("dnf", "echo fedora; echo updates; exit 0"),
+            ("rpm", "exit 1"),
+            ("sudo", "exit 0"),
+        ] {
             let path = dir.join(name);
             fs::write(
                 &path,
@@ -530,7 +547,7 @@ mod tests {
         let calls = fs::read_to_string(&log).unwrap_or_default();
         fs::remove_dir_all(&dir).unwrap();
         assert!(
-            String::from_utf8_lossy(&output.stdout).ends_with("rc=1\n"),
+            String::from_utf8_lossy(&output.stdout).ends_with("rc=2\n"),
             "{output:?}"
         );
         assert!(
@@ -542,7 +559,7 @@ mod tests {
         // on the user's behalf.
         assert!(
             calls.contains(
-                "sudo dnf -y --refresh install --repo=copr:copr.fedorainfracloud.org:zvegelj:ruwac --repo=fedora --repo=updates ruwac"
+                "sudo dnf -y --refresh install --repo=copr:copr.fedorainfracloud.org:zvegelj:ruwac --setopt=copr:copr.fedorainfracloud.org:zvegelj:ruwac.skip_if_unavailable=0 --repo=fedora --repo=updates ruwac"
             ),
             "{calls}"
         );

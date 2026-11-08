@@ -6,6 +6,9 @@ pub struct History {
     lines: Vec<String>,
     rows: Vec<(String, bool)>,
     cols: usize,
+    row_bytes: Vec<usize>,
+    styles: Vec<(usize, usize)>,
+    palette: Vec<Value>,
     frozen: bool,
     live_cells: Vec<(usize, Value)>,
 }
@@ -19,6 +22,9 @@ impl History {
     pub fn clear(&mut self) {
         self.lines.clear();
         self.rows.clear();
+        self.row_bytes.clear();
+        self.styles.clear();
+        self.palette.clear();
         self.cols = 0;
         self.frozen = false;
         self.live_cells.clear();
@@ -32,6 +38,51 @@ impl History {
             .map(str::to_owned)
             .collect();
         self.cols = 0;
+    }
+    /// Styles are optional; old engines and plain checkpoints remain readable.
+    pub fn set_styles(&mut self, text: &str, encoded: &Value) {
+        self.styles.clear();
+        self.palette.clear();
+        let (Some(runs), Some(palette)) =
+            (encoded["runs"].as_array(), encoded["palette"].as_array())
+        else {
+            return;
+        };
+        if runs.len() > 115_536
+            || palette.len() > 4096
+            || !palette.iter().all(|cell| {
+                cell.as_array()
+                    .is_some_and(|c| c.len() == 7 && c[6].is_object())
+            })
+        {
+            return;
+        }
+        for run in runs {
+            let Some(byte) = run[0].as_u64().and_then(|n| usize::try_from(n).ok()) else {
+                self.styles.clear();
+                return;
+            };
+            let Some(style) = run[1]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .filter(|n| *n < palette.len())
+            else {
+                self.styles.clear();
+                return;
+            };
+            if byte >= text.len()
+                || !text.is_char_boundary(byte)
+                || self
+                    .styles
+                    .last()
+                    .is_some_and(|(previous, _)| *previous > byte)
+            {
+                self.styles.clear();
+                return;
+            }
+            self.styles.push((byte, style));
+        }
+        self.palette = palette.clone();
     }
     pub fn is_frozen(&self) -> bool {
         self.frozen
@@ -173,19 +224,25 @@ impl History {
         self.cols = cols;
         self.live_cells.clear();
         self.rows.clear();
+        self.row_bytes.clear();
+        let mut byte = 0;
         for line in &self.lines {
+            self.row_bytes.push(byte);
             let mut row = String::new();
             let mut width = 0;
             for ch in line.chars() {
                 let n = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
                 if n > 0 && width + n > cols {
                     self.rows.push((std::mem::take(&mut row), true));
+                    self.row_bytes.push(byte);
                     width = 0;
                 }
                 row.push(ch);
+                byte += ch.len_utf8();
                 width += n;
             }
             self.rows.push((row, false));
+            byte += 1;
         }
     }
     pub fn grid(&mut self, live: &Value, offset: usize) -> (Value, usize) {
@@ -218,7 +275,7 @@ impl History {
                 continue;
             }
             let mut row: Vec<Value> = Vec::new();
-            for ch in line.chars() {
+            for (local_byte, ch) in line.char_indices() {
                 let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
                 if width == 0 {
                     if let Some(last) = row.iter_mut().rev().find(|c| c[1] != true) {
@@ -227,9 +284,20 @@ impl History {
                     }
                     continue;
                 }
-                row.push(json!([ch.to_string(), false, 256, 256, false, false, {}]));
+                let byte = self.row_bytes[begin + index] + local_byte;
+                let n = self.styles.partition_point(|(at, _)| *at <= byte);
+                let mut cell = n
+                    .checked_sub(1)
+                    .map(|n| self.palette[self.styles[n].1].clone())
+                    .unwrap_or_else(|| json!(["", false, 256, 256, false, false, {}]));
+                cell[0] = json!(ch.to_string());
+                cell[1] = json!(false);
+                cell[6]["width"] = json!(width);
+                row.push(cell.clone());
                 for _ in 1..width {
-                    row.push(json!(["", true, 256, 256, false, false, {}]));
+                    cell[0] = json!("");
+                    cell[1] = json!(true);
+                    row.push(cell.clone());
                 }
             }
             cells.push(json!(row));
@@ -245,6 +313,32 @@ impl History {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn history_styles_survive_scroll_reflow_and_plain_copy() {
+        let text = "ž界e\u{301}fg\nplain\nlast\n";
+        let mut h = History::default();
+        h.set(text);
+        let red = json!(["", false, 1, 256, true, false, {}]);
+        let normal = json!(["", false, 256, 256, false, false, {}]);
+        h.set_styles(
+            text,
+            &json!({"palette":[red,normal],"runs":[[0,0],["ž界e\u{301}fg\n".len(),1]]}),
+        );
+        let mut live = json!({"rows":2,"cols":4,"cursor":{"visible":true}});
+        let grid = h.grid(&live, 3).0;
+        assert_eq!(grid["cells"][0][0][2], 1);
+        assert_eq!(grid["cells"][0][1][2], 1);
+        assert_eq!(grid["cells"][0][2][1], true);
+        assert_eq!(grid["cells"][0][3][0], "e\u{301}");
+        assert_eq!(h.selected((0, 0), (1, 1)), "ž界e\u{301}fg");
+        live["cols"] = json!(8);
+        let grid = h.grid(&live, 1).0;
+        assert_eq!(grid["cells"][0][0][2], 1);
+        assert_eq!(grid["cells"][1][0][2], 256);
+        h.set_styles(text, &json!({"palette":[red],"runs":[[1,0]]})); // inside UTF-8 character
+        assert!(h.styles.is_empty());
+        assert_eq!(h.grid(&live, 1).0["cells"][0][0][2], 256);
+    }
     #[test]
     fn selection_keeps_absolute_rows_across_viewport_changes() {
         let mut h = History::default();

@@ -685,6 +685,14 @@ impl Worker {
                             }
                             Command::History(pane, primary, generation) => {
                                 let mut text = String::new();
+                                let mut styles = Vec::<Value>::new();
+                                let mut style_palette =
+                                    vec![json!(["", false, 256, 256, false, false, {}])];
+                                let mut style_lookup =
+                                    std::collections::HashMap::<String, usize>::new();
+                                let styled = capabilities["history_style_encoding"] == "runs-v1";
+                                let mut style_bytes = 0;
+                                let mut styles_truncated = false;
                                 let mut offset = 0;
                                 let mut total = 0;
                                 let mut truncated = false;
@@ -700,14 +708,15 @@ impl Worker {
                                     if schema["methods"].as_array().is_some_and(|methods| {
                                         methods.iter().any(|m| m == "pane.history.freeze")
                                     }) {
-                                        let metadata = rpc.call(
-                                            "pane.history.freeze",
-                                            if primary {
-                                                json!({"pane":pane,"buffer":"primary"})
-                                            } else {
-                                                json!({"pane":pane})
-                                            },
-                                        )?;
+                                        let mut freeze = if primary {
+                                            json!({"pane":pane,"buffer":"primary"})
+                                        } else {
+                                            json!({"pane":pane})
+                                        };
+                                        if styled {
+                                            freeze["styles"] = json!(true);
+                                        }
+                                        let metadata = rpc.call("pane.history.freeze", freeze)?;
                                         pin = Some(
                                             metadata["snapshot"]
                                                 .as_str()
@@ -736,6 +745,62 @@ impl Worker {
                                             truncated = true;
                                             break;
                                         }
+                                        if styled && !styles_truncated {
+                                            let mut byte = text.len();
+                                            if let Some(rows) = page["rows"].as_array() {
+                                                for row in rows {
+                                                    let line = row["text"].as_str().unwrap_or("");
+                                                    if !line.is_empty() {
+                                                        styles.push(json!([byte, 0]));
+                                                    }
+                                                    if let Some(runs) = row["styles"].as_array() {
+                                                        for run in runs {
+                                                            let at =
+                                                                run[0].as_u64().unwrap_or(u64::MAX)
+                                                                    as usize;
+                                                            if at < line.len()
+                                                                && line.is_char_boundary(at)
+                                                            {
+                                                                let key = run[1].to_string();
+                                                                let index = if let Some(index) =
+                                                                    style_lookup.get(&key)
+                                                                {
+                                                                    *index
+                                                                } else {
+                                                                    style_bytes += key.len();
+                                                                    if style_bytes > 8 * 1024 * 1024
+                                                                        || style_palette.len()
+                                                                            >= 4096
+                                                                    {
+                                                                        styles_truncated = true;
+                                                                        break;
+                                                                    }
+                                                                    let index = style_palette.len();
+                                                                    style_lookup.insert(key, index);
+                                                                    style_palette
+                                                                        .push(run[1].clone());
+                                                                    index
+                                                                };
+                                                                if styles.len() >= 115_536 {
+                                                                    styles_truncated = true;
+                                                                    break;
+                                                                }
+                                                                styles.push(json!([
+                                                                    byte + at,
+                                                                    index
+                                                                ]));
+                                                            }
+                                                        }
+                                                    }
+                                                    byte += line.len()
+                                                        + usize::from(row["wrapped"] != true);
+                                                    if styles_truncated {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            styles_truncated |= page["styles_truncated"] == true;
+                                        }
                                         text.push_str(part);
                                         if next >= total || halt.load(Ordering::Relaxed) {
                                             break;
@@ -756,11 +821,14 @@ impl Worker {
                                         result = release.map(|_| ());
                                     }
                                 }
+                                if styles_truncated {
+                                    styles.clear();
+                                }
                                 Ok((
                                     "pane.history".into(),
                                     match result {
                                         Ok(()) => {
-                                            json!({"pane":pane,"generation":generation,"text":text,"total_lines":total,"truncated":truncated,"buffer":if primary {"primary"}else{"active"}})
+                                            json!({"pane":pane,"generation":generation,"text":text,"styles":{"palette":style_palette,"runs":styles},"styles_truncated":styles_truncated,"total_lines":total,"truncated":truncated,"buffer":if primary {"primary"}else{"active"}})
                                         }
                                         Err(error) => {
                                             json!({"pane":pane,"generation":generation,"error":error.to_string()})

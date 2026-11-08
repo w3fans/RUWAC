@@ -61,6 +61,22 @@ when reconnecting so engine restarts recover the same history. Checkpoint
 selection stays with that frontend/engine and is cleared from new PTY shells. A custom
 `RUWAC_STATE_FILE` must be unset before requesting a separate engine.
 
+To replace the **default** engine, deliberately close its terminal programs first,
+then use an external terminal (outside RUWAC):
+
+```sh
+ruwac engine status
+ruwac rpc daemon.stop --params '{}'
+# Wait until `ruwac engine status` reports running: false.
+ruwac start
+ruwac engine status
+```
+
+Stopping the engine ends any terminal programs it still owns. Closing a GUI only
+detaches it, so reopening the GUI or creating another tab can reuse that older
+engine. Existing plain-text recovery checkpoints cannot recover discarded colors;
+new styled history requires a matching updated engine and GUI.
+
 `ruwac --host HOST engine status` checks an updated remote CLI and its running
 engine through the existing verified SSH route. Older remote CLIs need updating
 before they can provide this report; no remote engine is restarted automatically.
@@ -487,7 +503,9 @@ both the CLI and GUI:
 
 ```sh
 sudo dnf copr enable zvegelj/ruwac
-sudo dnf install ruwac ruwac-desktop
+sudo dnf config-manager setopt \
+  'copr:copr.fedorainfracloud.org:zvegelj:ruwac.metadata_expire=300'
+sudo dnf install --refresh ruwac ruwac-desktop
 ```
 
 Install only `ruwac` for a headless machine. COPR lists one source package named
@@ -497,7 +515,12 @@ Install only `ruwac` for a headless machine. COPR lists one source package named
 sudo dnf upgrade --refresh ruwac ruwac-desktop
 ```
 
-`--refresh` avoids an older cached repository listing after a new release. Reopen
+The enable command permanently adds COPR on this host. The repository-specific
+`metadata_expire=300` override persists across reboots and checks metadata after
+five minutes; repeat these onboarding commands on each client. It is a cache
+expiry, not a network timeout. `--refresh` forces an immediate check after a new
+release. Ordinary system updates retain their existing unavailable-repository
+policy; targeted RUWAC remote checks fail visibly when COPR cannot be queried. Reopen
 the GUI to load its new executable. Package installation preserves running
 terminal engines and their programs; the installed CLI, running GUI and running
 engine can therefore have different versions. Use `ruwac engine status` to inspect

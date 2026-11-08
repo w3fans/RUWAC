@@ -135,6 +135,58 @@ impl PrimaryArchive {
     }
 }
 
+// Opt-in history styles use runs, never a second full cell grid. The cap is
+// independent of text retention; exhausting it never drops canonical copy text.
+const MAX_HISTORY_STYLE_RUNS: usize = 65_536;
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct HistoryStyle {
+    fg: Color,
+    bg: Color,
+    flags: Flags,
+    underline: Option<Color>,
+}
+impl HistoryStyle {
+    fn from_cell(cell: &Cell) -> Self {
+        Self {
+            fg: cell.fg,
+            bg: cell.bg,
+            flags: cell.flags
+                & (Flags::BOLD
+                    | Flags::INVERSE
+                    | Flags::ITALIC
+                    | Flags::DIM
+                    | Flags::HIDDEN
+                    | Flags::STRIKEOUT
+                    | Flags::ALL_UNDERLINES),
+            underline: cell.underline_color(),
+        }
+    }
+    fn cell(self) -> Value {
+        let underline = if self.flags.contains(Flags::UNDERCURL) {
+            "curly"
+        } else if self.flags.contains(Flags::DOUBLE_UNDERLINE) {
+            "double"
+        } else if self.flags.contains(Flags::DOTTED_UNDERLINE) {
+            "dotted"
+        } else if self.flags.contains(Flags::DASHED_UNDERLINE) {
+            "dashed"
+        } else if self.flags.contains(Flags::UNDERLINE) {
+            "single"
+        } else {
+            "none"
+        };
+        json!(["",false,color(self.fg),color(self.bg),self.flags.contains(Flags::BOLD),
+            self.flags.contains(Flags::INVERSE),{"italic":self.flags.contains(Flags::ITALIC),
+            "dim":self.flags.contains(Flags::DIM),"hidden":self.flags.contains(Flags::HIDDEN),
+            "strike":self.flags.contains(Flags::STRIKEOUT),"width":1,"underline":underline,
+            "underline_color":self.underline.map(color)}])
+    }
+}
+struct HistoryRun {
+    byte: usize,
+    style: HistoryStyle,
+}
+
 /// Immutable, bounded canonical copy view, independent of later output/resize.
 pub struct HistorySnapshot {
     pub rows: Vec<(String, bool)>,
@@ -145,17 +197,25 @@ pub struct HistorySnapshot {
     pub cursor: (usize, usize),
     pub alternate: bool,
     pub buffer: &'static str,
+    styles: Option<Vec<Vec<HistoryRun>>>,
+    styles_truncated: bool,
 }
 impl HistorySnapshot {
     pub fn metadata(&self) -> Value {
-        json!({"epoch":self.epoch,"total_lines":self.rows.len(),"cols":self.cols,
+        let mut value = json!({"epoch":self.epoch,"total_lines":self.rows.len(),"cols":self.cols,
             "text_bytes":self.bytes,"dropped_lines":self.dropped,"cursor_row":self.cursor.0,"cursor_col":self.cursor.1,
-            "alternate_screen":self.alternate,"buffer":self.buffer})
+            "alternate_screen":self.alternate,"buffer":self.buffer});
+        if self.styles.is_some() {
+            value["style_encoding"] = json!("runs-v1");
+            value["styles_truncated"] = json!(self.styles_truncated);
+        }
+        value
     }
     pub fn page(&self, offset: usize, lines: usize) -> Value {
         let mut text = String::new();
         let mut rows = Vec::new();
         let mut wrapped = Vec::new();
+        let mut style_bytes = 0;
         for (row, wrap) in self
             .rows
             .iter()
@@ -165,12 +225,28 @@ impl HistorySnapshot {
             if text.len() + row.len() + 1 > 128 * 1024 {
                 break;
             }
+            let index = offset.min(self.rows.len()) + rows.len();
+            let mut value = json!({"text":row,"wrapped":wrap});
+            if let Some(styles) = &self.styles {
+                let runs = styles[index]
+                    .iter()
+                    .map(|r| json!([r.byte, r.style.cell()]))
+                    .collect::<Vec<_>>();
+                let bytes = serde_json::to_vec(&runs).unwrap().len();
+                // One dense row is bounded by terminal columns. Keep pages
+                // bounded too, while guaranteeing at least one row of progress.
+                if style_bytes + bytes > 128 * 1024 && !rows.is_empty() {
+                    break;
+                }
+                style_bytes += bytes;
+                value["styles"] = json!(runs);
+            }
             text.push_str(row);
             if !wrap {
                 text.push('\n');
             }
             wrapped.push(*wrap);
-            rows.push(json!({"text":row,"wrapped":wrap}));
+            rows.push(value);
         }
         let mut result = self.metadata();
         result["offset"] = json!(offset);
@@ -407,12 +483,15 @@ impl Terminal {
         }
     }
     pub fn freeze_history(&self) -> HistorySnapshot {
-        self.freeze_buffer(false).unwrap()
+        self.freeze_buffer(false, false).unwrap()
     }
     pub fn freeze_primary_history(&self) -> Option<HistorySnapshot> {
-        self.freeze_buffer(true)
+        self.freeze_buffer(true, false)
     }
-    fn freeze_buffer(&self, primary: bool) -> Option<HistorySnapshot> {
+    pub fn freeze_styled_history(&self, primary: bool) -> Option<HistorySnapshot> {
+        self.freeze_buffer(primary, true)
+    }
+    fn freeze_buffer(&self, primary: bool, styled: bool) -> Option<HistorySnapshot> {
         let selected;
         let archived = if primary {
             if let Some(a) = &self.archived {
@@ -432,6 +511,8 @@ impl Terminal {
             let cursor = a.history.len().saturating_sub(a.rows as usize)
                 + a.grid["cursor"]["row"].as_u64().unwrap_or(0) as usize;
             return Some(HistorySnapshot {
+                styles: None,
+                styles_truncated: false,
                 rows: a.history.clone(),
                 bytes: a.history.iter().map(|(s, _)| s.len() + 1).sum(),
                 cols: a.cols,
@@ -455,14 +536,29 @@ impl Terminal {
         let total = (bottom - top + 1) as usize;
         let mut rows = Vec::new();
         let mut bytes = 0;
+        let mut styles = styled.then(Vec::new);
+        let mut style_runs = 0;
+        let mut styles_truncated = false;
         'history: for r in (top..=bottom).rev().take(50000) {
             let mut row = String::new();
+            let mut runs = Vec::new();
+            let mut previous = HistoryStyle::from_cell(&Cell::default());
             for c in 0..self.cols as usize {
                 let cell = &g[Point::new(Line(r), Column(c))];
                 if !cell
                     .flags
                     .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
                 {
+                    if styled && !styles_truncated {
+                        let style = HistoryStyle::from_cell(cell);
+                        if style != previous {
+                            runs.push(HistoryRun {
+                                byte: row.len(),
+                                style,
+                            });
+                            previous = style;
+                        }
+                    }
                     for ch in std::iter::once(if cell.c == '\t' { ' ' } else { cell.c })
                         .chain(cell.zerowidth().into_iter().flat_map(|z| z.iter().copied()))
                     {
@@ -486,11 +582,26 @@ impl Terminal {
             }
             row.shrink_to_fit();
             bytes += row.len() + 1;
+            if let Some(styles) = &mut styles {
+                runs.retain(|r| r.byte < row.len());
+                if style_runs + runs.len() > MAX_HISTORY_STYLE_RUNS {
+                    styles_truncated = true;
+                    runs.clear();
+                }
+                style_runs += runs.len();
+                runs.shrink_to_fit();
+                styles.push(runs);
+            }
             rows.push((row, wrap));
         }
         rows.reverse();
+        if let Some(styles) = &mut styles {
+            styles.reverse();
+        }
         let dropped = total - rows.len();
         Some(HistorySnapshot {
+            styles,
+            styles_truncated,
             rows,
             bytes,
             cols: self.cols,
@@ -1078,6 +1189,53 @@ fn color(c: Color) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn styled_history_preserves_scrolled_unicode_and_snapshot_identity() {
+        let mut t = Terminal::new(3, 20);
+        t.feed("\x1b[1;31mž界e\u{301}\x1b[0m plain\r\nsecond\r\nthird\r\nfourth".as_bytes());
+        let frozen = t.freeze_styled_history(false).unwrap();
+        let before = frozen.page(0, 500);
+        let first = &before["rows"][0];
+        assert!(first["text"].as_str().unwrap().contains("ž界e\u{301}"));
+        assert_eq!(first["styles"][0][0], 0);
+        assert_eq!(first["styles"][0][1][2], 1);
+        assert_eq!(first["styles"][0][1][4], true);
+        assert_eq!(before["style_encoding"], "runs-v1");
+        assert!(
+            t.freeze_history().page(0, 500)["rows"][0]
+                .get("styles")
+                .is_none()
+        );
+        t.feed(b"\r\nchanged\x1b[32mgreen");
+        assert_eq!(frozen.page(0, 500), before);
+        assert_eq!(
+            frozen
+                .rows
+                .iter()
+                .map(|(text, _)| text.len() + 1)
+                .sum::<usize>(),
+            frozen.bytes
+        );
+    }
+    #[test]
+    fn style_budget_preserves_plain_history_and_page_progress() {
+        let mut t = Terminal::new(3, 200);
+        let line = "\x1b[31ma\x1b[32mb".repeat(100) + "\r\n";
+        for _ in 0..400 {
+            t.feed(line.as_bytes());
+        }
+        let frozen = t.freeze_styled_history(false).unwrap();
+        assert!(frozen.styles_truncated);
+        assert_eq!(frozen.rows, t.freeze_history().rows);
+        let mut offset = 0;
+        while offset < frozen.rows.len() {
+            let page = frozen.page(offset, 500);
+            let next = page["next_offset"].as_u64().unwrap() as usize;
+            assert!(next > offset);
+            assert!(page.to_string().len() < 512 * 1024);
+            offset = next;
+        }
+    }
     #[test]
     fn ansi_capture_preserves_styles_without_resizing_or_controls() {
         let mut t = Terminal::new(3, 40);

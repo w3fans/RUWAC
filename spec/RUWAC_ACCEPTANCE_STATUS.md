@@ -1,5 +1,25 @@
 # RUWAC acceptance status
 
+## Source reconciliation — 2026-11-08
+
+Published baseline: v0.4.72, `da6b856b56b700157ad70c12d0dc422053200631`.
+Releases v0.4.57–v0.4.72 delivered remote Web Preview, palette frames,
+event-driven terminal wakeups, bounded clipboard/image paths, selection
+autoscroll and word selection, stable tabs, terminal recovery controls,
+source COPR packages and a portable CLI/DEB lane. The dated v0.4.56 assessment
+below is historical; its unshipped-feature statements are not the current backlog.
+
+The independent 2026-11-08 audit was source-only. Physical input, multi-host
+clipboard/RDP, endurance, a real Proxmox host and controller-owned GTK sizing
+remain separate acceptance work. The RSA advisory remains unsuppressed.
+Development patch releases continue through the existing controller and gates;
+remaining milestone acceptance is not a release freeze. Each candidate needs
+its own exact-source receipts and publication checks.
+
+Future shortcut evaluation: consider a short second-digit window for Alt+11,
+Alt+22 and similar access beyond ten tabs, while ordinary Alt+3 acts immediately.
+The precise mapping and accidental-repeat behavior need evaluation before coding.
+
 ## Current source reconciliation — 2026-11-04
 
 Reviewed source: `338c53e40ae0ce12b530d8d64dc54eecd9638f58`. The tagged source baseline is

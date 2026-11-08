@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Preserve terminal colors and text attributes while scrolling or selecting live
+  history, using bounded style runs and visible-row rendering. Older engines and
+  previously plain recovery history remain compatible; reopen on the updated
+  engine for styled history.
+- Report failed COPR update queries explicitly, use enabled Fedora/Rawhide
+  dependency repositories, and refuse a parallel per-user install after Fedora
+  package errors. Document permanent COPR setup with a five-minute metadata cache
+  and safe default-engine replacement without automatic session termination.
+
 ## v0.4.72 — 2026-11-07 — Stable source release
 
 - Dispatch tab context-menu actions before popover cleanup, restoring Reconnect,

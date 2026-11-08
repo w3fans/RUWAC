@@ -68,6 +68,8 @@ jobs:
           "$RUNNER_TEMP/workflow-tools/actionlint" -shellcheck= -pyflakes=
       - name: Portable CLI package contract regressions
         run: python3 ruwac/tests/integration/test_portable_cli.py
+      - name: COPR error and Rawhide repository contracts
+        run: python3 ruwac/tests/integration/copr_update_contracts.py
       - name: Public source inventory
         run: python3 scripts/public-files.py --tracked
       - name: Typing measurement glyph and deadline regressions

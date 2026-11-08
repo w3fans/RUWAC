@@ -694,7 +694,7 @@ impl State {
                 json!({"name":"ruwac","implementation":"spike","package":env!("CARGO_PKG_VERSION"),"protocol":0}),
             ),
             "capabilities" => Ok(
-                json!({"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"render_cell_encodings":["palette-v1"],"job_metadata":true,"job_metadata_no_argv":true,"structured_agent_state":false,"recovery":self.store.is_some(),"primary_buffer_history":true,"extended_terminal_styles":true,"kitty_keyboard_input":false,"history_checkpoints":"private canonical active and hidden primary tail, 50000 lines or 512 KiB per pane; processes restore ended","desktop_clipboard":false,"primary":false,"graphics":false,"image_attachment":true,"image_attachment_adapters":["codex draft path"],"image_attachment_submits":false,"ssh_transport":"authenticated OpenSSH through CLI --host","shared_focus":false,"independent_client_focus":true,"non_sizing_viewer":1,"pane_divider_cells":true,"client_zoom":true,"atomic_paste":true,"max_paste_bytes":paste::MAX_BYTES,"pty_sizing":"minimum sizing-client dimensions and visible pane sizes; explicit non-sizing viewers never vote","split":"persistent horizontal/vertical tree, sixteen panes","capture_limit":2000,"capture_formats":["plain","ansi"],"ansi_capture_max_bytes":65536,"history_page_limit":500,"scrollback_default":50000,"max_text_bytes":ruwac_protocol::MAX_TEXT}),
+                json!({"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"render_cell_encodings":["palette-v1"],"job_metadata":true,"job_metadata_no_argv":true,"structured_agent_state":false,"recovery":self.store.is_some(),"primary_buffer_history":true,"extended_terminal_styles":true,"kitty_keyboard_input":false,"history_checkpoints":"private canonical active and hidden primary tail, 50000 lines or 512 KiB per pane; processes restore ended","desktop_clipboard":false,"primary":false,"graphics":false,"image_attachment":true,"image_attachment_adapters":["codex draft path"],"image_attachment_submits":false,"ssh_transport":"authenticated OpenSSH through CLI --host","shared_focus":false,"independent_client_focus":true,"non_sizing_viewer":1,"pane_divider_cells":true,"client_zoom":true,"atomic_paste":true,"max_paste_bytes":paste::MAX_BYTES,"pty_sizing":"minimum sizing-client dimensions and visible pane sizes; explicit non-sizing viewers never vote","split":"persistent horizontal/vertical tree, sixteen panes","capture_limit":2000,"capture_formats":["plain","ansi"],"ansi_capture_max_bytes":65536,"history_page_limit":500,"history_style_encoding":"runs-v1","scrollback_default":50000,"max_text_bytes":ruwac_protocol::MAX_TEXT}),
             ),
             "schema" => Ok(schema()),
             "describe" => Ok(
@@ -1030,7 +1030,24 @@ impl State {
                 }
                 let p = self.pane(v)?;
                 let pane = p.id.clone();
-                let data = if primary_buffer(v)? {
+                let styled = v
+                    .get("styles")
+                    .map(|v| {
+                        v.as_bool()
+                            .ok_or_else(|| Error::new("INVALID_PARAMS", "styles must be a boolean"))
+                    })
+                    .transpose()?
+                    .unwrap_or(false);
+                let data = if styled {
+                    p.term
+                        .freeze_styled_history(primary_buffer(v)?)
+                        .ok_or_else(|| {
+                            Error::new(
+                                "BUFFER_UNAVAILABLE",
+                                "Legacy checkpoint has no primary buffer",
+                            )
+                        })?
+                } else if primary_buffer(v)? {
                     p.term.freeze_primary_history().ok_or_else(|| {
                         Error::new(
                             "BUFFER_UNAVAILABLE",

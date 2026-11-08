@@ -60,6 +60,15 @@ try:
  position=[0.,0.];control('NotifyPointerMotionRelative',GLib.Variant('(dd)',(-10000.,-10000.)))
  def move(x,y):
   control('NotifyPointerMotionRelative',GLib.Variant('(dd)',(float(x)-position[0],float(y)-position[1])));position[:]=[float(x),float(y)];time.sleep(.08)
+ if a.plain_shell:
+  move(ox+20*cw,oy+8*ch)
+  control('NotifyPointerAxis',GLib.Variant('(ddu)',(0.,-90.,0)));control('NotifyPointerAxis',GLib.Variant('(ddu)',(0.,-90.,1)))
+  eventually(lambda:command(root,'history-viewport')['offset']>0)
+  scrolled=command(root,'history-viewport')
+  old_rows=[line for line in scrolled['cells'] if 'ROW' in ''.join(c[0] for c in line)]
+  assert old_rows and all(any(c[2]==2 for c in line)for line in old_rows),'WHEEL_SCROLLBACK_COLORS_LOST'
+  control('NotifyPointerAxis',GLib.Variant('(ddu)',(0.,10000.,0)));control('NotifyPointerAxis',GLib.Variant('(ddu)',(0.,10000.,1)))
+  eventually(lambda:command(root,'history-viewport')['offset']==0)
  if proxy is not None:
   if a.cancel_selection or a.truncate_history:
    # Wayland clipboard ownership needs a real input serial, not only a
@@ -153,6 +162,8 @@ try:
  after=command(root,'history-viewport');selected_after=command(root,'copy-state').get('selection','')
  control('NotifyPointerButton',GLib.Variant('(ib)',(272,False)));key(42,False)
  assert edge['offset']>0,edge
+ historical_rows=[row for row in edge['cells'] if 'ROW' in ''.join(c[0] for c in row)]
+ assert historical_rows and all(any(c[2]==2 for c in row) for row in historical_rows),'SCROLLBACK_COLORS_LOST'
  assert edge['offset']>info['grid_size'][1],(edge['offset'],info['grid_size']) # Soft-wrapped logical lines are not viewport rows.
  assert selected_after,'Wheel cleared the history-anchored selection'
  assert selected_before.rsplit('\n',1)[-1]==selected_after.rsplit('\n',1)[-1],'Selection anchor moved'

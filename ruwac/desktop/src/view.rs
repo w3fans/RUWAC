@@ -2335,6 +2335,9 @@ impl View {
                         let text = v["text"].as_str().unwrap_or("");
                         let height = seed["rows"].as_u64().unwrap_or(24) as usize;
                         self.history_lines.borrow_mut().freeze(text, &seed);
+                        self.history_lines
+                            .borrow_mut()
+                            .set_styles(text, &v["styles"]);
                         let frozen = self.history_lines.borrow_mut().grid(&seed, 0).0;
                         // A common anchor character (for example a space) is
                         // insufficient to bind a delayed snapshot to its starting
@@ -2372,6 +2375,9 @@ impl View {
                         self.history_lines
                             .borrow_mut()
                             .set(v["text"].as_str().unwrap_or(""));
+                        self.history_lines
+                            .borrow_mut()
+                            .set_styles(v["text"].as_str().unwrap_or(""), &v["styles"]);
                     }
                     let _ = self.grid();
                     if v["truncated"] == true {
