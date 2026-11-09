@@ -25,67 +25,259 @@ fn installed_cli(executable: &std::path::Path) -> Result<std::path::PathBuf, Str
     cli.canonicalize()
         .map_err(|_| "Installed RUWAC CLI unavailable; finish the package update first".into())
 }
-fn engine_command(
-    executable: &std::path::Path,
-    socket: &std::path::Path,
-) -> Result<std::process::Command, String> {
-    let cli = installed_cli(executable)?;
-    // engine gui derives the versioned sibling from this private directory.
-    // A neutral base also permits reopening an already selected versioned engine.
+/// Read-only machine/engine inventory from the installed CLI, off the GTK thread.
+fn engine_inventory(socket: &std::path::Path) -> Result<Value, String> {
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let cli = installed_cli(&executable)?;
     let base = socket
         .parent()
         .ok_or("Engine socket directory unavailable")?
         .join("control.sock");
-    let mut command = std::process::Command::new(cli);
-    command
+    let output = std::process::Command::new(cli)
         .arg("--socket")
-        .arg(base)
-        .args(["engine", "gui"])
+        .arg(&base)
+        .args(["engine", "status", "--json"])
+        .env_remove("RUWAC_SOCKET")
         .env_remove("RUWAC_STATE_FILE")
-        .env_remove("RUWAC_SOCKET");
-    Ok(command)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    let value: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| "Installed RUWAC CLI does not report engines yet; finish the package update".to_owned())?;
+    value["result"]["machine"]
+        .is_object()
+        .then(|| value["result"]["machine"].clone())
+        .ok_or_else(|| "Installed RUWAC CLI does not report engines yet; finish the package update".into())
 }
+fn run_cli(args: Vec<std::ffi::OsString>) -> Result<(), String> {
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let output = std::process::Command::new(installed_cli(&executable)?)
+        .args(args)
+        .env_remove("RUWAC_SOCKET")
+        .env_remove("RUWAC_STATE_FILE")
+        .output()
+        .map_err(|e| e.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let text = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(if text.is_empty() { "RUWAC CLI request failed".into() } else { text })
+    }
+}
+fn in_background<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+    done: impl FnOnce(T) + 'static,
+) {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    let mut done = Some(done);
+    glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
+        Ok(value) => {
+            if let Some(done) = done.take() {
+                done(value);
+            }
+            glib::ControlFlow::Break
+        }
+        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+        Err(_) => glib::ControlFlow::Break,
+    });
+}
+/// One view of installed package, GUI and every engine, with guarded actions.
 fn engine_controls(content: &gtk::Box, status: &gtk::Label, socket: &std::path::Path) {
     let detail = gtk::Label::new(Some(
-        "After installing an update, open a window on the installed engine version. Existing windows and terminal programs keep running on their current engine; sessions are not moved.",
+        "Package updates never stop running terminals. New sessions use an engine of the installed version; older engines keep their running programs until those end.",
     ));
     detail.set_wrap(true);
+    detail.set_xalign(0.0);
     content.append(&detail);
-    let button = gtk::Button::with_label("Open updated engine");
+    let list = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    list.set_widget_name("engine-list");
+    content.append(&list);
+    let button = gtk::Button::with_label("New window on installed engine");
     button.set_widget_name("update-engine");
     let socket = socket.to_path_buf();
     let weak_status = status.downgrade();
     button.connect_clicked(move |button| {
-        let launched = std::env::current_exe().map_err(|e|e.to_string())
-            .and_then(|exe| engine_command(&exe,&socket))
-            .and_then(|mut command|command.spawn().map_err(|e|e.to_string()));
-        let Some(status) = weak_status.upgrade() else {return};
+        // Same routing as `ruwac gui`: the installed engine, never by stopping work.
+        let launched = std::env::current_exe()
+            .map_err(|e| e.to_string())
+            .and_then(|exe| installed_cli(&exe))
+            .and_then(|cli| {
+                std::process::Command::new(cli)
+                    .args(["gui", "--new-instance"])
+                    .env_remove("RUWAC_SOCKET")
+                    .env_remove("RUWAC_STATE_FILE")
+                    .spawn()
+                    .map_err(|e| e.to_string())
+            });
+        let Some(status) = weak_status.upgrade() else { return };
         match launched {
-            Err(error) => status.set_text(&format!("Unable to open updated engine: {error}")),
+            Err(error) => status.set_text(&format!("Unable to open the installed engine: {error}")),
             Ok(mut child) => {
                 button.set_sensitive(false);
-                status.set_text("Starting updated engine window. Existing terminals remain open; check the engine version in the new window's footer.");
-                let (tx,rx)=mpsc::channel();
-                std::thread::spawn(move|| {let _=tx.send(child.wait());});
-                let status=status.downgrade();let button=button.downgrade();let mut polls=0;
-                glib::timeout_add_local(Duration::from_millis(200),move||{
-                    polls+=1;
-                    match rx.try_recv() {
-                        Ok(result) => {
-                            if !result.as_ref().is_ok_and(|exit|exit.success()) {
-                                if let Some(status)=status.upgrade(){status.set_text("Updated engine launch failed. Run ruwac engine gui in an external terminal for diagnostics; existing sessions remain open.");}
-                                if let Some(button)=button.upgrade(){button.set_sensitive(true);}
-                            }
-                            glib::ControlFlow::Break
-                        }
-                        Err(mpsc::TryRecvError::Empty) if polls<25 => glib::ControlFlow::Continue,
-                        _ => glib::ControlFlow::Break,
+                status.set_text("Opening a window on the installed engine. Existing terminals stay where they run.");
+                let button = button.downgrade();
+                in_background(move || child.wait(), move |_| {
+                    if let Some(button) = button.upgrade() {
+                        button.set_sensitive(true);
                     }
                 });
             }
         }
     });
     content.append(&button);
+    refresh_engines(&list, &socket);
+}
+fn refresh_engines(list: &gtk::Box, socket: &std::path::Path) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+    let pending = gtk::Label::new(Some("Reading engines…"));
+    pending.set_xalign(0.0);
+    list.append(&pending);
+    let weak = list.downgrade();
+    let own_socket = socket.to_path_buf();
+    let query = socket.to_path_buf();
+    in_background(move || engine_inventory(&query), move |result| {
+        let Some(list) = weak.upgrade() else { return };
+        while let Some(child) = list.first_child() {
+            list.remove(&child);
+        }
+        let machine = match result {
+            Ok(machine) => machine,
+            Err(error) => {
+                let label = gtk::Label::new(Some(&error));
+                label.set_wrap(true);
+                label.set_xalign(0.0);
+                list.append(&label);
+                return;
+            }
+        };
+        let header = gtk::Label::new(Some(&format!(
+            "Installed RPM {} · this window {}",
+            machine["installed_rpm"].as_str().unwrap_or("—"),
+            env!("CARGO_PKG_VERSION")
+        )));
+        header.set_xalign(0.0);
+        header.set_widget_name("engine-installed");
+        list.append(&header);
+        for engine in machine["engines"].as_array().cloned().unwrap_or_default() {
+            list.append(&engine_row(&list, &engine, &machine, &own_socket));
+        }
+        let summary = gtk::Label::new(machine["summary"].as_str());
+        summary.set_wrap(true);
+        summary.set_xalign(0.0);
+        summary.set_widget_name("engine-summary");
+        list.append(&summary);
+    });
+}
+fn engine_row(list: &gtk::Box, engine: &Value, machine: &Value, own: &std::path::Path) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let socket = std::path::PathBuf::from(engine["socket"].as_str().unwrap_or_default());
+    let version = engine["version"].as_str().unwrap_or("?").to_owned();
+    row.set_widget_name(&format!("engine-row-{version}"));
+    let route = engine["socket"] == machine["route_for_new_sessions"];
+    let live = engine["live_terminals"].as_u64().unwrap_or(0);
+    let clients = engine["attached_clients"].as_u64().unwrap_or(0);
+    let mut text = format!(
+        "Engine {version} · {} · {live} running, {} ended",
+        if route { "new sessions" } else { "preserved" },
+        engine["ended_terminals"].as_u64().unwrap_or(0)
+    );
+    if socket == own {
+        text.push_str(" · this window");
+    }
+    if engine["binary_replaced_on_disk"] == true {
+        text.push_str(" · updated on disk");
+    }
+    let label = gtk::Label::new(Some(&text));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_wrap(true);
+    row.append(&label);
+    if socket != own {
+        let open = gtk::Button::with_label("Open window");
+        open.set_widget_name(&format!("engine-open-{version}"));
+        let target = socket.clone();
+        open.connect_clicked(move |_| {
+            let _ = run_cli(vec![
+                "--socket".into(),
+                target.clone().into(),
+                "gui".into(),
+                "--new-instance".into(),
+            ]);
+        });
+        row.append(&open);
+    }
+    // Stopping is offered only when nothing runs; the engine re-decides atomically.
+    let stop = gtk::Button::with_label("Stop");
+    stop.set_widget_name(&format!("engine-stop-{version}"));
+    stop.set_sensitive(live == 0 && clients == 0 && socket != own);
+    stop.set_tooltip_text(Some(if live > 0 {
+        "Programs are running on this engine; it is never stopped while they run"
+    } else {
+        "Stop this idle engine; its ended history stays readable"
+    }));
+    let legacy_pid = (engine["safe_stop"] != true).then(|| engine["pid"].as_u64()).flatten();
+    let weak_list = list.downgrade();
+    let target = socket.clone();
+    let own = own.to_path_buf();
+    stop.connect_clicked(move |stop| {
+        let mut args: Vec<std::ffi::OsString> =
+            vec!["--socket".into(), target.clone().into(), "engine".into(), "stop".into()];
+        if let Some(pid) = legacy_pid {
+            // Older engines lack the atomic check: the CLI re-checks and needs the PID.
+            args.extend(["--legacy-confirm".into(), pid.to_string().into()]);
+        }
+        stop.set_sensitive(false);
+        let weak_list = weak_list.clone();
+        let own = own.clone();
+        in_background(move || run_cli(args), move |result| {
+            if let Some(list) = weak_list.upgrade() {
+                if let Err(error) = result {
+                    let label = gtk::Label::new(Some(&error));
+                    label.set_wrap(true);
+                    list.append(&label);
+                } else {
+                    refresh_engines(&list, &own);
+                }
+            }
+        });
+    });
+    row.append(&stop);
+    row
+}
+
+/// Flag the Updates button when this window's engine is not the installed
+/// version or older engines still hold terminals. Read-only, once at startup.
+fn flag_engine_state(button: &gtk::Button, socket: &std::path::Path) {
+    let weak = button.downgrade();
+    let query = socket.to_path_buf();
+    let own = socket.to_path_buf();
+    in_background(move || engine_inventory(&query), move |result| {
+        let (Some(button), Ok(machine)) = (weak.upgrade(), result) else { return };
+        let engines = machine["engines"].as_array().cloned().unwrap_or_default();
+        let mine = engines.iter().find(|e| e["socket"] == serde_json::json!(own));
+        let outdated = mine.is_some_and(|e| e["version"] != env!("CARGO_PKG_VERSION"));
+        let preserved = engines
+            .iter()
+            .filter(|e| e["socket"] != machine["route_for_new_sessions"] && e["live_terminals"].as_u64().unwrap_or(0) > 0)
+            .count();
+        if outdated || preserved > 0 {
+            button.add_css_class("accent");
+            button.set_tooltip_text(Some(&if outdated {
+                format!(
+                    "This window uses engine {}; new sessions can use the installed engine {}. Click for details.",
+                    mine.and_then(|e| e["version"].as_str()).unwrap_or("?"),
+                    env!("CARGO_PKG_VERSION")
+                )
+            } else {
+                format!("{preserved} older engine(s) still run terminals. Click for details.")
+            }));
+        }
+    });
 }
 
 fn request(args: &[&str]) -> Result<Value, String> {
@@ -191,6 +383,7 @@ pub fn attach(
     button.set_widget_name("ruwac-updates");
     button.set_tooltip_text(Some("Check GitHub for RUWAC updates"));
     header.pack_end(&button);
+    flag_engine_state(&button, socket);
     if std::env::current_exe().is_ok_and(|exe| ruwac_protocol::distribution_installation(&exe)) {
         // Distribution packages never contact GitHub or start RUWAC's updater.
         button.set_tooltip_text(Some(ruwac_protocol::DISTRIBUTION_UPDATE_HINT));
@@ -604,30 +797,10 @@ mod engine_tests {
         std::fs::write(old.join("ruwac"), "old").unwrap();
         std::fs::write(new.join("ruwac"), "new").unwrap();
         std::os::unix::fs::symlink("releases/new", root.join("lib/ruwac/current")).unwrap();
-        let command =
-            engine_command(&old.join("ruwac-desktop"), &root.join("engine-0.4.73.sock")).unwrap();
-        assert_eq!(command.get_program(), new.join("ruwac"));
-        assert_eq!(
-            command.get_args().collect::<Vec<_>>(),
-            vec![
-                std::ffi::OsStr::new("--socket"),
-                root.join("control.sock").as_os_str(),
-                std::ffi::OsStr::new("engine"),
-                std::ffi::OsStr::new("gui")
-            ]
-        );
-        assert!(
-            command
-                .get_envs()
-                .any(|(key, value)| key == "RUWAC_STATE_FILE" && value.is_none())
-        );
-        assert!(
-            command
-                .get_envs()
-                .any(|(key, value)| key == "RUWAC_SOCKET" && value.is_none())
-        );
-        assert_eq!(std::fs::read_to_string(old.join("ruwac")).unwrap(), "old");
-        std::fs::remove_dir_all(root).unwrap();
+        // The installed CLI, never the old immutable release that started this GUI.
+        let cli = installed_cli(&old.join("ruwac-desktop")).unwrap();
+        assert_eq!(cli, new.join("ruwac").canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&root);
     }
     #[test]
     fn missing_installed_cli_never_falls_back_to_path() {

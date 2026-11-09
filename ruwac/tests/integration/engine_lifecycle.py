@@ -168,7 +168,23 @@ try:
     listing = json.loads(cli(env, '-ls', '--json').stdout)['result']
     check('session list spans both engines with labels', {(r['name'], r['engine']) for r in listing}
           >= {('kept', version(older)), ('fresh', own)})
+    # A GUI API socket beside the engines must never receive engine requests.
+    gui_sock = sock.parent / f'engine-{own}.gui.sock'
+    trap = sk.socket(sk.AF_UNIX)
+    trap.bind(str(gui_sock))
+    os.chmod(gui_sock, 0o600)
+    trap.listen(4)
+    trap.settimeout(0.2)
     status = json.loads(cli(env, 'engine', 'status', '--json').stdout)['result']
+    try:
+        trap.accept()
+        contacted = True
+    except OSError:
+        contacted = False
+    trap.close()
+    gui_sock.unlink()
+    check('inventory never contacts GUI API sockets', not contacted
+          and all(not e['socket'].endswith('.gui.sock') for e in status['machine']['engines']))
     machine = status['machine']
     versions = {e['version']: e for e in machine['engines']}
     check('status inventories every engine with live counts', set(versions) == {version(older), own}

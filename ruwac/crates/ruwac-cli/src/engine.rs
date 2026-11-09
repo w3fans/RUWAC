@@ -280,7 +280,10 @@ fn engine_sockets(directory: &Path) -> Vec<std::path::PathBuf> {
         .map(|e| e.path())
         .filter(|p| {
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            (name == "control.sock" || (name.starts_with("engine-") && name.ends_with(".sock")))
+            // GUI API sockets (*.gui.sock) live beside engines and must never
+            // receive engine requests.
+            (name == "control.sock"
+                || (name.starts_with("engine-") && name.ends_with(".sock") && !name.ends_with(".gui.sock")))
                 && fs::symlink_metadata(p).is_ok_and(|m| {
                     m.file_type().is_socket()
                         && m.uid() == unsafe { libc::geteuid() }
