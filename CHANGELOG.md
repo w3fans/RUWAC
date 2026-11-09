@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Upgrades now reach new work without stopping anything. After a package
+  update, a new terminal, `ruwac -S NAME`, `ruwac start` or the GUI uses an
+  engine of the installed version: an older engine that is completely idle (no
+  running program, no attached window) is retired safely and replaced on the
+  default socket, keeping its ended history readable; an older engine that still
+  runs programs is preserved untouched and the installed engine starts beside it.
+  Existing named sessions are still found and attached wherever they live, and
+  `ruwac -ls` lists sessions of every engine, labelled by engine version.
+- New `daemon.stopIfIdle` request and `ruwac engine stop`: stop an engine only
+  if it runs no program and no other client is attached, decided atomically by
+  the engine, so a terminal can never be ended by a lifecycle action. Engines
+  from before this release are never stopped automatically; stopping one
+  explicitly requires naming its PID and re-checks for running programs.
+  `daemon.stop` remains the explicit, destructive stop.
+- `ruwac engine show` summarizes the installed RPM, this CLI, every running
+  engine (version, live/ended terminals, clients, PID, whether its binary was
+  updated on disk) and GUI, and which engine new sessions use;
+  `ruwac engine status --json` adds the same under `machine`, keeping the
+  original fields. Engine `health` reports live and ended terminals and the PID.
 ## v0.4.73 — 2026-11-08 — Stable source release
 
 - Keep a tab-menu parent alive until popover cleanup completes, preventing a

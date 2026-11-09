@@ -354,6 +354,29 @@ fn job_request(args: &[String]) -> io::Result<Request> {
 }
 
 // Exact identities take precedence; duplicate names never select an arbitrary session.
+/// The engine that already holds this exact session name or ID, searching the
+/// new-session route first. Read-only; unreachable engines are skipped.
+fn find_session(default: &std::path::Path, name: Option<&str>) -> Option<std::path::PathBuf> {
+    let name = name?;
+    engine::lookup_order(default).into_iter().find(|socket| {
+        startup::connect(socket).is_ok()
+            && rpc_quiet(socket, &request("session.list", json!({})))
+                .ok()
+                .and_then(|list| named_session_id(&list, name).ok().flatten())
+                .is_some()
+    })
+}
+fn rpc_quiet(socket: &std::path::Path, r: &Request) -> io::Result<Value> {
+    let mut s = startup::connect(socket)?;
+    s.set_read_timeout(Some(Duration::from_secs(5)))?;
+    s.set_write_timeout(Some(Duration::from_secs(5)))?;
+    write_frame(&mut s, r)?;
+    let v = read_frame(&mut s)?;
+    if v["version"] != 0 || v["id"] != r.id || v.get("error").is_some() {
+        return Err(io::Error::other("request failed"));
+    }
+    Ok(v)
+}
 fn named_session_id(reply: &Value, name: &str) -> io::Result<Option<String>> {
     let sessions = reply["result"]
         .as_array()
@@ -483,6 +506,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         return Ok(());
     }
+    // The implicit per-user default routes between engines (engine.rs). An
+    // explicit --socket, RUWAC_SOCKET (set inside every pane) or --host stays literal.
+    let implicit =
+        explicit_socket.is_none() && std::env::var_os("RUWAC_SOCKET").is_none() && host.is_none();
     let remote = host.map(|host| remote::Remote {
         host,
         binary: remote_binary.unwrap_or_else(|| "ruwac".into()),
@@ -563,6 +590,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .into(),
             ),
             _ => (),
+        }
+    }
+    let mut listing_engines = Vec::new();
+    if implicit {
+        let default = socket.clone();
+        let named = a.get(1).filter(|_| a.len() >= 2).map(String::as_str);
+        match a.first().map(String::as_str) {
+            // Existing named sessions are attached where they live; only a
+            // genuinely new session goes to the installed engine.
+            Some("-S" | "-R" | "-dmS") if a.len() == 2 => {
+                socket = match find_session(&default, named) {
+                    Some(found) => found,
+                    None => engine::route_for_new_work(&default)?,
+                };
+            }
+            Some("-S" | "-r" | "-x" | "-R") => {
+                socket = find_session(&default, named)
+                    .unwrap_or_else(|| engine::current_route(&default));
+            }
+            Some("start" | "gui") => socket = engine::route_for_new_work(&default)?,
+            Some("session") if a.get(1).map(String::as_str) == Some("create") => {
+                socket = engine::route_for_new_work(&default)?
+            }
+            Some("-ls" | "-list") => listing_engines = engine::lookup_order(&default),
+            Some("engine" | "serve" | "-wipe" | "wipe") | None => (),
+            _ => socket = engine::current_route(&default),
         }
     }
     let call = |request: &Request| match &remote {
@@ -655,7 +708,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             use std::os::unix::process::CommandExt;
             let args: Vec<_> = a[1..].iter().map(String::as_str).collect();
             let result = match args.as_slice() {
-                ["status"] | ["status", "--json"] => engine::status(&socket)?,
+                ["status"] | ["status", "--json"] => {
+                    // Original single-engine fields stay top-level for existing tooling.
+                    let mut report = engine::status(&socket)?;
+                    report["machine"] = engine::inventory(&socket)?;
+                    report
+                }
+                ["show"] => {
+                    println!("{}", engine::human(&engine::inventory(&socket)?));
+                    return Ok(());
+                }
+                ["stop"] | ["stop", "--json"] => engine::stop(&socket, None)?,
+                ["stop", "--legacy-confirm", pid] => engine::stop(
+                    &socket,
+                    Some(pid.parse().map_err(|_| "--legacy-confirm takes the engine PID")?),
+                )?,
                 ["new"] | ["new", "--json"] => engine::start_separate(&socket)?,
                 ["gui"] => {
                     let entry = gui_entry()?;
@@ -679,7 +746,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .exec()
                         .into());
                 }
-                _ => return Err("usage: ruwac engine status|new [--json] | engine gui".into()),
+                _ => return Err("usage: ruwac engine show | engine status|new|stop [--json] | engine gui | engine stop --legacy-confirm PID".into()),
             };
             println!("{}", json!({"version":0,"result":result}));
         }
@@ -727,6 +794,56 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("-ls" | "-list") => {
             if a.len() > 2 || (a.len() == 2 && a[1] != "--json") {
                 return Err("usage: ruwac -ls [--json]".into());
+            }
+            if listing_engines.len() > 1 {
+                // Sessions of every running engine, each labelled with its engine.
+                let mut sections = Vec::new();
+                let mut all = Vec::new();
+                for engine_socket in &listing_engines {
+                    let Some(version) = rpc_quiet(engine_socket, &request("version", json!({})))
+                        .ok()
+                        .and_then(|v| v["result"]["package"].as_str().map(str::to_owned))
+                    else {
+                        continue;
+                    };
+                    let mut reply = rpc_quiet(engine_socket, &request("session.list", json!({})))?;
+                    if let Some(rows) = reply["result"].as_array_mut() {
+                        for row in rows.iter_mut() {
+                            let panes = rpc_quiet(
+                                engine_socket,
+                                &request("pane.list", json!({"session":row["id"]})),
+                            )?;
+                            row["ended"] = json!(panes["result"].as_array().is_some_and(|ps| {
+                                ps.iter()
+                                    .all(|p| p["ended"] == true || p["restored"] == true)
+                            }));
+                            row["engine"] = json!(version);
+                            row["engine_socket"] = json!(engine_socket);
+                            all.push(row.clone());
+                        }
+                    }
+                    if reply["result"].as_array().is_some_and(|r| !r.is_empty()) {
+                        sections.push((version, engine_socket.clone(), reply));
+                    }
+                }
+                if a.len() == 2 {
+                    println!("{}", json!({"version":0,"result":all}));
+                } else if sections.len() <= 1 {
+                    let reply = sections.pop().map(|s| s.2).unwrap_or(json!({"result":[]}));
+                    println!("{}", session_listing(&reply)?);
+                } else {
+                    let route = engine::current_route(&socket);
+                    for (version, engine_socket, reply) in sections {
+                        let role = if engine_socket == route {
+                            "new sessions"
+                        } else {
+                            "preserved"
+                        };
+                        println!("Engine {version} ({role}) · {}", engine_socket.display());
+                        println!("{}\n", session_listing(&reply)?);
+                    }
+                }
+                return Ok(());
             }
             let mut reply = call(&request("session.list", json!({})))?;
             if a.len() == 2 {

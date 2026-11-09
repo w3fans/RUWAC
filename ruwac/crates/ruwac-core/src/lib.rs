@@ -172,13 +172,26 @@ pub fn start_with_store(store: Option<Store>) -> std::io::Result<Handle> {
             };
             match m {
                 Message::Call(r, c, reply) => {
-                    let answer = if matches!(r.method.as_str(), "daemon.checkpoint" | "daemon.stop")
-                        && r.version == 0
+                    let control = r.version == 0
                         && (r.params.is_object() || r.params.is_null())
-                        && r.idempotency_key.is_none()
+                        && r.idempotency_key.is_none();
+                    // Safe retirement is decided inside this serialized actor, so no
+                    // session/window/pane creation can interleave with the check.
+                    let busy = (r.method == "daemon.stopIfIdle" && control)
+                        .then(|| s.busy_for_stop(&c))
+                        .flatten();
+                    let answer = if let Some(busy) = busy {
+                        Err(busy)
+                    } else if matches!(
+                        r.method.as_str(),
+                        "daemon.checkpoint" | "daemon.stop" | "daemon.stopIfIdle"
+                    ) && control
                     {
+                        let ended = s.panes.len();
                         match s.checkpoint().await {
-                            Ok(()) => Ok(if r.method == "daemon.stop" {
+                            Ok(()) => Ok(if r.method == "daemon.stopIfIdle" {
+                                json!({"stopped":true,"live_panes":0,"ended_panes":ended,"attached_clients":0,"checkpoint_revision":s.checkpoint_revision})
+                            } else if r.method == "daemon.stop" {
                                 json!({"stopped":true})
                             } else {
                                 json!({"checkpointed":true,"revision":s.checkpoint_revision})
@@ -188,7 +201,8 @@ pub fn start_with_store(store: Option<Store>) -> std::io::Result<Handle> {
                     } else {
                         s.call(&r, &c)
                     };
-                    let stop = r.method == "daemon.stop" && answer.is_ok();
+                    let stop = matches!(r.method.as_str(), "daemon.stop" | "daemon.stopIfIdle")
+                        && answer.is_ok();
                     let _ = reply.send(answer);
                     if !matches!(
                         r.method.as_str(),
@@ -350,6 +364,7 @@ impl State {
                     | "pane.history.freeze"
                     | "pane.history.release"
                     | "daemon.stop"
+                    | "daemon.stopIfIdle"
                     | "daemon.checkpoint"
             ) || (r.method == "pane.history" && r.params.get("snapshot").is_some())
             {
@@ -688,19 +703,19 @@ impl State {
     fn dispatch(&mut self, m: &str, v: &Value, client: &str) -> Result<Value> {
         match m {
             "health" => Ok(
-                json!({"ok":true,"panes":self.panes.len(),"clients":self.clients.len(),"revision":self.revision,"history_snapshots":self.histories.len(),"history_snapshot_text_bytes":self.histories.values().map(|p|p.data.bytes).sum::<usize>(),"persistence":{"enabled":self.store.is_some(),"checkpoint_revision":self.checkpoint_revision,"pending":self.checkpoint_pending,"error":self.checkpoint_error,"interval_ms":2000}}),
+                json!({"ok":true,"pid":std::process::id(),"panes":self.panes.len(),"live_panes":self.live_panes(),"ended_panes":self.panes.len()-self.live_panes(),"clients":self.clients.len(),"safe_stop":true,"revision":self.revision,"history_snapshots":self.histories.len(),"history_snapshot_text_bytes":self.histories.values().map(|p|p.data.bytes).sum::<usize>(),"persistence":{"enabled":self.store.is_some(),"checkpoint_revision":self.checkpoint_revision,"pending":self.checkpoint_pending,"error":self.checkpoint_error,"interval_ms":2000}}),
             ),
             "version" => Ok(
                 json!({"name":"ruwac","implementation":"spike","package":env!("CARGO_PKG_VERSION"),"protocol":0}),
             ),
             "capabilities" => Ok(
-                json!({"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"render_cell_encodings":["palette-v1"],"job_metadata":true,"job_metadata_no_argv":true,"structured_agent_state":false,"recovery":self.store.is_some(),"primary_buffer_history":true,"extended_terminal_styles":true,"kitty_keyboard_input":false,"history_checkpoints":"private canonical active and hidden primary tail, 50000 lines or 512 KiB per pane; processes restore ended","desktop_clipboard":false,"primary":false,"graphics":false,"image_attachment":true,"image_attachment_adapters":["codex draft path"],"image_attachment_submits":false,"ssh_transport":"authenticated OpenSSH through CLI --host","shared_focus":false,"independent_client_focus":true,"non_sizing_viewer":1,"pane_divider_cells":true,"client_zoom":true,"atomic_paste":true,"max_paste_bytes":paste::MAX_BYTES,"pty_sizing":"minimum sizing-client dimensions and visible pane sizes; explicit non-sizing viewers never vote","split":"persistent horizontal/vertical tree, sixteen panes","capture_limit":2000,"capture_formats":["plain","ansi"],"ansi_capture_max_bytes":65536,"history_page_limit":500,"history_style_encoding":"runs-v1","scrollback_default":50000,"max_text_bytes":ruwac_protocol::MAX_TEXT}),
+                json!({"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"render_cell_encodings":["palette-v1"],"job_metadata":true,"job_metadata_no_argv":true,"structured_agent_state":false,"recovery":self.store.is_some(),"primary_buffer_history":true,"extended_terminal_styles":true,"kitty_keyboard_input":false,"history_checkpoints":"private canonical active and hidden primary tail, 50000 lines or 512 KiB per pane; processes restore ended","desktop_clipboard":false,"primary":false,"graphics":false,"image_attachment":true,"image_attachment_adapters":["codex draft path"],"image_attachment_submits":false,"ssh_transport":"authenticated OpenSSH through CLI --host","shared_focus":false,"independent_client_focus":true,"non_sizing_viewer":1,"pane_divider_cells":true,"client_zoom":true,"atomic_paste":true,"safe_stop":"daemon.stopIfIdle","max_paste_bytes":paste::MAX_BYTES,"pty_sizing":"minimum sizing-client dimensions and visible pane sizes; explicit non-sizing viewers never vote","split":"persistent horizontal/vertical tree, sixteen panes","capture_limit":2000,"capture_formats":["plain","ansi"],"ansi_capture_max_bytes":65536,"history_page_limit":500,"history_style_encoding":"runs-v1","scrollback_default":50000,"max_text_bytes":ruwac_protocol::MAX_TEXT}),
             ),
             "schema" => Ok(schema()),
             "describe" => Ok(
                 json!({"protocol":0,"native_describe":true,"schema":schema(),"capabilities":self.dispatch("capabilities",v,client)?,"version":self.dispatch("version",v,client)?,"transport":{"local":"same-UID authenticated Unix socket","remote":"OpenSSH --host, explicit targets, verified host key","gui":"independent optional service; not owned by the headless daemon"}}),
             ),
-            "daemon.stop" | "daemon.checkpoint" => Err(Error::new(
+            "daemon.stop" | "daemon.stopIfIdle" | "daemon.checkpoint" => Err(Error::new(
                 "INVALID_PARAMS",
                 "checkpoint/stop do not accept idempotency keys",
             )),
@@ -1493,7 +1508,7 @@ impl State {
     }
 }
 pub fn schema() -> Value {
-    json!({"protocol":0,"framing":"u32 big-endian byte length + UTF-8 JSON","max_frame_bytes":ruwac_protocol::MAX_FRAME,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"methods":["job.list","job.query","agent.probe","health","version","capabilities","schema","describe","session.create","session.list","session.attach","session.detach","window.create","window.list","window.rename","window.select","window.cycle","window.previous","pane.create","pane.layout","pane.history","pane.history.freeze","pane.history.release","pane.close","pane.list","pane.select","pane.attachImage","pane.sendText","pane.sendKey","pane.capture","pane.wait","pane.selection","pane.selectionReply","buffer.set","buffer.get","buffer.paste","client.resize","client.render","client.input","client.paste","events.subscribe","daemon.checkpoint","daemon.stop"],"targets":{"session":"session_ + 32 hex","window":"window_ + 32 hex","pane":"pane_ + 32 hex"},"request":{"version":0,"id":"JSON request correlation value","method":"method name","params":"object","idempotency_key":"optional 1..128 byte daemon-lifetime key"}})
+    json!({"protocol":0,"framing":"u32 big-endian byte length + UTF-8 JSON","max_frame_bytes":ruwac_protocol::MAX_FRAME,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"methods":["job.list","job.query","agent.probe","health","version","capabilities","schema","describe","session.create","session.list","session.attach","session.detach","window.create","window.list","window.rename","window.select","window.cycle","window.previous","pane.create","pane.layout","pane.history","pane.history.freeze","pane.history.release","pane.close","pane.list","pane.select","pane.attachImage","pane.sendText","pane.sendKey","pane.capture","pane.wait","pane.selection","pane.selectionReply","buffer.set","buffer.get","buffer.paste","client.resize","client.render","client.input","client.paste","events.subscribe","daemon.checkpoint","daemon.stop","daemon.stopIfIdle"],"targets":{"session":"session_ + 32 hex","window":"window_ + 32 hex","pane":"pane_ + 32 hex"},"request":{"version":0,"id":"JSON request correlation value","method":"method name","params":"object","idempotency_key":"optional 1..128 byte daemon-lifetime key"}})
 }
 
 fn primary_buffer(v: &Value) -> std::result::Result<bool, Error> {
@@ -1505,5 +1520,29 @@ fn primary_buffer(v: &Value) -> std::result::Result<bool, Error> {
             "INVALID_PARAMS",
             "buffer must be active or primary",
         )),
+    }
+}
+
+impl State {
+    /// A pane is live while it owns a PTY whose exit has not been processed.
+    fn live_panes(&self) -> usize {
+        self.panes
+            .values()
+            .filter(|p| !p.ended && p.pty.is_some())
+            .count()
+    }
+    /// Why `daemon.stopIfIdle` must refuse, if it must. Live PTYs always block
+    /// retirement; so does any attached client other than the requester.
+    fn busy_for_stop(&self, caller: &str) -> Option<Error> {
+        let live = self.live_panes();
+        let attached = self.clients.keys().filter(|c| c.as_str() != caller).count();
+        (live > 0 || attached > 0).then(|| {
+            Error::new(
+                "ENGINE_BUSY",
+                &format!(
+                    "engine not stopped: {live} live terminal(s), {attached} attached client(s)"
+                ),
+            )
+        })
     }
 }
