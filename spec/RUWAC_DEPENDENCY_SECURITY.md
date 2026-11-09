@@ -1,5 +1,24 @@
 # RUWAC dependency security assessment
 
+RSA advisory update (2026-11-09): RustSec now marks
+[RUSTSEC-2023-0071](https://github.com/rustsec/advisory-db/blob/main/crates/rsa/RUSTSEC-2023-0071.md)
+patched in stable `rsa >= 0.10.0` (published 2026-11-08). RUWAC's desktop lockfile
+still resolves `rsa 0.10.0-rc.18`, so the desktop graph remains affected and the
+advisory job stays nonzero. It cannot be moved yet without patching cryptography
+locally: every crate that pulls it in pins the release candidate exactly
+(`rsa = "=0.10.0-rc.18"`), including the newest published versions checked on
+2026-11-09 — `picky` 7.0.0-rc.25…rc.29, `sspi` 0.21.3…0.23.1 and `winscard`
+0.3.3…0.4.1. IronRDP's newest `ironrdp-connector` (0.12.0) depends on that same
+stack. Path: `rsa` ← `picky`/`sspi`/`winscard` ← `ironrdp-connector` ← desktop
+only; the headless CLI/engine graph has no `rsa`. The advisory concerns timing
+during RSA private-key operations; RUWAC's password/CredSSP RDP client
+configures no client private key or smart card, which narrows but does not prove
+away reachability. Remediation: move to `picky`/`sspi`/`winscard` releases that
+require `rsa 0.10.0` once published (and the matching IronRDP), then rebuild,
+re-scan unsuppressed, and repeat loopback CredSSP/TLS plus real Windows/Fedora RDP
+acceptance before claiming the advisory resolved. No `[patch]` override or
+suppression is used.
+
 Release qualification update (2026-10-24): a fresh unsuppressed scan discovered
 [RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387.html)
 in crypto-bigint 0.7.5. The pending release now locks crypto-bigint 0.7.6 and
