@@ -283,7 +283,9 @@ fn engine_sockets(directory: &Path) -> Vec<std::path::PathBuf> {
             // GUI API sockets (*.gui.sock) live beside engines and must never
             // receive engine requests.
             (name == "control.sock"
-                || (name.starts_with("engine-") && name.ends_with(".sock") && !name.ends_with(".gui.sock")))
+                || (name.starts_with("engine-")
+                    && name.ends_with(".sock")
+                    && !name.ends_with(".gui.sock")))
                 && fs::symlink_metadata(p).is_ok_and(|m| {
                     m.file_type().is_socket()
                         && m.uid() == unsafe { libc::geteuid() }
@@ -603,4 +605,105 @@ pub fn human(machine: &Value) -> String {
     }
     out.push_str(&format!("  {}", text(&machine["summary"])));
     out
+}
+
+/// Package-update status (fleet timer) plus whether engines still run an older
+/// version than the installed package. Read-only; works without a GUI.
+pub fn update_status(default: &Path) -> Value {
+    let path = std::env::var_os("RUWAC_PKGUPDATE_STATUS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| "/var/lib/ruwac/package-update.json".into());
+    let last = fs::read(&path)
+        .ok()
+        .filter(|b| b.len() < 16 * 1024)
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .unwrap_or(Value::Null);
+    let timer = std::process::Command::new("systemctl")
+        .args([
+            "show",
+            "--property=UnitFileState,ActiveState,NextElapseUSecRealtime,LastTriggerUSec",
+            "ruwac-package-update.timer",
+        ])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|l| l.split_once('='))
+                .map(|(k, v)| (k.to_owned(), json!(v)))
+                .collect::<serde_json::Map<_, _>>()
+        })
+        .map_or(Value::Null, Value::Object);
+    let ring = fs::read_to_string("/etc/ruwac/update.conf")
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find_map(|l| l.strip_prefix("RING=").map(str::to_owned))
+        });
+    let installed = installed_rpm();
+    let installed_version = installed
+        .as_str()
+        .and_then(|v| v.split('-').next())
+        .map(str::to_owned);
+    let engines = inventory(default)
+        .map(|m| m["engines"].clone())
+        .unwrap_or(json!([]));
+    let older = engines
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| installed_version.as_deref().is_some_and(|v| e["version"] != json!(v)))
+        .map(|e| json!({"version":e["version"],"live_terminals":e["live_terminals"],"socket":e["socket"]}))
+        .collect::<Vec<_>>();
+    json!({
+        "installed_rpm":installed,
+        "automatic":timer["UnitFileState"] == "enabled",
+        "ring":ring,
+        "timer":timer,
+        "last":last,
+        "engines_on_older_version":older,
+    })
+}
+
+pub fn update_human(report: &Value) -> String {
+    let text = |v: &Value| v.as_str().map_or("—".to_owned(), str::to_owned);
+    let mut out = format!("Installed RPM      {}\n", text(&report["installed_rpm"]));
+    out.push_str(&format!(
+        "Automatic updates  {}{}\n",
+        if report["automatic"] == true {
+            "enabled"
+        } else {
+            "not enabled (run /usr/libexec/ruwac/fleet-setup)"
+        },
+        report["ring"]
+            .as_str()
+            .map_or(String::new(), |r| format!(" · {r} ring"))
+    ));
+    if let Some(next) = report["timer"]["NextElapseUSecRealtime"]
+        .as_str()
+        .filter(|n| !n.is_empty())
+    {
+        out.push_str(&format!("Next check         {next}\n"));
+    }
+    if report["last"].is_object() {
+        out.push_str(&format!(
+            "Last check         {} · {} · {}\n",
+            text(&report["last"]["checked_at"]),
+            text(&report["last"]["result"]),
+            text(&report["last"]["detail"])
+        ));
+    }
+    for e in report["engines_on_older_version"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        out.push_str(&format!(
+            "Engine {} still serves {} running terminal(s); new sessions use the installed version.\n",
+            text(&e["version"]),
+            e["live_terminals"]
+        ));
+    }
+    out.trim_end().to_owned()
 }

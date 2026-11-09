@@ -99,6 +99,7 @@ jobs:
           python3 ruwac/tests/integration/test_bundle_updates.py
           python3 ruwac/tests/integration/test_update_provenance.py
           python3 ruwac/tests/integration/test_rpm_updates.py
+          python3 ruwac/tests/integration/test_package_update.py
       - name: Opt-in agent installer contracts
         run: python3 ruwac/tests/integration/test_agent_bootstrap.py
       - name: Fail-closed local GDM recognition fixtures

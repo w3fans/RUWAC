@@ -16,6 +16,16 @@
   from before this release are never stopped automatically; stopping one
   explicitly requires naming its PID and re-checks for running programs.
   `daemon.stop` remains the explicit, destructive stop.
+- Fedora machines can be set up once and then update RUWAC on their own:
+  `/usr/libexec/ruwac/fleet-setup --ring canary|standard|disabled` (also
+  runnable over SSH before installation) enables exactly the RUWAC COPR with
+  five-minute metadata, installs the CLI (and the desktop only on graphical
+  machines) and enables a package-only update timer with a per-machine spread.
+  Re-running it changes nothing. The timer updates only the installed RUWAC
+  packages, defers while an offline system update is queued, never touches
+  running engines or terminals, and `ruwac update status` shows the result.
+  Remote agent launches on such machines no longer run a DNF check first, so
+  they never wait for the network or a sudo prompt.
 - `ruwac engine show` summarizes the installed RPM, this CLI, every running
   engine (version, live/ended terminals, clients, PID, whether its binary was
   updated on disk) and GUI, and which engine new sessions use;

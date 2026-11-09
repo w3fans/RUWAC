@@ -1,0 +1,107 @@
+#!/bin/bash
+# RUWAC package-only updater (root, run by ruwac-package-update.service).
+#
+# Updates only the installed ruwac / ruwac-desktop packages from the RUWAC
+# COPR repository. It never upgrades other packages, never restarts or stops a
+# user's RUWAC engine (running terminals keep their engine; new sessions pick
+# up the installed version), and defers while an offline system update is
+# queued so a prepared GNOME Software / dnf offline transaction is not
+# invalidated. Result: a sanitized JSON status file (no hosts, users or URLs).
+set -u
+umask 022
+
+conf=${RUWAC_PKGUPDATE_CONF:-/etc/ruwac/update.conf}
+status_file=${RUWAC_PKGUPDATE_STATUS:-/var/lib/ruwac/package-update.json}
+lock_file=${RUWAC_PKGUPDATE_LOCK:-/run/ruwac-package-update.lock}
+offline_marker=${RUWAC_PKGUPDATE_OFFLINE_MARKER:-/system-update}
+os_release=${RUWAC_PKGUPDATE_OS_RELEASE:-/etc/os-release}
+repo=copr:copr.fedorainfracloud.org:zvegelj:ruwac
+
+ring=standard
+if [ -r "$conf" ]; then
+    value=$(sed -n 's/^RING=\([a-z]*\)$/\1/p' "$conf" | tail -n1)
+    [ -n "$value" ] && ring=$value
+fi
+
+json_escape() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; }
+
+write_status() {
+    # result installed available detail
+    local dir tmp
+    dir=$(dirname "$status_file")
+    mkdir -p "$dir"
+    tmp=$(mktemp "$dir/.package-update.XXXXXX") || return 1
+    {
+        printf '{"version":1,"checked_at":"%s","ring":"%s","result":"%s",' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ring" "$1"
+        printf '"installed":%s,"available":%s,"detail":%s}\n' \
+            "$(json_escape "$2")" "$(json_escape "$3")" "$(json_escape "$4")"
+    } > "$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$status_file"
+}
+
+installed_version() { rpm -q --qf '%{VERSION}-%{RELEASE}' ruwac 2>/dev/null || true; }
+
+exec 9>"$lock_file" || exit 1
+if ! flock -n 9; then
+    echo "Another RUWAC package update is running." >&2
+    exit 0
+fi
+
+before=$(installed_version)
+case "$ring" in
+    disabled)
+        write_status disabled "$before" "" "Automatic RUWAC package updates are disabled."
+        exit 0 ;;
+    canary|standard) ;;
+    *)
+        write_status error "$before" "" "Unknown RING in update.conf."
+        exit 1 ;;
+esac
+if ! grep -qx 'ID=fedora' "$os_release" 2>/dev/null; then
+    write_status error "$before" "" "Not a Fedora system; RUWAC COPR updates are not applied."
+    exit 1
+fi
+if [ -z "$before" ]; then
+    write_status error "" "" "The ruwac package is not installed."
+    exit 1
+fi
+if [ -e "$offline_marker" ] || [ -L "$offline_marker" ]; then
+    write_status deferred "$before" "" "An offline system update is queued; RUWAC will update after it."
+    exit 0
+fi
+enabled=$(dnf repolist --enabled 2>/dev/null | awk 'NR>1{print $1}')
+if ! printf '%s\n' "$enabled" | grep -qx "$repo"; then
+    write_status error "$before" "" "The RUWAC COPR repository is not enabled; run fleet-setup."
+    exit 1
+fi
+# Dependencies may come from Fedora's own repositories only.
+repos=(--repo="$repo")
+for id in fedora updates rawhide; do
+    printf '%s\n' "$enabled" | grep -qx "$id" && repos+=(--repo="$id")
+done
+packages=(ruwac)
+rpm -q ruwac-desktop >/dev/null 2>&1 && packages+=(ruwac-desktop)
+
+dnf -q --refresh check-upgrade --repo="$repo" \
+    --setopt="$repo.skip_if_unavailable=0" "${packages[@]}" >/dev/null 2>&1
+rc=$?
+case $rc in
+    0)
+        write_status current "$before" "$before" "RUWAC packages are current."
+        exit 0 ;;
+    100) ;;
+    *)
+        write_status error "$before" "" "Checking the RUWAC COPR repository failed (dnf exit $rc)."
+        exit 1 ;;
+esac
+if ! dnf -y -q upgrade "${repos[@]}" --setopt="$repo.skip_if_unavailable=0" \
+        "${packages[@]}" >/dev/null 2>&1; then
+    write_status error "$before" "" "Installing the RUWAC update failed; the installed version is unchanged."
+    exit 1
+fi
+after=$(installed_version)
+write_status upgraded "$after" "$after" \
+    "Updated from $before. Running terminals keep their engine; new sessions use $after."
+exit 0

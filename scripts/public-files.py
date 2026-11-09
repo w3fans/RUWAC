@@ -33,7 +33,7 @@ VENDOR_FILES |= {
     'ruwac/desktop/vendor/ironrdp-graphics/src/zgfx/test_assets/encoded.4.bin',
 }
 # From-source Fedora/COPR packaging (the COPR "make srpm" method reads .copr/Makefile).
-FEDORA_FILES={'.copr/Makefile'}|{'ruwac/packaging/fedora/'+name for name in ['ruwac.spec','make-sources.sh','si.z4.ruwac.metainfo.xml','README.md']}
+FEDORA_FILES={'.copr/Makefile'}|{'ruwac/packaging/fedora/'+name for name in ['ruwac.spec','make-sources.sh','si.z4.ruwac.metainfo.xml','README.md','package-update','fleet-setup','ruwac-package-update.service','ruwac-package-update.timer']}
 GITHUB_FILES={'.github/workflows/release.yml','.github/workflows/quality.yml','.github/workflows/labels.yml','.github/CODEOWNERS','.github/PULL_REQUEST_TEMPLATE.md','.github/ISSUE_TEMPLATE/bug_report.yml','.github/ISSUE_TEMPLATE/feature_request.yml','.github/ISSUE_TEMPLATE/config.yml','.github/scripts/label-pr.py','.github/scripts/test-label-pr.py'}
 FORBIDDEN={'.agents','.codex','.claude','.kimi','.githooks','.vscode','.aws','AGENTS.md','CLAUDE.md','SKILL.md','FIRST-PROMPT.md','OWNER-SPIKE-SPEC.md'}
 def files(root):

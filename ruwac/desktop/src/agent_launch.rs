@@ -38,6 +38,12 @@ fn copr_function() -> String {
         repos="--repo=$repo --setopt=$repo.skip_if_unavailable=0"
         for id in $first_party; do repos="$repos --repo=$id"; done
         if grep -qs '\"kind\":\"distribution\"' /usr/share/ruwac/rpm-installation.json; then
+            # A machine set up with fleet-setup updates itself in the background;
+            # never block an agent launch on the network or a sudo prompt.
+            if systemctl is-enabled --quiet ruwac-package-update.timer 2>/dev/null; then
+                echo 'RUWAC: automatic package updates are enabled on this machine.'
+                return 0
+            fi
             dnf -q --refresh check-upgrade --repo=$repo --setopt=$repo.skip_if_unavailable=0 ruwac
             status=$?
             case $status in
@@ -564,6 +570,57 @@ mod tests {
             "{calls}"
         );
         assert!(!calls.contains("upgrade"), "{calls}");
+    }
+    #[test]
+    fn provisioned_machines_never_block_agent_launch_on_package_checks() {
+        let fedora = fs::read_to_string("/etc/os-release")
+            .is_ok_and(|text| text.lines().any(|line| line == "ID=fedora"));
+        if !fedora {
+            return;
+        }
+        for (timer_enabled, expect_dnf_check) in [(true, false), (false, true)] {
+            let dir = std::env::temp_dir().join(ruwac_protocol::id("copr_timer"));
+            fs::create_dir_all(&dir).unwrap();
+            let log = dir.join("calls");
+            fs::write(
+                dir.join("rpm-installation.json"),
+                r#"{"kind":"distribution"}"#,
+            )
+            .unwrap();
+            for (name, body) in [
+                ("dnf", "echo fedora; echo updates; exit 0".to_owned()),
+                ("rpm", "exit 0".to_owned()),
+                ("sudo", "exit 0".to_owned()),
+                ("systemctl", format!("exit {}", u8::from(!timer_enabled))),
+            ] {
+                let path = dir.join(name);
+                fs::write(
+                    &path,
+                    format!(
+                        "#!/bin/sh\necho \"{name} $*\" >> '{}'\n{body}\n",
+                        log.display()
+                    ),
+                )
+                .unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let script = copr_function().replace(
+                "/usr/share/ruwac/rpm-installation.json",
+                &dir.join("rpm-installation.json").display().to_string(),
+            );
+            let output = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!("{script}; copr_ruwac; echo rc=$?"))
+                .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+                .output()
+                .unwrap();
+            let calls = fs::read_to_string(&log).unwrap_or_default();
+            fs::remove_dir_all(&dir).unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.ends_with("rc=0\n"), "{output:?}");
+            assert_eq!(calls.contains("check-upgrade"), expect_dnf_check, "{calls}");
+            assert!(!calls.contains("sudo"), "{calls}");
+        }
     }
     #[test]
     fn defaults_open_resume_pickers_without_a_prompt() {

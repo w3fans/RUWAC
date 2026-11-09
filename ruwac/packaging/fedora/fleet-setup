@@ -1,0 +1,162 @@
+#!/bin/bash
+# One-time, idempotent RUWAC setup for a Fedora machine (run as root, e.g.
+#   ssh HOST 'sudo bash -s -- --ring standard' < fleet-setup
+# or, once installed, /usr/libexec/ruwac/fleet-setup --ring standard).
+#
+# Enables exactly the zvegelj/ruwac COPR, keeps its metadata fresh (5 minutes),
+# installs the matching RUWAC packages (the desktop only on desktop machines)
+# and enables the package-only update timer for the chosen ring. Re-running
+# with the same options changes nothing. It never upgrades other packages,
+# never stops a RUWAC engine and never touches users' terminals.
+#
+#   --ring canary|standard|disabled   update ring (default standard)
+#   --desktop | --headless | --auto   install ruwac-desktop, never, or if the
+#                                     machine boots to a graphical target (default)
+#   --json                            print the result as JSON only
+set -u
+ring=standard desktop=auto json=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --ring) ring=${2:-}; shift 2 ;;
+        --desktop) desktop=yes; shift ;;
+        --headless) desktop=no; shift ;;
+        --auto) desktop=auto; shift ;;
+        --json) json=1; shift ;;
+        *) echo "usage: fleet-setup [--ring canary|standard|disabled] [--desktop|--headless|--auto] [--json]" >&2; exit 2 ;;
+    esac
+done
+case $ring in canary|standard|disabled) ;; *) echo "invalid --ring" >&2; exit 2 ;; esac
+
+root=${RUWAC_SETUP_ROOT:-}
+os_release=$root/etc/os-release
+conf_dir=$root/etc/ruwac
+dropin_dir=$root/etc/systemd/system/ruwac-package-update.timer.d
+project=zvegelj/ruwac
+repo=copr:copr.fedorainfracloud.org:zvegelj:ruwac
+changed=() unchanged=()
+note() { if [ "$2" = changed ]; then changed+=("$1"); else unchanged+=("$1"); fi; }
+fail() {
+    if [ $json = 1 ]; then
+        python3 -c 'import json,sys; print(json.dumps({"ok":False,"error":sys.argv[1]}))' "$1"
+    else
+        echo "fleet-setup: $1" >&2
+    fi
+    exit 1
+}
+
+[ "$(id -u)" = 0 ] || [ -n "$root" ] || fail "run as root"
+grep -qx 'ID=fedora' "$os_release" 2>/dev/null || fail "not a Fedora system; RUWAC COPR packages are for Fedora"
+version=$(sed -n 's/^VERSION_ID=//p' "$os_release" | tr -d '"')
+arch=$(uname -m)
+case $arch in x86_64|aarch64) ;; *) fail "unsupported architecture $arch" ;; esac
+
+# 1. Exactly this COPR repository.
+if dnf repolist --enabled 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$repo"; then
+    note copr unchanged
+else
+    { dnf copr --help >/dev/null 2>&1 || dnf -y -q install dnf5-plugins >/dev/null 2>&1; } \
+        || fail "cannot install the DNF copr plugin"
+    dnf -y -q copr enable "$project" >/dev/null 2>&1 \
+        || fail "cannot enable COPR $project for Fedora $version/$arch (is a build available for this release?)"
+    note copr changed
+fi
+
+# 2. Fresh metadata for this repository only (DNF's default can be 48 hours).
+# `dnf config-manager setopt` records repository options in repos.override.d.
+current=$(python3 - "$root/etc/dnf/repos.override.d" "$repo" <<'PY'
+import configparser, pathlib, sys
+value = ""
+for f in sorted(pathlib.Path(sys.argv[1]).glob("*.repo")):
+    c = configparser.ConfigParser(interpolation=None)
+    try:
+        c.read(f)
+    except configparser.Error:
+        continue
+    if c.has_option(sys.argv[2], "metadata_expire"):
+        value = c.get(sys.argv[2], "metadata_expire").strip()
+print(value)
+PY
+)
+if [ "$current" = 300 ]; then
+    note metadata_expire unchanged
+else
+    dnf config-manager setopt "$repo.metadata_expire=300" >/dev/null 2>&1 \
+        || fail "cannot set metadata_expire for $repo"
+    note metadata_expire changed
+fi
+
+# 3. Packages: CLI always; desktop only where wanted. Never a per-user copy.
+want_desktop=0
+case $desktop in
+    yes) want_desktop=1 ;;
+    auto) [ "$(systemctl get-default 2>/dev/null)" = graphical.target ] && want_desktop=1 ;;
+esac
+rpm -q ruwac-desktop >/dev/null 2>&1 && want_desktop=1  # never remove an installed desktop
+packages=(ruwac)
+[ $want_desktop = 1 ] && packages+=(ruwac-desktop)
+missing=()
+for p in "${packages[@]}"; do rpm -q "$p" >/dev/null 2>&1 || missing+=("$p"); done
+if [ ${#missing[@]} = 0 ]; then
+    note packages unchanged
+else
+    repos=(--repo="$repo")
+    for id in fedora updates rawhide; do
+        dnf repolist --enabled 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$id" && repos+=(--repo="$id")
+    done
+    dnf -y -q --refresh install "${repos[@]}" --setopt="$repo.skip_if_unavailable=0" "${missing[@]}" >/dev/null 2>&1 \
+        || fail "installing ${missing[*]} from $project failed"
+    note packages changed
+fi
+
+# 4. Update ring and timer.
+mkdir -p "$conf_dir" "$dropin_dir"
+desired="RING=$ring"
+if [ "$(cat "$conf_dir/update.conf" 2>/dev/null)" = "$desired" ]; then
+    note ring unchanged
+else
+    printf '%s\n' "$desired" > "$conf_dir/update.conf"
+    chmod 0644 "$conf_dir/update.conf"
+    note ring changed
+fi
+case $ring in
+    canary) interval=45min delay=10min ;;
+    *) interval=3h delay=30min ;;
+esac
+dropin="[Timer]
+OnUnitActiveSec=
+OnUnitActiveSec=$interval
+RandomizedDelaySec=$delay"
+if [ "$(cat "$dropin_dir/ring.conf" 2>/dev/null)" = "$dropin" ]; then
+    note timer_interval unchanged
+else
+    printf '%s\n' "$dropin" > "$dropin_dir/ring.conf"
+    systemctl daemon-reload >/dev/null 2>&1 || :
+    note timer_interval changed
+fi
+if [ "$ring" = disabled ]; then
+    if systemctl is-enabled --quiet ruwac-package-update.timer 2>/dev/null; then
+        systemctl disable --now ruwac-package-update.timer >/dev/null 2>&1 || fail "cannot disable the update timer"
+        note timer changed
+    else
+        note timer unchanged
+    fi
+elif systemctl is-enabled --quiet ruwac-package-update.timer 2>/dev/null; then
+    note timer unchanged
+else
+    systemctl enable --now ruwac-package-update.timer >/dev/null 2>&1 || fail "cannot enable the update timer"
+    note timer changed
+fi
+
+installed=$(rpm -q --qf '%{VERSION}-%{RELEASE}' ruwac 2>/dev/null || true)
+if [ $json = 1 ]; then
+    python3 - "$installed" "$ring" "$want_desktop" "${#changed[@]}" "${changed[@]}" "${unchanged[@]}" <<'PY'
+import json, sys
+installed, ring, desktop, n = sys.argv[1], sys.argv[2], sys.argv[3] == "1", int(sys.argv[4])
+rest = sys.argv[5:]
+print(json.dumps({"ok": True, "installed": installed, "ring": ring, "desktop": desktop,
+                  "changed": rest[:n], "unchanged": rest[n:]}))
+PY
+else
+    echo "RUWAC $installed · ring $ring · desktop $([ $want_desktop = 1 ] && echo yes || echo no)"
+    echo "changed: ${changed[*]:-nothing}"
+fi

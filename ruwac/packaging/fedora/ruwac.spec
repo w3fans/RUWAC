@@ -1,6 +1,8 @@
 # Fedora/COPR package built from source. Crates are vendored (Source1); the
 # upstream GitHub testing RPMs (packaging/ruwac.spec) are a separate channel.
-# Updates come only from DNF: this package ships no self-updater or timer.
+# Updates come only from DNF. The optional ruwac-package-update.timer (enabled
+# by fleet-setup, off by default) runs DNF for the RUWAC packages only; it never
+# stops or restarts users' RUWAC engines.
 %{!?ruwac_version:%global ruwac_version 0.4.53}
 %bcond check 1
 # Desktop unit tests build an RDP test server whose TLS stack compiles
@@ -33,6 +35,7 @@ BuildRequires:  pkgconfig(sqlite3)
 BuildRequires:  pkgconfig(zlib)
 BuildRequires:  desktop-file-utils
 BuildRequires:  libappstream-glib
+BuildRequires:  systemd-rpm-macros
 %if %{with desktop_check}
 BuildRequires:  cmake
 BuildRequires:  clang
@@ -40,6 +43,8 @@ BuildRequires:  clang
 
 Requires:       openssh-clients
 Requires:       python3
+Requires:       util-linux
+%{?systemd_requires}
 
 # Patched upstream crate carried in the source tree (vendor/alacritty_terminal).
 Provides:       bundled(crate(alacritty_terminal)) = 0.26.0
@@ -107,6 +112,14 @@ install -Dpm 0644 packaging/fedora/si.z4.ruwac.metainfo.xml \
 install -d %{buildroot}%{_datadir}/ruwac
 printf '{"kind":"distribution","manager":"dnf","version":"%s"}\n' '%{version}' \
     > %{buildroot}%{_datadir}/ruwac/rpm-installation.json
+# Package-only updater and one-time fleet setup (timer disabled by default).
+install -Dpm 0755 packaging/fedora/package-update %{buildroot}%{_libexecdir}/ruwac/package-update
+install -Dpm 0755 packaging/fedora/fleet-setup %{buildroot}%{_libexecdir}/ruwac/fleet-setup
+install -Dpm 0644 packaging/fedora/ruwac-package-update.service \
+    %{buildroot}%{_unitdir}/ruwac-package-update.service
+install -Dpm 0644 packaging/fedora/ruwac-package-update.timer \
+    %{buildroot}%{_unitdir}/ruwac-package-update.timer
+install -d %{buildroot}%{_sharedstatedir}/ruwac
 
 %check
 desktop-file-validate %{buildroot}%{_datadir}/applications/si.z4.ruwac.desktop
@@ -120,6 +133,17 @@ cd desktop
 %cargo_test
 %endif
 %endif
+
+%post
+%systemd_post ruwac-package-update.timer
+
+%preun
+%systemd_preun ruwac-package-update.timer
+
+%postun
+# No restart on upgrade: the timer and oneshot service have nothing to restart,
+# and users' RUWAC engines must keep running.
+%systemd_postun ruwac-package-update.timer
 
 %posttrans
 # Replacing an upstream GitHub testing RPM removes its ruwac-rpm-update timer
@@ -137,6 +161,12 @@ fi
 %{_mandir}/man1/ruwac.1*
 %dir %{_datadir}/ruwac
 %{_datadir}/ruwac/rpm-installation.json
+%dir %{_libexecdir}/ruwac
+%{_libexecdir}/ruwac/package-update
+%{_libexecdir}/ruwac/fleet-setup
+%{_unitdir}/ruwac-package-update.service
+%{_unitdir}/ruwac-package-update.timer
+%dir %{_sharedstatedir}/ruwac
 
 %files desktop
 %license LICENSE ruwac/LICENSE.desktop-dependencies

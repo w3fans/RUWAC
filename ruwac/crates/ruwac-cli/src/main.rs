@@ -468,6 +468,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             *first = canonical.into();
         }
     }
+    if a.first().is_some_and(|command| command == "update")
+        && a.get(1).is_some_and(|v| v == "status")
+    {
+        if a.len() > 3 || (a.len() == 3 && a[2] != "--json") {
+            return Err("usage: ruwac update status [--json]".into());
+        }
+        let report = engine::update_status(&socket);
+        if a.len() == 3 {
+            println!("{}", json!({"version":0,"result":report}));
+        } else {
+            println!("{}", engine::update_human(&report));
+        }
+        return Ok(());
+    }
     if a.first().is_some_and(|command| command == "update") {
         if host.is_some() || explicit_socket.is_some() {
             return Err("run updates locally on each machine, without --host or --socket".into());

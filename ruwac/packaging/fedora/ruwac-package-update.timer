@@ -1,0 +1,14 @@
+[Unit]
+Description=Periodic RUWAC package update check
+Documentation=man:ruwac(1)
+
+[Timer]
+# fleet-setup writes the ring interval (canary/standard) in a drop-in.
+OnBootSec=15min
+OnUnitActiveSec=3h
+# Deterministic per-machine spread, so a fleet does not update at once.
+RandomizedDelaySec=30min
+FixedRandomDelay=true
+
+[Install]
+WantedBy=timers.target

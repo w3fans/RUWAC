@@ -73,6 +73,43 @@ old release directories while any running process or test fixture uses them.
 A previous GitHub testing RPM with the same version may need an explicit COPR
 reinstall transaction; inspect its vendor and distribution marker first.
 
+## Many machines: one-time setup and automatic updates
+
+Run the setup once per machine as root, for example from an administration
+host over SSH (the same script is installed as `/usr/libexec/ruwac/fleet-setup`
+for later changes):
+
+```sh
+ssh HOST 'sudo bash -s -- --ring standard' < ruwac/packaging/fedora/fleet-setup
+```
+
+It enables exactly the `zvegelj/ruwac` COPR, sets that repository's metadata
+to expire after five minutes, installs `ruwac` (and `ruwac-desktop` only on
+machines that boot to a graphical session, or with `--desktop`), and enables
+`ruwac-package-update.timer`. Re-running it with the same options changes
+nothing; `--json` reports what changed per host.
+
+| Ring | Check interval | Spread |
+| --- | --- | --- |
+| `canary` | about every 45 minutes | up to 10 minutes per machine |
+| `standard` | about every 3 hours | up to 30 minutes per machine |
+| `disabled` | timer off | — |
+
+The timer runs `/usr/libexec/ruwac/package-update`, which only updates the
+installed RUWAC packages from the COPR (dependencies from Fedora's own
+repositories), defers while an offline system update is queued, and records a
+sanitized result. It never stops, restarts or migrates a user's RUWAC engine:
+running terminals keep their engine and new sessions use the installed version.
+See the state on any machine, including over SSH:
+
+```sh
+ruwac update status        # or --json
+ruwac engine show          # engines, live terminals, where new sessions go
+```
+
+Roll out in stages: one canary desktop, one headless machine, a few varied
+desktops, then batches.
+
 ## Build an SRPM
 
 ```sh
