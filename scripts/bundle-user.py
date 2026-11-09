@@ -316,8 +316,12 @@ def indexed_branch_slots(data, records):
     # target executable bytes; text, positive words, unknown instructions and
     # the first invalid target remain scanned. No matching policy value, text
     # hash, symbol/section name or externally supplied exception is consulted.
+    # Also the RDI-indirect byte load with an explicit index bound
+    # (cmp $imm8,%rax; ja rel8/rel32) before the same dispatch; the bound then
+    # caps the slots at imm8+1.
     byte_dispatch = re.compile(
-        rb'(?:\x0f\xb6\x46.|\x0f\xb6\x83.{4})\x48\x8d\x0d(.{4})'
+        rb'(?:\x0f\xb6\x46.|\x0f\xb6\x83.{4}|\x0f\xb6\x07)'
+        rb'(?:\x48\x83\xf8(.)(?:\x77.|\x0f\x87.{4}))?\x48\x8d\x0d(.{4})'
         rb'\x48\x63\x04\x81\x48\x01\xc8'
         rb'(?:\x48\x89\x74\x24.)?\xff\xe0', re.S)
     for section in records:
@@ -327,7 +331,7 @@ def indexed_branch_slots(data, records):
         if start + size > len(data):
             raise ValueError('Executable section exceeds artifact bounds')
         for match in byte_dispatch.finditer(data[start:start + size]):
-            table = section[3] + match.start(1) + 4 + struct.unpack('<i', match[1])[0]
+            table = section[3] + match.start(2) + 4 + struct.unpack('<i', match[2])[0]
             candidates = [s for s in records if s[1] == 1 and s[2] & 2
                           and not s[2] & 5 and s[3] <= table < s[3] + s[5]]
             if table % 4 or len(candidates) != 1:
@@ -339,6 +343,10 @@ def indexed_branch_slots(data, records):
             if boundary_index < len(ordered_references):
                 boundary = min(boundary, ordered_references[boundary_index])
             count = min(256, (boundary - table) // 4)
+            if match[1] is not None:
+                if match[1][0] > 127:  # cmp imm8 is sign extended: not an index bound.
+                    continue
+                count = min(count, match[1][0] + 1)
             if offset + count * 4 > len(data):
                 raise ValueError('Byte-indexed branch table exceeds artifact bounds')
             numeric = []
