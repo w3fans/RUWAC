@@ -12,7 +12,7 @@ Actions=NewWindow;Update;
 
 [Desktop Action NewWindow]
 Name=New window
-Exec=/usr/bin/ruwac gui --new-instance
+Exec=/usr/bin/ruwac gui --new-window
 
 [Desktop Action Update]
 Name=Install verified update

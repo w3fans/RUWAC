@@ -199,6 +199,7 @@ impl Server {
                                                 "workspace.save"
                                                     | "workspace.open"
                                                     | "workspace.restore"
+                                                    | "workspace.openWindow"
                                             )
                                     }) {
                                         Err(Error::new(

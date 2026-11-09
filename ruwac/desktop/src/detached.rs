@@ -297,12 +297,20 @@ impl Windows {
             .build();
         let pop = gtk::Popover::new();
         let actions = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        actions.append(&sessions::controls(
+        let terminal_controls = sessions::controls(
             tabs.clone(),
             self.terminal.clone(),
             self.socket.clone(),
             self.broker.clone(),
-        ));
+        );
+        // Every window keeps the visible "+" new-terminal control of its own tabs.
+        if let Some(new_terminal) = terminal_controls
+            .first_child()
+            .and_downcast::<gtk::Button>()
+        {
+            crate::chrome::terminal_tab_action(&bar, &new_terminal);
+        }
+        actions.append(&terminal_controls);
         pop.set_child(Some(&actions));
         controls.set_popover(Some(&pop));
         header.pack_end(&controls);
@@ -391,6 +399,32 @@ impl Windows {
         window.add_controller(keys);
         window.present();
         Some(tabs)
+    }
+    /// A new window in this process, so tabs can be dragged between all
+    /// windows. Optionally starts with a fresh terminal on this engine.
+    pub fn open_window(
+        self: &Rc<Self>,
+        with_terminal: bool,
+    ) -> Option<(adw::TabView, tiles::FocusMemory)> {
+        let tabs = self.create()?;
+        let memory = self
+            .entries
+            .borrow()
+            .iter()
+            .find(|(_, t, _)| t.upgrade().as_ref() == Some(&tabs))
+            .map(|(_, _, m)| m.clone())?;
+        if with_terminal {
+            if let Some(window) = tabs.root().and_downcast::<gtk::Window>() {
+                crate::chrome::walk(window.upcast_ref(), &|w| {
+                    if w.widget_name() == "terminal-tab-new" {
+                        if let Some(b) = w.downcast_ref::<gtk::Button>() {
+                            b.emit_clicked();
+                        }
+                    }
+                });
+            }
+        }
+        Some((tabs, memory))
     }
     pub fn fixture(
         self: &Rc<Self>,

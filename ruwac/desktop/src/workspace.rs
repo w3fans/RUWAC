@@ -81,6 +81,11 @@ impl Layout {
             Self::Split { .. } => None,
         }
     }
+    /// New view IDs for a copy of this layout (e.g. a saved workspace opened
+    /// in another window), so it never collides with views already open.
+    pub fn fresh_ids(&mut self) {
+        self.assign_ids();
+    }
     fn assign_ids(&mut self) {
         match self {
             Self::Terminal { view_id, .. }

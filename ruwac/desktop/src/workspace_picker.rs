@@ -13,13 +13,14 @@ fn refresh(control: Rc<Control>, rows: gtk::Box, status: gtk::Label, window: gtk
             Err(error)=>status.set_text(&error.message),
             Ok(value)=>{
                 let Some(saved)=value["saved_workspaces"].as_array()else{status.set_text("Snapshot catalog unavailable");return;};
-                status.set_text(if saved.is_empty(){"No saved layouts. Enter a name and save this workspace."}else{"Open adds missing tabs. Restore rebuilds the saved layout and preserves additional views."});
+                status.set_text(if saved.is_empty(){"No saved layouts. Enter a name and save this workspace."}else{"Open adds missing tabs here. Restore rebuilds the saved layout here. New window continues the saved terminals in a separate window; tabs can be dragged between windows."});
                 for saved in saved{
                     let Some(id)=saved["id"].as_str().filter(|id|ruwac_protocol::valid_id(id,"workspace"))else{continue};
                     let row=gtk::Box::new(gtk::Orientation::Horizontal,6);
                     let label=gtk::Label::new(Some(&format!("{} · {} tabs",saved["name"].as_str().unwrap_or("Saved layout"),saved["tabs"])));label.set_hexpand(true);label.set_xalign(0.0);label.set_ellipsize(gtk::pango::EllipsizeMode::End);row.append(&label);
-                    for (title,method)in[("Open","workspace.open"),("Restore","workspace.restore")]{
-                        let button=gtk::Button::with_label(title);button.set_widget_name(&format!("{}-{id}",if title=="Open"{"workspace-open"}else{"workspace-restore"}));
+                    for (title,method,prefix)in[("Open","workspace.open","workspace-open"),("Restore","workspace.restore","workspace-restore"),("New window","workspace.openWindow","workspace-window")]{
+                        let button=gtk::Button::with_label(title);button.set_widget_name(&format!("{prefix}-{id}"));
+                        if method=="workspace.openWindow"{button.set_tooltip_text(Some("Open this layout in a new window and continue its terminals there"));}
                         let(control,status,window,id)=(control.clone(),status.clone(),window.downgrade(),id.to_owned());
                         button.connect_clicked(move|button|{
                             button.set_sensitive(false);status.set_text("Applying saved layout…");
@@ -103,7 +104,7 @@ pub fn fixture(operation: &str, value: Option<&str>) -> serde_json::Value {
                     let name = match operation {
                         "save" => "workspace-save".to_owned(),
                         "refresh" => "workspace-refresh".to_owned(),
-                        "open" | "restore" => {
+                        "open" | "restore" | "window" => {
                             format!("workspace-{operation}-{}", value.unwrap_or(""))
                         }
                         _ => String::new(),

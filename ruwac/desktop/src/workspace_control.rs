@@ -29,6 +29,8 @@ pub struct Control {
     pub folder: PathBuf,
     pub state: RefCell<State>,
     pub workers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Opens a new window in this process for "Open in new window".
+    pub window: Rc<dyn Fn() -> Option<(adw::TabView, tiles::FocusMemory)>>,
 }
 enum Prepared {
     Summary(Value),
@@ -85,7 +87,9 @@ impl Control {
                             }),
                         ))
                     }
-                    "workspace.open" | "workspace.restore" if p.len() == 1 => {
+                    "workspace.open" | "workspace.restore" | "workspace.openWindow"
+                        if p.len() == 1 =>
+                    {
                         let id = p
                             .get("id")
                             .and_then(Value::as_str)
@@ -229,7 +233,11 @@ impl Control {
                         ))
                     } else {
                         *control.known_sessions.borrow_mut() = known;
-                        control.apply(snapshot, method == "workspace.restore")
+                        if method == "workspace.openWindow" {
+                            control.apply_new_window(snapshot)
+                        } else {
+                            control.apply(snapshot, method == "workspace.restore")
+                        }
                     }
                 }
                 Ok(Err(e)) => Err(error(
@@ -296,6 +304,31 @@ impl Control {
             }
             gtk::glib::ControlFlow::Break
         });
+    }
+    /// Rebuild a saved layout in a new window of this process and continue its
+    /// sessions there. Views get fresh IDs, so the same sessions may also stay
+    /// open elsewhere; nothing existing is moved, closed or reconnected.
+    fn apply_new_window(
+        &self,
+        mut snapshot: workspace_store::Snapshot,
+    ) -> ruwac_protocol::Result<Value> {
+        if snapshot.workspace.tabs.is_empty() {
+            return Err(error("WORKSPACE_EMPTY", "Saved workspace has no tabs"));
+        }
+        if snapshot.workspace.tabs.len() > 64 {
+            return Err(error("LIMIT", "Workspace view or tab limit exceeded"));
+        }
+        for tab in &mut snapshot.workspace.tabs {
+            tab.id = ruwac_protocol::id("tab");
+            tab.focused_view = None;
+            tab.layout.fresh_ids();
+        }
+        let (tabs, memory) = (self.window)()
+            .ok_or_else(|| error("GUI_UNAVAILABLE", "Could not open a new window"))?;
+        tiles::restore(&tabs, &snapshot.workspace.tabs, &memory, |layout| {
+            (self.create)(layout)
+        });
+        Ok(json!({"window":true,"tabs":tabs.n_pages(),"name":snapshot.name}))
     }
     fn apply(
         &self,

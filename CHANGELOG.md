@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- New windows open inside the running RUWAC (window button, Ctrl+Shift+N, or the
+  launcher's New Window), so tabs can be dragged between any windows. Every
+  window has its own "+" for a new terminal.
+- Saved workspaces gain **New window**: the saved layout opens in a separate
+  window and its terminals continue where they stopped. Views already open
+  elsewhere stay open; nothing is moved, closed or reconnected automatically.
 - Tabs no longer squeeze together: with few tabs each gets an equal, roomy share
   of the row (at most about a fifth of its width), and tabs shrink evenly as more
   are opened, down to a readable minimum. Beyond that the row scrolls, with left

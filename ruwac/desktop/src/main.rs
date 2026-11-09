@@ -97,6 +97,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut allow_workspace_control = false;
     let mut allow_rdp_control = false;
     let mut new_instance = false;
+    let mut new_window_request = false;
     let mut window_id = String::new();
     let mut show_machines = false;
     let mut theme = adw::ColorScheme::PreferDark;
@@ -195,6 +196,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 new_instance = true;
             }
             "--new-instance" => new_instance = true,
+            "--new-window" => new_window_request = true,
             "--show-machines" => show_machines = true,
             "--clipboard-disabled" => clipboard_disabled = true,
             "--allow-workspace-control" => allow_workspace_control = true,
@@ -233,7 +235,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .build();
     app.register(None::<&gtk::gio::Cancellable>)?;
     if app.is_remote() {
-        app.activate();
+        // A running RUWAC opens the window itself, in its own process.
+        if new_window_request {
+            app.activate_action("new-window", None);
+        } else {
+            app.activate();
+        }
         return Ok(());
     }
     workspace::configure_window(&window_id)?;
@@ -334,10 +341,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
   let appearance_views=all.clone();let chrome=chrome::Chrome::new(&window,&header,&bar,&box_,Rc::new(move|prefs|for view in appearance_views.borrow().iter(){view.apply_appearance(prefs);}));
   updates::attach(&header,&window,fixture.is_none(),&socket);
   if let Some(message)=workspace_warning.as_ref(){box_.append(&gtk::Label::new(Some(message)));}
-  let new_window=gtk::Button::from_icon_name("window-new-symbolic");new_window.set_widget_name("new-workspace-window");new_window.set_tooltip_text(Some("New RUWAC window — independent tabs, same persistent daemon"));chrome.actions.append(&new_window);
-  let window_socket=socket.clone();let window_theme=theme;new_window.connect_clicked(move|button|{
-    let result=(||->Result<(),Box<dyn std::error::Error>>{let mut cmd=std::process::Command::new(std::env::current_exe()?);cmd.arg("--new-instance").arg("--window-id").arg(ruwac_protocol::id("window")).arg("--socket").arg(&window_socket).arg("--theme").arg(match window_theme {adw::ColorScheme::PreferLight=>"light",adw::ColorScheme::Default=>"system",_=>"dark"});if clipboard_disabled{cmd.arg("--clipboard-disabled");}if allow_workspace_control{cmd.arg("--allow-workspace-control");}if allow_rdp_control{cmd.arg("--allow-rdp-control");}let mut child=cmd.spawn()?;std::thread::spawn(move||{let _=child.wait();});Ok(())})();if result.is_err(){button.set_tooltip_text(Some("Unable to open a new window"));}
-  });
+  let new_window=gtk::Button::from_icon_name("window-new-symbolic");new_window.set_widget_name("new-workspace-window");new_window.set_tooltip_text(Some("New window (Ctrl+Shift+N) — drag tabs between windows"));chrome.actions.append(&new_window);
   let control_policy=Rc::new(Cell::new(allow_workspace_control));let control_gate=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(allow_workspace_control));let consent=gtk::CheckButton::with_label("Allow automation to open, restore and focus workspace views");consent.set_active(control_policy.get());let policy=control_policy.clone();let gate=control_gate.clone();consent.connect_toggled(move|c|{policy.set(c.is_active());gate.store(c.is_active(),std::sync::atomic::Ordering::Release);});let remote_policy=Rc::new(Cell::new(allow_rdp_control));let remote_consent=gtk::CheckButton::with_label("Allow automation to open/control RDP connections");remote_consent.set_active(remote_policy.get());let rp=remote_policy.clone();remote_consent.connect_toggled(move|c|rp.set(c.is_active()));let primary_receive=gtk::CheckButton::with_label("Receive mouse selections from another RUWAC desktop");primary_receive.set_widget_name("allow-primary-receive");primary_receive.set_active(sidebar_shell::primary_receive_allowed());primary_receive.connect_toggled(|button|{if let Err(error)=sidebar_shell::set_primary_receive(button.is_active()){button.set_tooltip_text(Some(&error));button.set_active(false);}});let choices=gtk::Box::new(gtk::Orientation::Vertical,6);choices.append(&consent);choices.append(&remote_consent);choices.append(&primary_receive);choices.append(&primary_setup::controls());let preferences=gtk::Popover::new();let menu_body=gtk::Box::new(gtk::Orientation::Vertical,6);menu_body.append(&gtk::Label::new(Some(&format!("RUWAC {}",env!("CARGO_PKG_VERSION")))));let pref_button=gtk::Button::with_label("Preferences…");menu_body.append(&pref_button);preferences.set_child(Some(&menu_body));let options=gtk::MenuButton::builder().icon_name("open-menu-symbolic").tooltip_text("Main menu").popover(&preferences).build();header.pack_end(&options);
   let (pref_window,pref_choices,pref_pop)=(window.downgrade(),choices.clone(),preferences.clone());pref_button.connect_clicked(move |_|{pref_pop.popdown();let Some(window)=pref_window.upgrade()else{return;};chrome::detach(&pref_choices);let dialog=gtk::Window::builder().title("Preferences").transient_for(&window).modal(true).default_width(480).child(&pref_choices).build();dialog.present();});
 
@@ -413,6 +417,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
   });
   let connection_actions=rdp::install_tab_menu(&window,&tabs,rdp_views.clone(),all.clone());
   let(fv,ph)=(file_views.clone(),placeholders.clone());let close_auxiliary:tiles::CloseView=Rc::new(move|root|{web::close_tree(root);fv.borrow_mut().retain(|(v,_)|!tiles::contains(root,v));ph.borrow_mut().retain(|(v,_)|!tiles::contains(root,v));});let detached_windows=detached::Windows::new(app,all.clone(),rdp_views.clone(),broker.clone(),socket.clone(),close_auxiliary);detached_windows.bind(&window,&tabs,focus_memory.clone());
+  // New windows live in this process so tabs can be dragged between all of them;
+  // the launcher's New Window reaches the same process through app.new-window.
+  {let dw=detached_windows.clone();new_window.connect_clicked(move|_|{let _=dw.open_window(true);});
+   let action=gtk::gio::SimpleAction::new("new-window",None);let dw=detached_windows.clone();action.connect_activate(move|_,_|{let _=dw.open_window(true);});app.add_action(&action);app.set_accels_for_action("app.new-window",&["<Control><Shift>n"]);}
   let layout_controls=tiles::controls(&tabs,close_view.clone(),focus_view.clone(),focus_memory.clone());
   let (focus_tabs,focus_state)=(tabs.clone(),focus_memory.clone());
   let(rv,vv,b,last,h,actions)=(rdp_views.clone(),all.clone(),broker.clone(),last_focus.clone(),header.clone(),tools.clone());window.connect_focus_widget_notify(move|w|{let focus=gtk::prelude::GtkWindowExt::focus(w);if let Some(f)=&focus{tiles::remember(&focus_tabs,&focus_state,f);}if !w.is_active(){b.borrow_mut().focus(None);for r in rv.borrow().iter().filter(|r|r.root.root().as_ref()==Some(w.upcast_ref())){r.inactive();}return;}if focus.as_ref().is_some_and(|f|tiles::contains(&h,f)||tiles::contains(&actions,f)){for r in rv.borrow().iter(){r.pause_keyboard();}return;}let mut owner=false;for r in rv.borrow().iter(){if focus.as_ref().is_some_and(|f|r.owns_focus(f)){r.activate_clipboard();*last.borrow_mut()=b.borrow().active().map(str::to_owned);owner=true;}else{r.inactive();}}if !owner{if let Some(v)=vv.borrow().iter().find(|v|focus.as_ref().is_some_and(|f|tiles::contains(&v.root,f))){*last.borrow_mut()=Some(v.session.clone());if b.borrow().active()!=Some(v.session.as_str()){b.borrow_mut().focus(Some(&v.session));}}else{if !focus.as_ref().is_some_and(|f|(tiles::contains(&h,f)||tiles::contains(&actions,f))){*last.borrow_mut()=None;}if b.borrow().active().is_some(){b.borrow_mut().focus(None);}}}});
@@ -521,7 +529,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
   });
   detached_windows.set_recorder(recorder.clone());
   workspace::watch(&window,recorder.clone());
-  let workspace_lifecycle=workspace_store::folder(&socket).ok().map(|folder|Rc::new(workspace_control::Control{tabs:tabs.clone(),memory:focus_memory.clone(),permission:control_policy.clone(),gate:control_gate.clone(),record:recorder.clone(),create:create_saved_view.clone(),known_sessions:known_sessions.clone(),socket:socket.clone(),folder,state:RefCell::new(Default::default()),workers:std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0))}));
+  let workspace_lifecycle=workspace_store::folder(&socket).ok().map(|folder|Rc::new(workspace_control::Control{tabs:tabs.clone(),memory:focus_memory.clone(),permission:control_policy.clone(),gate:control_gate.clone(),record:recorder.clone(),create:create_saved_view.clone(),known_sessions:known_sessions.clone(),socket:socket.clone(),folder,state:RefCell::new(Default::default()),workers:std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),window:{let dw=detached_windows.clone();Rc::new(move||dw.open_window(false))}}));
   if let Some(control)=workspace_lifecycle.as_ref(){chrome.actions.append(&workspace_picker::button(&window,control.clone()));}
   chrome::walk(chrome.actions.upcast_ref(),&|w|{if let Some(b)=w.downcast_ref::<gtk::Button>(){let label=b.label().unwrap_or_default();let item=match label.as_str(){"New RDP tab"=>Some(("video-display-symbolic","New RDP")),"New terminal"=>Some(("utilities-terminal-symbolic","New term")),"Sessions…"=>Some(("view-list-symbolic","Sessions")),"Jobs…"=>Some(("checkbox-checked-symbolic","Jobs")),"Machines"=>Some(("computer-symbolic","Machines")),"Workspaces…"=>Some(("view-grid-symbolic","Workspaces")),_=>None};if let Some((icon,name))=item{let tip=b.tooltip_text().map(|s|s.to_string()).unwrap_or(label.to_string());chrome::action(b,icon,name,&tip);}}});
   let (exit_tabs,exit_views,exit_close,exit_window)=(tabs.clone(),all.clone(),close_view.clone(),window.downgrade());
@@ -572,7 +580,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
        for view in remote.borrow().iter(){let(phase,frame)=view.event_state();let phase=if ["connecting","connected","disconnected","error"].contains(&phase.as_str()){phase}else{"unknown".into()};snapshot.rdp.insert(view.root.widget_name().to_string(),(phase,frame));}
        event_hub.observe(snapshot);event_observed=Instant::now();
      }
-     for _ in 0..4 {let Ok(task)=requests.try_recv()else{break;};if matches!(task.request.method.as_str(),"workspace.saved"|"workspace.save"|"workspace.open"|"workspace.restore") {if Instant::now()>=task.expires{let _=task.reply.try_send(Err(ruwac_protocol::Error::new("GUI_TIMEOUT","Expired workspace request")));}else if let Some(control)=workspace_lifecycle.as_ref(){control.submit(task);}else{let _=task.reply.try_send(Err(ruwac_protocol::Error::new("WORKSPACE_UNAVAILABLE","Private snapshot store unavailable")));}continue;}let req=&task.request;let params=req.params.as_object();let empty=params.is_some_and(|p|p.is_empty());let target=params.and_then(|p|p.get("id")).and_then(Value::as_str);let explicit=params.is_some_and(|p|p.len()==1)&&target.is_some();
+     for _ in 0..4 {let Ok(task)=requests.try_recv()else{break;};if matches!(task.request.method.as_str(),"workspace.saved"|"workspace.save"|"workspace.open"|"workspace.restore"|"workspace.openWindow") {if Instant::now()>=task.expires{let _=task.reply.try_send(Err(ruwac_protocol::Error::new("GUI_TIMEOUT","Expired workspace request")));}else if let Some(control)=workspace_lifecycle.as_ref(){control.submit(task);}else{let _=task.reply.try_send(Err(ruwac_protocol::Error::new("WORKSPACE_UNAVAILABLE","Private snapshot store unavailable")));}continue;}let req=&task.request;let params=req.params.as_object();let empty=params.is_some_and(|p|p.is_empty());let target=params.and_then(|p|p.get("id")).and_then(Value::as_str);let explicit=params.is_some_and(|p|p.len()==1)&&target.is_some();
       let result=if Instant::now()>=task.expires{Err(ruwac_protocol::Error::new("GUI_TIMEOUT","Expired GUI request was not executed"))}else{match req.method.as_str(){
        "workspace.describe" if empty=>Ok(json!({"protocol":0,"gui_api":4,"gui_version":env!("CARGO_PKG_VERSION"),"workspace_id":workspace_id,"gui_instance":gui_id,"methods":["clipboard.primary.offer","host.list","host.query","workspace.describe","workspace.list","workspace.events.subscribe","workspace.events.poll","workspace.events.unsubscribe","workspace.activate","workspace.focus","workspace.saved","workspace.save","workspace.open","workspace.restore","rdp.list","rdp.query","rdp.open","rdp.reconnect","rdp.disconnect"],"permissions":{"metadata_read":true,"focus_control":policy.get(),"workspace_lifecycle_control":policy.get(),"rdp_lifecycle_control":rdp_policy.get(),"clipboard_read":false,"primary_write":sidebar_shell::primary_receive_allowed()&&rdp_broker.borrow().desktop_enabled(),"remote_input":false},"transport":{"same_uid":true,"frame_limit":ruwac_protocol::MAX_FRAME,"peer_limit":8,"queue_limit":16,"max_rdp_views":64}})),
        "clipboard.primary.offer"=>api_windows.active_window().ok_or_else(||ruwac_protocol::Error::new("PRIMARY_REFUSED","Focus the remote RUWAC window before pasting a local selection")).and_then(|window|terminal_primary::receive(&window,&req.params,rdp_broker.borrow().desktop_enabled())),
