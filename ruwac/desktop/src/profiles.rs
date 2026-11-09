@@ -79,6 +79,10 @@ pub struct Preferences {
     pub gateway: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub ssh_jump_alias: String,
+    /// Optional command run in the remote shell after an SSH terminal logs in
+    /// (for example `su` or `sudo -i`); the login shell continues afterwards.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub startup_command: String,
     pub clipboard: u32,
     pub display: String,
     pub zoom: f64,
@@ -120,6 +124,7 @@ impl Default for Preferences {
             network: String::new(),
             gateway: String::new(),
             ssh_jump_alias: String::new(),
+            startup_command: String::new(),
             clipboard: 0,
             display: "dynamic".into(),
             zoom: 1.0,
@@ -271,6 +276,23 @@ pub fn ssh_argv(p: &Profile) -> Result<Vec<String>, String> {
     argv.extend(["--".into(), host]);
     Ok(argv)
 }
+/// SSH terminal launch. An optional startup command (e.g. `su`) runs in the
+/// remote shell after login, then the user's login shell continues, so leaving
+/// the command returns to an ordinary shell instead of disconnecting.
+/// Agents, file transfer and transport probes keep using `ssh_argv`.
+pub fn terminal_argv(p: &Profile) -> Result<Vec<String>, String> {
+    let mut argv = ssh_argv(p)?;
+    let command = p.preferences.startup_command.trim();
+    if !command.is_empty() {
+        let at = argv
+            .iter()
+            .rposition(|a| a == "--")
+            .ok_or("SSH command line has no host")?;
+        argv.insert(at, "-t".into());
+        argv.push(format!("{command}; exec \"${{SHELL:-/bin/sh}}\" -l"));
+    }
+    Ok(argv)
+}
 /// Session argv for an SSH command line built from this profile. Password
 /// logins run ssh with the desktop binary as SSH_ASKPASS, which reads the
 /// endpoint's saved credential; the secret never enters argv or the profile.
@@ -386,6 +408,10 @@ impl Profile {
         crate::primary::validate(&self.preferences)?;
         if !self.preferences.ssh_jump_alias.is_empty() {
             crate::ssh_jump::validate(&self.preferences.ssh_jump_alias)?;
+        }
+        let startup = &self.preferences.startup_command;
+        if startup.len() > 512 || startup.chars().any(char::is_control) {
+            return Err("Startup command must be one line of at most 512 characters".into());
         }
         Ok(())
     }
@@ -3964,6 +3990,14 @@ fn editor_seed(
     ssh_jump.set_text(&original.preferences.ssh_jump_alias);
     ssh_jump.set_placeholder_text(Some("Existing SSH config alias; blank connects directly"));
     form_row(&advanced, "SSH jump / bastion alias", &ssh_jump);
+    let startup = gtk::Entry::new();
+    startup.set_widget_name("ssh-startup-command");
+    startup.set_text(&original.preferences.startup_command);
+    startup.set_placeholder_text(Some("Run after login, e.g. su or sudo -i; blank for none"));
+    startup.set_tooltip_text(Some(
+        "Runs in the remote shell when a terminal to this machine opens. Afterwards your login shell continues. Passwords are typed in the terminal, never saved here.",
+    ));
+    form_row(&advanced, "Startup command", &startup);
     form_row(&advanced, "RDP display mode", &display);
     form_row(&advanced, "Clipboard policy", &clipboard);
     let primary_sync =
@@ -4496,7 +4530,7 @@ fn editor_seed(
             let(s,id,machine_id,st,parent)=(store.clone(),original.id.clone(),original.machine_id.clone(),status.clone(),d.clone());confirm.connect_response(move|c,r|{if r==gtk::ResponseType::Accept {let mut s=s.borrow_mut();let old=s.items.clone();s.items.retain(|p|p.id!=id&&(!machine||p.machine_id!=machine_id));if let Err(e)=s.save(){s.items=old;st.set_text(&e);}else{drop(s);st.set_text("Metadata deleted; previous library retained for Undo");refresh_widgets(parent.transient_for().as_ref());parent.close();}}c.close();});confirm.present();return;
         }
         if response!=gtk::ResponseType::Accept && response!=gtk::ResponseType::Other(1) && response!=gtk::ResponseType::Other(3) && response!=gtk::ResponseType::Other(5){d.close();return;}
-        let mut p=original.clone();p.preferences.primary_sync=primary_sync.is_active();p.preferences.primary_paste=primary_paste.is_active();p.preferences.primary_user=primary_user.text().into();p.preferences.primary_display=primary_display.text().into();p.preferences.primary_port=primary_port.value() as u16;p.preferences.ssh_auth=if p.protocol=="SSH"&&login.selected()==1{"password".into()}else{String::new()};p.preferences.kimi_command=kimi_command.text().into();p.preferences.agent_install_missing=auto_install.is_active();p.preferences.ruwac_install_missing=ruwac_install.is_active();p.preferences.agent_session=agent_session.text().into();p.preferences.codex_command=codex_command.text().into();p.preferences.claude_command=claude_command.text().into();p.preferences.agent_backend=["ruwac","screen","tmux","direct"][backend.selected()as usize].into();p.name=fields[0].text().into();p.group=fields[1].text().into();p.machine_id=fields[2].text().into();p.server=fields[3].text().into();p.username=fields[4].text().into();p.preferences.label=fields[5].text().into();p.preferences.network=fields[6].text().into();p.preferences.gateway=fields[7].text().into();p.preferences.ssh_jump_alias=ssh_jump.text().into();p.tags=fields[8].text().split(',').map(str::trim).filter(|s|!s.is_empty()).map(str::to_owned).collect();p.secret_reference=fields[9].text().into();p.preferences.trust=fields[10].text().into();p.preferences.identity_file=fields[11].text().into();p.preferences.identity_secret_reference=identity_reference.text().into();p.preferences.known_hosts=fields[12].text().into();p.protocol=if protocol.selected()==1{"SSH"}else{"RDP"}.into();p.preferences.display=["fit","native","stretch","dynamic"][display.selected() as usize].into();p.preferences.clipboard=clipboard.selected();p.preferences.zoom=zoom.value();p.preferences.fullscreen=full.is_active();p.preferences.reconnect=retry.is_active();p.inherit=inherit.is_active();p.inherit_connection=inherit_connection.is_active();p.inherit_credential=inherit_credential.is_active();p.preferences.rdp_mode=["","gnome-remote-login","gnome-desktop-sharing"][rdp_mode.selected() as usize].into();p.preferences.gnome_auto_login=gnome_auto.is_active();p.preferences.gnome_username=gnome_user.text().into();p.preferences.gnome_secret_reference=if p.preferences.rdp_mode=="gnome-remote-login"||!original.preferences.gnome_secret_reference.is_empty(){gnome_ref.text().into()}else{String::new()};
+        let mut p=original.clone();p.preferences.primary_sync=primary_sync.is_active();p.preferences.primary_paste=primary_paste.is_active();p.preferences.primary_user=primary_user.text().into();p.preferences.primary_display=primary_display.text().into();p.preferences.primary_port=primary_port.value() as u16;p.preferences.ssh_auth=if p.protocol=="SSH"&&login.selected()==1{"password".into()}else{String::new()};p.preferences.kimi_command=kimi_command.text().into();p.preferences.agent_install_missing=auto_install.is_active();p.preferences.ruwac_install_missing=ruwac_install.is_active();p.preferences.agent_session=agent_session.text().into();p.preferences.codex_command=codex_command.text().into();p.preferences.claude_command=claude_command.text().into();p.preferences.agent_backend=["ruwac","screen","tmux","direct"][backend.selected()as usize].into();p.name=fields[0].text().into();p.group=fields[1].text().into();p.machine_id=fields[2].text().into();p.server=fields[3].text().into();p.username=fields[4].text().into();p.preferences.label=fields[5].text().into();p.preferences.network=fields[6].text().into();p.preferences.gateway=fields[7].text().into();p.preferences.ssh_jump_alias=ssh_jump.text().into();p.preferences.startup_command=startup.text().trim().into();p.tags=fields[8].text().split(',').map(str::trim).filter(|s|!s.is_empty()).map(str::to_owned).collect();p.secret_reference=fields[9].text().into();p.preferences.trust=fields[10].text().into();p.preferences.identity_file=fields[11].text().into();p.preferences.identity_secret_reference=identity_reference.text().into();p.preferences.known_hosts=fields[12].text().into();p.protocol=if protocol.selected()==1{"SSH"}else{"RDP"}.into();p.preferences.display=["fit","native","stretch","dynamic"][display.selected() as usize].into();p.preferences.clipboard=clipboard.selected();p.preferences.zoom=zoom.value();p.preferences.fullscreen=full.is_active();p.preferences.reconnect=retry.is_active();p.inherit=inherit.is_active();p.inherit_connection=inherit_connection.is_active();p.inherit_credential=inherit_credential.is_active();p.preferences.rdp_mode=["","gnome-remote-login","gnome-desktop-sharing"][rdp_mode.selected() as usize].into();p.preferences.gnome_auto_login=gnome_auto.is_active();p.preferences.gnome_username=gnome_user.text().into();p.preferences.gnome_secret_reference=if p.preferences.rdp_mode=="gnome-remote-login"||!original.preferences.gnome_secret_reference.is_empty(){gnome_ref.text().into()}else{String::new()};
         if response==gtk::ResponseType::Other(1){p.id=ruwac_protocol::id("endpoint");p.machine_id=ruwac_protocol::id("machine");p.secret_reference=p.id.clone();if !p.preferences.gnome_secret_reference.is_empty(){p.preferences.gnome_secret_reference=format!("{}.gnome",p.id);}p.name.push_str(" (copy)");}
         if response==gtk::ResponseType::Other(3){p.name=original.name.clone();p.group=original.group.clone();p.id=ruwac_protocol::id("endpoint");p.secret_reference=p.id.clone();if !p.preferences.gnome_secret_reference.is_empty(){p.preferences.gnome_secret_reference=format!("{}.gnome",p.id);}}
         if let Err(e)=p.validate(){info.set_text(&e);return;}
@@ -5624,6 +5658,34 @@ mod inherited_tests {
                 .ssh_jump_alias
                 .is_empty()
         );
+    }
+    #[test]
+    fn startup_command_runs_after_login_then_keeps_the_login_shell() {
+        let mut p = profile();
+        assert_eq!(terminal_argv(&p).unwrap(), ssh_argv(&p).unwrap());
+        assert!(
+            !serde_json::to_string(&p)
+                .unwrap()
+                .contains("startup_command")
+        );
+        p.preferences.startup_command = "  su  ".into();
+        assert!(p.validate().is_ok());
+        let argv = terminal_argv(&p).unwrap();
+        let host = argv.iter().rposition(|a| a == "--").unwrap();
+        assert_eq!(argv[host - 1], "-t");
+        assert_eq!(
+            argv[host + 1],
+            ssh_argv(&p).unwrap().last().unwrap().as_str()
+        );
+        assert_eq!(argv.last().unwrap(), "su; exec \"${SHELL:-/bin/sh}\" -l");
+        // Other SSH uses (agents, files, probes) never run the startup command.
+        assert!(!ssh_argv(&p).unwrap().iter().any(|a| a.contains("su;")));
+        let round: Profile = serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
+        assert_eq!(round.preferences.startup_command, "  su  ");
+        for bad in ["su\nrm -rf /", "su\r", &"x".repeat(513)] {
+            p.preferences.startup_command = bad.to_string();
+            assert!(p.validate().is_err(), "{bad:?}");
+        }
     }
     #[test]
     fn legacy_gateway_metadata_does_not_enable_a_jump_route() {

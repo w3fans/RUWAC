@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Saved SSH machines can run a **Startup command** when a terminal opens (Machine
+  editor → Advanced), for example `su` or `sudo -i`. It runs in the remote shell
+  after login; when it ends, your login shell continues instead of the tab
+  disconnecting. Passwords are typed in the terminal and never stored. Agent
+  launches, file transfer and connection checks are unaffected.
 - New windows open inside the running RUWAC (window button, Ctrl+Shift+N, or the
   launcher's New Window), so tabs can be dragged between any windows. Every
   window has its own "+" for a new terminal.
