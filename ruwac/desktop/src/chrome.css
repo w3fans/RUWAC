@@ -51,11 +51,12 @@ headerbar.ruwac-bar button.image-button, headerbar.ruwac-bar menubutton > button
 
 /* Flexible tab presentation uses the same TabView metadata and action routes. */
 .flexible-tabs { min-width: 0; }
-.flexible-tabs button.flexible-tab { min-width: 0; min-height: 26px; padding: 0 4px; margin: 0 1px; border: 1px solid alpha(@ruwac_muted, 0.45); border-radius: 6px; box-shadow: none; font-size: 12px; color: @ruwac_muted; background: transparent; }
-.flexible-tabs button.flexible-tab:hover { color: @ruwac_text; background: @ruwac_hover; }
-.flexible-tabs button.flexible-tab:checked { color: @ruwac_text; background: @ruwac_raised; box-shadow: inset 0 -2px @ruwac_accent; }
+.flexible-tabs button.flexible-tab { min-width: 0; min-height: 26px; padding: 0 6px; margin: 0 1px; border: none; border-bottom: 2px solid alpha(@ruwac_muted, 0.35); border-right: 1px solid alpha(@ruwac_muted, 0.22); border-radius: 0 0 7px 7px; box-shadow: none; font-size: 12px; color: @ruwac_muted; background: transparent; }
+.flexible-tabs button.flexible-tab:hover { color: @ruwac_text; background: @ruwac_hover; border-bottom-color: alpha(@ruwac_muted, 0.6); }
+.flexible-tabs button.flexible-tab:checked { color: @ruwac_text; background: @ruwac_raised; border-bottom-color: @ruwac_accent; box-shadow: none; }
 .flexible-tabs button.flexible-tab button.tab-close { min-width: 16px; min-height: 18px; margin: 0; padding: 0; background: transparent; box-shadow: none; }
-.flexible-tabs.compact-tabs button.flexible-tab { min-height: 22px; padding: 0 2px; }
+.flexible-tabs.compact-tabs button.flexible-tab { min-height: 22px; padding: 0 3px; }
+.flexible-tabs button.tab-scroll-arrow { min-width: 20px; min-height: 20px; padding: 0 2px; margin: 0; }
 .flexible-tabs.compact-tabs button.flexible-tab button.tab-close { min-width: 14px; min-height: 16px; }
 
 .flexible-tabs .tab-shortcut-hint { padding: 0 4px; border: 1px solid alpha(@ruwac_accent, 0.6); border-radius: 4px; background: @ruwac_raised; color: @ruwac_accent; font-size: 12px; font-weight: 600; }
