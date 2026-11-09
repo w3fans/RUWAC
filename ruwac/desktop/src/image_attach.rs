@@ -480,7 +480,10 @@ fn local_model_hint(grid: &Value) -> bool {
         }
         text.push('\n');
     }
-    guard::model_ready(&text)
+    // Either supported agent's input footer: Codex or Claude Code. (Only Codex
+    // was recognized before, so Ctrl+V into a nested Claude Code fell through
+    // to a text paste of an image-only clipboard and sent nothing.)
+    guard::ready(guard::Agent::Codex, &text) || guard::ready(guard::Agent::Claude, &text)
 }
 
 #[cfg(test)]
@@ -495,6 +498,16 @@ mod local_paste_tests {
         grid["bracketed_paste"] = json!(true);
         grid["cells"] = json!([[["shell prompt"]]]);
         assert!(!local_model_hint(&grid));
+        // Claude Code's footer, full and shortened, also routes the image.
+        for footer in [
+            "  ⏵⏵ auto mode on (shift+tab to cycle)",
+            "  ? for shortcuts",
+            "  ⏵⏵ auto mode on · 1 shell",
+        ] {
+            let cells: Vec<Value> = footer.chars().map(|c| json!([c.to_string()])).collect();
+            grid["cells"] = json!([cells]);
+            assert!(local_model_hint(&grid), "{footer}");
+        }
         assert!(!local_model_hint(&json!({})));
     }
 }

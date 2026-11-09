@@ -7,14 +7,15 @@ from pathlib import Path
 from spike import Client,eventually
 from PIL import Image
 from gi.repository import Gio,GLib
-p=argparse.ArgumentParser();p.add_argument('--binary',required=True);p.add_argument('--gui',required=True);p.add_argument('--engine',required=True);p.add_argument('--evidence',type=Path,required=True);p.add_argument('--baseline',action='store_true');a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--binary',required=True);p.add_argument('--gui',required=True);p.add_argument('--engine',required=True);p.add_argument('--evidence',type=Path,required=True);p.add_argument('--baseline',action='store_true');p.add_argument('--agent',choices=['codex','claude'],default='codex');a=p.parse_args()
 assert os.environ.get('WAYLAND_DISPLAY')=='ruwac-test'
 root=Path(tempfile.mkdtemp(prefix='lni-',dir=Path('/run/user')/str(os.getuid())));root.chmod(0o700)
 for name in ['config','cache','data','stage']:(root/name).mkdir(mode=0o700)
 env={**os.environ,'XDG_CONFIG_HOME':str(root/'config'),'XDG_CACHE_HOME':str(root/'cache'),'XDG_DATA_HOME':str(root/'data'),'GSETTINGS_BACKEND':'memory','GTK_USE_PORTAL':'0','GTK_A11Y':'none'}
 headless={k:v for k,v in env.items()if k not in ['DISPLAY','WAYLAND_DISPLAY','XAUTHORITY']}
-agent=root/'codex';shutil.copy2(sys.executable,agent);agent.chmod(0o700)
-receiver=root/'receiver.py';receiver.write_text("""import os,sys,tty\nfrom pathlib import Path\nassert not any(os.environ.get(k)for k in ['DISPLAY','WAYLAND_DISPLAY','XAUTHORITY'])\ntty.setraw(0);out=Path(sys.argv[1]);out.touch(mode=0o600)\nos.write(1,b'\\x1b[?2004hGPT-6.1-Sol\\r\\n> Ask Codex\\r\\n')\nwith out.open('ab',buffering=0)as f:\n while True:\n  b=os.read(0,8192)\n  if not b:break\n  f.write(b)\n""")
+agent=root/a.agent;READY='GPT-' if a.agent=='codex' else 'shift+tab to cycle';shutil.copy2(sys.executable,agent);agent.chmod(0o700)
+footer={'codex':"b'\\x1b[?2004hGPT-6.1-Sol\\r\\n> Ask Codex\\r\\n'",'claude':"'\\x1b[?2004h\\u276f \\r\\n  \\u23f5\\u23f5 auto mode on (shift+tab to cycle)\\r\\n'.encode()"}[a.agent]
+receiver=root/'receiver.py';receiver.write_text("""FOOTER="""+footer+"""\nimport os,sys,tty\nfrom pathlib import Path\nassert not any(os.environ.get(k)for k in ['DISPLAY','WAYLAND_DISPLAY','XAUTHORITY'])\ntty.setraw(0);out=Path(sys.argv[1]);out.touch(mode=0o600)\nos.write(1,FOOTER)\nwith out.open('ab',buffering=0)as f:\n while True:\n  b=os.read(0,8192)\n  if not b:break\n  f.write(b)\n""")
 processes=[];logs=[];sequence={};engines=[]
 bus=Gio.bus_get_sync(Gio.BusType.SESSION,None);service='org.gnome.Mutter.RemoteDesktop';seat=None
 def control(method,args=None):return bus.call_sync(service,seat,service+'.Session',method,args,None,Gio.DBusCallFlags.NONE,5000,None)
@@ -46,8 +47,8 @@ try:
  inner=root/'inner.sock';outer=root/'outer.sock'
  for name,sock in [('inner',inner),('outer',outer)]:
   server=start([a.engine,'--socket',str(sock),'serve'],name,headless);engines.append((sock,server));eventually(sock.exists)
- receipt=root/'agent.bin';session=rpc(inner,'session.create',{'name':'Generated displayless Codex','argv':[str(agent),str(receiver),str(receipt)]});rpc(inner,'pane.wait',{'pane':session['pane'],'contains':'GPT-','timeout_ms':5000});agent_pid=rpc(inner,'job.query',{'pane':session['pane']})['foreground']['pid'];agent_start=Path(f'/proc/{agent_pid}/stat').read_text().rsplit(') ',1)[1].split()[19]
- nested=rpc(outer,'session.create',{'name':'Local nested TUI','argv':[a.binary,'--socket',str(inner),'attach','--session',session['session']]});rpc(outer,'pane.wait',{'pane':nested['pane'],'contains':'GPT-','timeout_ms':5000})
+ receipt=root/'agent.bin';session=rpc(inner,'session.create',{'name':'Generated displayless '+a.agent,'argv':[str(agent),str(receiver),str(receipt)]});rpc(inner,'pane.wait',{'pane':session['pane'],'contains':READY,'timeout_ms':5000});agent_pid=rpc(inner,'job.query',{'pane':session['pane']})['foreground']['pid'];agent_start=Path(f'/proc/{agent_pid}/stat').read_text().rsplit(') ',1)[1].split()[19]
+ nested=rpc(outer,'session.create',{'name':'Local nested TUI','argv':[a.binary,'--socket',str(inner),'attach','--session',session['session']]});rpc(outer,'pane.wait',{'pane':nested['pane'],'contains':READY,'timeout_ms':5000})
  window=start([a.gui,'--socket',str(outer),'--session',nested['session'],'--fixture-dir',str(root),'--staging-dir',str(root/'stage')],'gui',env)
  peer_script=Path(__file__).resolve().parents[1]/'fixtures/desktop_clipboard.py';peer=start(['python3',str(peer_script),str(root)],'peer',env);eventually(lambda:(root/'peer-ready.json').exists());eventually(lambda:command('gui','inspect')['drawn'][0]>0,20)
  image=root/'generated.png';Image.new('RGB',(16,12),'#5a1636').save(image);image.chmod(0o600);digest=hashlib.sha256(image.read_bytes()).hexdigest()

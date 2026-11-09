@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Ctrl+V of a clipboard image into Claude Code running behind a nested RUWAC
+  session (a GUI tab that runs `ruwac -r NAME`) now attaches the image to the
+  draft. The desktop recognized only Codex's input box there, so it fell back to
+  a text paste of an image-only clipboard and nothing was sent.
 - Saved SSH machines can run a **Startup command** when a terminal opens (Machine
   editor → Advanced), for example `su` or `sudo -i`. It runs in the remote shell
   after login; when it ends, your login shell continues instead of the tab
