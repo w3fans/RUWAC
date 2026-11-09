@@ -64,6 +64,18 @@ def layout_check(count,two,compact,half):
  # Preserve readable controls/fonts; crowded rows may scroll instead of hiding X.
  assert next(x for x in t['tabs']if x['selected'])['inside_viewport']
  assert all(x['close_visible']and x['icon_size']==16 and x['indicator_size']==16 for x in t['tabs'])
+ # Equal widths per row: capped near a fifth of the row while few tabs are
+ # open, shrinking to a readable minimum; beyond it the row scrolls with arrows.
+ minimum=84 if compact else 108
+ for row in range(t['rows']):
+  members=[x for x in t['tabs']if x['row']==row]
+  widths={x['width']for x in members};assert len(widths)==1,('UNEQUAL_TAB_WIDTHS',row,widths)
+  width=widths.pop();arrows=t['arrows'][row];full=t['row_widths'][row]+(2*arrows['width']if arrows['visible']else 0)
+  assert width>=minimum,('TAB_BELOW_MINIMUM',width)
+  assert width<=max(minimum,int(full*0.22))+2,('TAB_WIDER_THAN_A_FIFTH',width,full)
+  overflow=len(members)*(minimum+2)>full
+  assert arrows['visible']==overflow,('ARROWS',row,arrows,len(members),full)
+  if not overflow:assert all(x['inside_viewport']for x in members)
  assert panes()==baseline
  if (count,two,compact,half)in [(20,False,False,False),(20,False,False,True),(40,True,True,True)]:
   shot=command('snapshot');assert shot['saved'];(r/'native-rust.png').replace(r/f'tabs-{count}-{two}-{compact}-{half}.png')
@@ -133,6 +145,12 @@ try:
    command('chrome',two_tab_rows=False,compact_tabs=False);geometry(True)
    views=rpc('workspace.list',gui=True)['views'];rpc('workspace.focus',{'id':views[-1]['id']},gui=True)
    eventually(lambda:selected()['inside_viewport']);mark('overflow-reveals-selected-last-tab')
+   arrows=chrome()['tab_layout']['arrows'][0];assert arrows['visible']and arrows['left_sensitive']
+   x,y=arrows['left_origin']
+   for _ in range(count):
+    pointer(x+arrows['width']/2,y+arrows['height']/2);button();button(down=False);time.sleep(.05)
+   eventually(lambda:tabs()[0]['inside_viewport']);assert not chrome()['tab_layout']['arrows'][0]['left_sensitive']
+   assert panes()==baseline;mark('overflow-arrows-scroll-the-tab-row')
   command('chrome',two_tab_rows=True,compact_tabs=True)
   saved=json.loads(prefs_path.read_text());assert saved['two_tab_rows']and saved['compact_tabs']
   for k in ['term_font','term_size_pt','width','collapsed_groups']:assert saved[k]==old[k],(k,saved)

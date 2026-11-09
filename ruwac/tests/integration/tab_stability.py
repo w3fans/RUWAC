@@ -73,10 +73,12 @@ try:
   time.sleep(.15);assert positions()==before,'TAB_MOVED_ON_STATUS_OR_TITLE'
  mark('status-loading-and-title-updates-do-not-move-tabs')
  for n in range(12):command('tab-presentation',tab=n,title='box'if n==0 else'Long generated machine name '+str(n))
- # Only a structural change recalculates name-based widths.
+ # Widths are shared equally per row and never follow title length, even
+ # after a structural change recalculates them.
  click(chrome()['tab_new_terminal']);eventually(lambda:len(tabs())==13)
  command('close-tab',tab=12);eventually(lambda:len(tabs())==12);time.sleep(.25)
- assert tabs()[0]['width']<tabs()[1]['width'];mark('short-names-use-shorter-tabs-after-structural-change')
+ widths={t['width']for t in tabs()};assert len(widths)==1,('UNEQUAL_TAB_WIDTHS',widths)
+ mark('tabs-share-row-width-equally-regardless-of-title-length')
  for compact in [False,True]:
   command('chrome',compact_tabs=compact);time.sleep(.2);before=positions();fonts=[t['font_size']for t in tabs()]
   if not compact:normal_fonts=fonts
