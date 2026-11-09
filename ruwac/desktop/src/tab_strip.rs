@@ -32,6 +32,9 @@ struct Inner {
     scroll: [gtk::ScrolledWindow; 2],
     // Overflow arrows; visible only when a row cannot fit its tabs at minimum width.
     arrows: [(gtk::Button, gtk::Button); 2],
+    // Fills the rest of each row and reports its width, so the "+" stays right
+    // after the last tab while widths still follow the available space.
+    probes: [WidthProbe; 2],
     // Last full row width used for allocation, so unchanged sizes never reflow.
     allocated: [Cell<(i32, usize, usize, bool)>; 2],
     view: glib::WeakRef<adw::TabView>,
@@ -112,20 +115,23 @@ impl TabStrip {
                 arrow("go-next-symbolic", "tab-scroll-right", "Scroll tabs right"),
             )
         });
+        let probes: [WidthProbe; 2] = std::array::from_fn(|_| WidthProbe::new());
         let scroll = std::array::from_fn(|i| {
-            // The viewport takes the whole row so its page size is the width
-            // available to tabs; tabs stay left-aligned inside it.
+            // The viewport is as wide as its tabs (so "+" follows the last tab)
+            // and shrinks to the available width when the row overflows.
             rows[i].set_halign(gtk::Align::Start);
             let s = gtk::ScrolledWindow::builder()
                 .child(&rows[i])
                 .hscrollbar_policy(gtk::PolicyType::External)
                 .vscrollbar_policy(gtk::PolicyType::Never)
                 .propagate_natural_height(true)
-                .hexpand(true)
+                .propagate_natural_width(true)
+                .hexpand(false)
                 .build();
             hosts[i].append(&arrows[i].0);
             hosts[i].append(&s);
             hosts[i].append(&arrows[i].1);
+            hosts[i].append(&probes[i]);
             root.append(&hosts[i]);
             s
         });
@@ -135,6 +141,7 @@ impl TabStrip {
             hosts,
             scroll,
             arrows,
+            probes,
             allocated: [Cell::new((0, 0, 0, false)), Cell::new((0, 0, 0, false))],
             view: view.downgrade(),
             tabs: RefCell::new(Vec::new()),
@@ -214,6 +221,14 @@ impl TabStrip {
                 Self(inner).queue_reveal();
             }
         });
+        for probe in &inner.probes {
+            let weak = Rc::downgrade(&inner);
+            probe.on_change(move || {
+                if let Some(inner) = weak.upgrade() {
+                    Self(inner).queue_widths();
+                }
+            });
+        }
         for (row, scroll) in inner.scroll.iter().enumerate() {
             let weak = Rc::downgrade(&inner);
             scroll.hadjustment().connect_changed(move |_| {
@@ -583,17 +598,18 @@ impl TabStrip {
                 .filter(|t| pinned(t))
                 .map(|t| t.button.measure(gtk::Orientation::Horizontal, -1).1 + 2)
                 .sum();
-            let page = inner.scroll[row].hadjustment().page_size() as i32;
-            if page <= 0 {
+            // Everything in the row except the "+" action belongs to tabs/arrows.
+            let action = inner
+                .end
+                .borrow()
+                .as_ref()
+                .filter(|e| e.parent().as_ref() == Some(host.upcast_ref()))
+                .map_or(0, |e| e.width());
+            let full = host.width() - action;
+            if full <= 0 {
                 continue;
             }
             let (left, right) = &inner.arrows[row];
-            let arrows = if left.is_visible() {
-                left.width() + right.width()
-            } else {
-                0
-            };
-            let full = page + arrows;
             // Pinning changes widths without changing the tab count.
             if inner.allocated[row].get() == (full, members.len(), flexible, compact)
                 && flexible > 0
@@ -715,6 +731,14 @@ impl TabStrip {
                 host.append(end);
             }
         }
+        // The probe always comes last, after the "+" action.
+        for (host, probe) in self.0.hosts.iter().zip(&self.0.probes) {
+            if let Some(last) = host.last_child() {
+                if last != *probe.upcast_ref::<gtk::Widget>() {
+                    host.reorder_child_after(probe, Some(&last));
+                }
+            }
+        }
     }
     fn sync_page(&self, page: &adw::TabPage) {
         let Some(view) = self.0.view.upgrade() else {
@@ -823,7 +847,7 @@ impl TabStrip {
         }
         let mut menu_items = Vec::new();
         items(self.0.root.upcast_ref(), window, &mut menu_items);
-        serde_json::json!({"menu_items":menu_items,"row_widths":self.0.scroll.iter().map(|s|s.width()).collect::<Vec<_>>(),"scroll":self.0.scroll.iter().map(|s|{let a=s.hadjustment();serde_json::json!({"value":a.value(),"upper":a.upper(),"page":a.page_size()})}).collect::<Vec<_>>(),"arrows":self.0.arrows.iter().map(|(l,r)|serde_json::json!({"visible":l.is_visible()&&r.is_visible(),"left_sensitive":l.is_sensitive(),"right_sensitive":r.is_sensitive(),"left_origin":l.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"right_origin":r.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"width":l.width(),"height":l.height()})).collect::<Vec<_>>(),"two_rows":self.0.two.get(),"compact":self.0.compact.get(),"rows":self.0.hosts.iter().filter(|h|h.is_visible()).count(),"tabs":self.0.tabs.borrow().iter().map(|tab|{
+        serde_json::json!({"menu_items":menu_items,"row_widths":self.0.scroll.iter().map(|s|s.width()).collect::<Vec<_>>(),"available":self.0.hosts.iter().map(|h|h.width()-self.0.end.borrow().as_ref().filter(|e|e.parent().as_ref()==Some(h.upcast_ref())).map_or(0,|e|e.width())).collect::<Vec<_>>(),"scroll":self.0.scroll.iter().map(|s|{let a=s.hadjustment();serde_json::json!({"value":a.value(),"upper":a.upper(),"page":a.page_size()})}).collect::<Vec<_>>(),"arrows":self.0.arrows.iter().map(|(l,r)|serde_json::json!({"visible":l.is_visible()&&r.is_visible(),"left_sensitive":l.is_sensitive(),"right_sensitive":r.is_sensitive(),"left_origin":l.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"right_origin":r.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"width":l.width(),"height":l.height()})).collect::<Vec<_>>(),"two_rows":self.0.two.get(),"compact":self.0.compact.get(),"rows":self.0.hosts.iter().filter(|h|h.is_visible()).count(),"tabs":self.0.tabs.borrow().iter().map(|tab|{
             let page=tab.page.upgrade();let row=usize::from(tab.button.parent().as_ref()==Some(self.0.rows[1].upcast_ref()));
             let bounds=tab.button.compute_bounds(&self.0.scroll[row]);
             serde_json::json!({"id":page.as_ref().map(|p|p.child().widget_name().to_string()),"title":page.as_ref().map(|p|p.title().to_string()),"selected":tab.button.is_active(),"close_visible":tab.close.is_visible(),"close_width":tab.close.width(),"close_height":tab.close.height(),"close_pick":tab.close.compute_point(window,&gtk::graphene::Point::new(tab.close.width() as f32/2.,tab.close.height() as f32/2.)).and_then(|p|window.pick(p.x()as f64,p.y()as f64,gtk::PickFlags::DEFAULT)).map(|w|w.type_().name().to_string()),"close_origin":tab.close.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"font_size":tab.label.pango_context().font_description().map(|d|d.size()),"icon_size":tab.icon.pixel_size(),"indicator_size":tab.indicator.pixel_size(),"hint":tab.number.text().to_string(),"hint_visible":tab.hint.reveals_child(),"role":format!("{:?}",tab.button.accessible_role()),"row":row,"width":tab.button.width(),"width_request":tab.button.width_request(),"height":tab.button.height(),"origin":tab.button.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"inside_viewport":bounds.is_some_and(|r|r.x()>=-0.5&&r.y()>=-0.5&&r.x()+r.width()<=self.0.scroll[row].width() as f32+0.5&&r.y()+r.height()<=self.0.scroll[row].height() as f32+0.5)})
@@ -1052,5 +1076,48 @@ impl FittingLabel {
         label.set_parent(&widget);
         *widget.imp().child.borrow_mut() = Some(label.clone());
         widget
+    }
+}
+
+mod width_probe {
+    use super::*;
+    use gtk::subclass::prelude::*;
+    #[derive(Default)]
+    pub struct Probe {
+        pub width: Cell<i32>,
+        pub changed: RefCell<Option<Box<dyn Fn()>>>,
+    }
+    #[glib::object_subclass]
+    impl ObjectSubclass for Probe {
+        const NAME: &'static str = "RuwacTabWidthProbe";
+        type Type = super::WidthProbe;
+        type ParentType = gtk::Widget;
+    }
+    impl ObjectImpl for Probe {}
+    impl WidgetImpl for Probe {
+        fn measure(&self, _: gtk::Orientation, _: i32) -> (i32, i32, i32, i32) {
+            (0, 0, -1, -1)
+        }
+        fn size_allocate(&self, width: i32, _: i32, _: i32) {
+            // Only a real change of the free width reallocates tabs (deferred).
+            if self.width.replace(width) != width {
+                if let Some(changed) = self.changed.borrow().as_ref() {
+                    changed();
+                }
+            }
+        }
+    }
+}
+glib::wrapper! {pub struct WidthProbe(ObjectSubclass<width_probe::Probe>) @extends gtk::Widget, @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;}
+impl WidthProbe {
+    fn new() -> Self {
+        let widget: Self = glib::Object::new();
+        widget.set_hexpand(true);
+        widget.set_can_target(false);
+        widget
+    }
+    fn on_change(&self, f: impl Fn() + 'static) {
+        use gtk::subclass::prelude::ObjectSubclassIsExt;
+        *self.imp().changed.borrow_mut() = Some(Box::new(f));
     }
 }

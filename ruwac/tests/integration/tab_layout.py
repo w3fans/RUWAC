@@ -72,7 +72,7 @@ def layout_check(count,two,compact,half):
   widths={x['width']for x in members};assert len(widths)==1,('UNEQUAL_TAB_WIDTHS',row,widths)
   # GTK size requests cover the margin box; compare the allocation request.
   requests={x['width_request']for x in members};assert len(requests)==1,('UNEQUAL_TAB_REQUESTS',row,requests)
-  width=requests.pop();arrows=t['arrows'][row];full=t['row_widths'][row]+(2*arrows['width']if arrows['visible']else 0)
+  width=requests.pop();arrows=t['arrows'][row];full=t['available'][row]
   assert width>=minimum,('TAB_BELOW_MINIMUM',width)
   assert width<=max(minimum,int(full*0.22))+2,('TAB_WIDER_THAN_A_FIFTH',width,full)
   overflow=len(members)*(minimum+2)>full
