@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Tabs no longer squeeze together: with few tabs each gets an equal, roomy share
+  of the row (at most about a fifth of its width), and tabs shrink evenly as more
+  are opened, down to a readable minimum. Beyond that the row scrolls, with left
+  and right arrows that appear only when needed and a sideways mouse wheel.
+  Widths still never change on hover, selection, title or status updates. Tabs
+  drop the full frame: a rounded bottom border (accent on the selected tab) and a
+  faint divider between tabs.
 - Upgrades now reach new work without stopping anything. After a package
   update, a new terminal, `ruwac -S NAME`, `ruwac start` or the GUI uses an
   engine of the installed version: an older engine that is completely idle (no
