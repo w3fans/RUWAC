@@ -11,8 +11,10 @@
   launcher's New Window), so tabs can be dragged between any windows. Every
   window has its own "+" for a new terminal.
 - Saved workspaces gain **New window**: the saved layout opens in a separate
-  window and its terminals continue where they stopped. Views already open
-  elsewhere stay open; nothing is moved, closed or reconnected automatically.
+  window and its terminals continue where they stopped. Terminals of that
+  layout that are already open move into the new window with their running
+  programs (a session has one view per window set); nothing is closed,
+  restarted or reconnected.
 - Tabs no longer squeeze together: with few tabs each gets an equal, roomy share
   of the row (at most about a fifth of its width), and tabs shrink evenly as more
   are opened, down to a readable minimum. Beyond that the row scrolls, with left

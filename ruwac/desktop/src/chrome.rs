@@ -566,6 +566,16 @@ impl Chrome {
         if let (Some(w), Some(h)) = (q["width"].as_i64(), q["height"].as_i64()) {
             window.set_default_size(w.clamp(500, 3200) as i32, h.clamp(400, 2000) as i32);
         }
+        if let Some(name) = q["press"].as_str() {
+            // Activate a named, sensitive button exactly as its click handler would.
+            walk(window.upcast_ref(), &|w| {
+                if w.widget_name() == name && w.is_sensitive() && w.is_visible() {
+                    if let Some(b) = w.downcast_ref::<gtk::Button>() {
+                        b.emit_clicked();
+                    }
+                }
+            });
+        }
         if let Some(value) = q["maximized"].as_bool() {
             if value {
                 window.maximize();

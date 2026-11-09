@@ -33,7 +33,7 @@ struct Inner {
     // Overflow arrows; visible only when a row cannot fit its tabs at minimum width.
     arrows: [(gtk::Button, gtk::Button); 2],
     // Last full row width used for allocation, so unchanged sizes never reflow.
-    allocated: [Cell<(i32, usize, bool)>; 2],
+    allocated: [Cell<(i32, usize, usize, bool)>; 2],
     view: glib::WeakRef<adw::TabView>,
     tabs: RefCell<Vec<Tab>>,
     handlers: RefCell<Vec<glib::SignalHandlerId>>,
@@ -79,6 +79,28 @@ impl TabStrip {
                 b.set_tooltip_text(Some(tip));
                 b.set_focusable(false);
                 b.set_visible(false);
+                // Claim the pointer sequence, like the tab close button, so quick
+                // repeated clicks never reach the header's double-click maximize.
+                let click = gtk::GestureClick::new();
+                click.set_button(1);
+                click.set_propagation_phase(gtk::PropagationPhase::Capture);
+                click.connect_pressed(|gesture, _, _, _| {
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                });
+                let weak = b.downgrade();
+                click.connect_released(move |_, _, x, y| {
+                    if let Some(b) = weak.upgrade() {
+                        if b.is_sensitive()
+                            && x >= 0.
+                            && y >= 0.
+                            && x < b.width() as f64
+                            && y < b.height() as f64
+                        {
+                            b.emit_clicked();
+                        }
+                    }
+                });
+                b.add_controller(click);
                 b
             };
             (
@@ -113,7 +135,7 @@ impl TabStrip {
             hosts,
             scroll,
             arrows,
-            allocated: [Cell::new((0, 0, false)), Cell::new((0, 0, false))],
+            allocated: [Cell::new((0, 0, 0, false)), Cell::new((0, 0, 0, false))],
             view: view.downgrade(),
             tabs: RefCell::new(Vec::new()),
             handlers: RefCell::new(Vec::new()),
@@ -232,7 +254,8 @@ impl TabStrip {
                 let Some(inner) = weak.upgrade() else {
                     return glib::Propagation::Proceed;
                 };
-                if !inner.allocated[row].get().2 {
+                // Only an overflowing row scrolls sideways with the wheel.
+                if !inner.arrows[row].0.is_visible() {
                     return glib::Propagation::Proceed;
                 }
                 let step = if dx != 0.0 { dx } else { dy };
@@ -546,7 +569,7 @@ impl TabStrip {
         for row in 0..2 {
             let host = &inner.hosts[row];
             if !host.is_visible() {
-                inner.allocated[row].set((0, 0, false));
+                inner.allocated[row].set((0, 0, 0, false));
                 continue;
             }
             let members = tabs
@@ -571,7 +594,10 @@ impl TabStrip {
                 0
             };
             let full = page + arrows;
-            if inner.allocated[row].get() == (full, members.len(), compact) && flexible > 0 {
+            // Pinning changes widths without changing the tab count.
+            if inner.allocated[row].get() == (full, members.len(), flexible, compact)
+                && flexible > 0
+            {
                 let w = members
                     .iter()
                     .find(|t| !pinned(t))
@@ -600,7 +626,7 @@ impl TabStrip {
             }
             left.set_visible(overflow);
             right.set_visible(overflow);
-            inner.allocated[row].set((full, members.len(), compact));
+            inner.allocated[row].set((full, members.len(), flexible, compact));
             self.sync_arrows(row);
         }
     }
@@ -797,10 +823,10 @@ impl TabStrip {
         }
         let mut menu_items = Vec::new();
         items(self.0.root.upcast_ref(), window, &mut menu_items);
-        serde_json::json!({"menu_items":menu_items,"row_widths":self.0.scroll.iter().map(|s|s.width()).collect::<Vec<_>>(),"arrows":self.0.arrows.iter().map(|(l,r)|serde_json::json!({"visible":l.is_visible()&&r.is_visible(),"left_sensitive":l.is_sensitive(),"right_sensitive":r.is_sensitive(),"left_origin":l.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"right_origin":r.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"width":l.width(),"height":l.height()})).collect::<Vec<_>>(),"two_rows":self.0.two.get(),"compact":self.0.compact.get(),"rows":self.0.hosts.iter().filter(|h|h.is_visible()).count(),"tabs":self.0.tabs.borrow().iter().map(|tab|{
+        serde_json::json!({"menu_items":menu_items,"row_widths":self.0.scroll.iter().map(|s|s.width()).collect::<Vec<_>>(),"scroll":self.0.scroll.iter().map(|s|{let a=s.hadjustment();serde_json::json!({"value":a.value(),"upper":a.upper(),"page":a.page_size()})}).collect::<Vec<_>>(),"arrows":self.0.arrows.iter().map(|(l,r)|serde_json::json!({"visible":l.is_visible()&&r.is_visible(),"left_sensitive":l.is_sensitive(),"right_sensitive":r.is_sensitive(),"left_origin":l.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"right_origin":r.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"width":l.width(),"height":l.height()})).collect::<Vec<_>>(),"two_rows":self.0.two.get(),"compact":self.0.compact.get(),"rows":self.0.hosts.iter().filter(|h|h.is_visible()).count(),"tabs":self.0.tabs.borrow().iter().map(|tab|{
             let page=tab.page.upgrade();let row=usize::from(tab.button.parent().as_ref()==Some(self.0.rows[1].upcast_ref()));
             let bounds=tab.button.compute_bounds(&self.0.scroll[row]);
-            serde_json::json!({"id":page.as_ref().map(|p|p.child().widget_name().to_string()),"title":page.as_ref().map(|p|p.title().to_string()),"selected":tab.button.is_active(),"close_visible":tab.close.is_visible(),"close_width":tab.close.width(),"close_height":tab.close.height(),"close_pick":tab.close.compute_point(window,&gtk::graphene::Point::new(tab.close.width() as f32/2.,tab.close.height() as f32/2.)).and_then(|p|window.pick(p.x()as f64,p.y()as f64,gtk::PickFlags::DEFAULT)).map(|w|w.type_().name().to_string()),"close_origin":tab.close.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"font_size":tab.label.pango_context().font_description().map(|d|d.size()),"icon_size":tab.icon.pixel_size(),"indicator_size":tab.indicator.pixel_size(),"hint":tab.number.text().to_string(),"hint_visible":tab.hint.reveals_child(),"role":format!("{:?}",tab.button.accessible_role()),"row":row,"width":tab.button.width(),"height":tab.button.height(),"origin":tab.button.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"inside_viewport":bounds.is_some_and(|r|r.x()>=-0.5&&r.y()>=-0.5&&r.x()+r.width()<=self.0.scroll[row].width() as f32+0.5&&r.y()+r.height()<=self.0.scroll[row].height() as f32+0.5)})
+            serde_json::json!({"id":page.as_ref().map(|p|p.child().widget_name().to_string()),"title":page.as_ref().map(|p|p.title().to_string()),"selected":tab.button.is_active(),"close_visible":tab.close.is_visible(),"close_width":tab.close.width(),"close_height":tab.close.height(),"close_pick":tab.close.compute_point(window,&gtk::graphene::Point::new(tab.close.width() as f32/2.,tab.close.height() as f32/2.)).and_then(|p|window.pick(p.x()as f64,p.y()as f64,gtk::PickFlags::DEFAULT)).map(|w|w.type_().name().to_string()),"close_origin":tab.close.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"font_size":tab.label.pango_context().font_description().map(|d|d.size()),"icon_size":tab.icon.pixel_size(),"indicator_size":tab.indicator.pixel_size(),"hint":tab.number.text().to_string(),"hint_visible":tab.hint.reveals_child(),"role":format!("{:?}",tab.button.accessible_role()),"row":row,"width":tab.button.width(),"width_request":tab.button.width_request(),"height":tab.button.height(),"origin":tab.button.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"inside_viewport":bounds.is_some_and(|r|r.x()>=-0.5&&r.y()>=-0.5&&r.x()+r.width()<=self.0.scroll[row].width() as f32+0.5&&r.y()+r.height()<=self.0.scroll[row].height() as f32+0.5)})
         }).collect::<Vec<_>>()})
     }
     fn render_tab(&self, tab: &Tab, page: &adw::TabPage, active: bool) {

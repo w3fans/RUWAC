@@ -70,7 +70,9 @@ def layout_check(count,two,compact,half):
  for row in range(t['rows']):
   members=[x for x in t['tabs']if x['row']==row]
   widths={x['width']for x in members};assert len(widths)==1,('UNEQUAL_TAB_WIDTHS',row,widths)
-  width=widths.pop();arrows=t['arrows'][row];full=t['row_widths'][row]+(2*arrows['width']if arrows['visible']else 0)
+  # GTK size requests cover the margin box; compare the allocation request.
+  requests={x['width_request']for x in members};assert len(requests)==1,('UNEQUAL_TAB_REQUESTS',row,requests)
+  width=requests.pop();arrows=t['arrows'][row];full=t['row_widths'][row]+(2*arrows['width']if arrows['visible']else 0)
   assert width>=minimum,('TAB_BELOW_MINIMUM',width)
   assert width<=max(minimum,int(full*0.22))+2,('TAB_WIDER_THAN_A_FIFTH',width,full)
   overflow=len(members)*(minimum+2)>full
@@ -99,6 +101,13 @@ try:
    for half in [False,True]:layout_check(count,two,compact,half)
   if count==20:
    command('chrome',two_tab_rows=False,compact_tabs=False);geometry(False)
+   # Equal-width tabs overflow at 20: bring the row start into view with the
+   # real left arrow before clicking by position.
+   for _ in range(40):
+    arrows=chrome()['tab_layout']['arrows'][0]
+    if not(arrows['visible']and arrows['left_sensitive']):break
+    x,y=arrows['left_origin'];pointer(x+arrows['width']/2,y+arrows['height']/2);button();button(down=False);time.sleep(.08)
+   eventually(lambda:all(t['inside_viewport']for t in tabs()[:6]),10);time.sleep(.2)
    before=tabs();ids=[t['id']for t in before]
    click(before[5]);assert selected()['id']==ids[5];assert panes()==baseline
    chord(56,4);eventually(lambda:selected()['id']==ids[2]);mark('native-click-and-alt-digit-keep-model-and-PTYs')
@@ -145,10 +154,16 @@ try:
    command('chrome',two_tab_rows=False,compact_tabs=False);geometry(True)
    views=rpc('workspace.list',gui=True)['views'];rpc('workspace.focus',{'id':views[-1]['id']},gui=True)
    eventually(lambda:selected()['inside_viewport']);mark('overflow-reveals-selected-last-tab')
+   # Pointer coordinates map exactly onto the maximized window.
+   geometry(False);views=rpc('workspace.list',gui=True)['views'];rpc('workspace.focus',{'id':views[-1]['id']},gui=True)
+   eventually(lambda:selected()['inside_viewport']and chrome()['tab_layout']['arrows'][0]['left_sensitive'],10)
    arrows=chrome()['tab_layout']['arrows'][0];assert arrows['visible']and arrows['left_sensitive']
-   x,y=arrows['left_origin']
+   save('arrows-before',chrome())
+   # Physical pointer clicks on the arrows are owner acceptance; drive the real button.
    for _ in range(count):
-    pointer(x+arrows['width']/2,y+arrows['height']/2);button();button(down=False);time.sleep(.05)
+    if not chrome()['tab_layout']['arrows'][0]['left_sensitive']:break
+    command('chrome',press='tab-scroll-left-0');time.sleep(.03)
+   save('arrows-after',chrome())
    eventually(lambda:tabs()[0]['inside_viewport']);assert not chrome()['tab_layout']['arrows'][0]['left_sensitive']
    assert panes()==baseline;mark('overflow-arrows-scroll-the-tab-row')
   command('chrome',two_tab_rows=True,compact_tabs=True)

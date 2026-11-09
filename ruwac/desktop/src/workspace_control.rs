@@ -31,6 +31,8 @@ pub struct Control {
     pub workers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Opens a new window in this process for "Open in new window".
     pub window: Rc<dyn Fn() -> Option<(adw::TabView, tiles::FocusMemory)>>,
+    /// Tab views of every window of this process (main window included).
+    pub windows: Rc<dyn Fn() -> Vec<adw::TabView>>,
 }
 enum Prepared {
     Summary(Value),
@@ -306,8 +308,10 @@ impl Control {
         });
     }
     /// Rebuild a saved layout in a new window of this process and continue its
-    /// sessions there. Views get fresh IDs, so the same sessions may also stay
-    /// open elsewhere; nothing existing is moved, closed or reconnected.
+    /// sessions there. As everywhere in RUWAC, a session has one live view per
+    /// GUI: terminals of the layout that are already open (in any window) move
+    /// into the new window with their running programs; others reattach to
+    /// their saved sessions. Nothing is closed, restarted or reconnected.
     fn apply_new_window(
         &self,
         mut snapshot: workspace_store::Snapshot,
@@ -317,6 +321,44 @@ impl Control {
         }
         if snapshot.workspace.tabs.len() > 64 {
             return Err(error("LIMIT", "Workspace view or tab limit exceeded"));
+        }
+        let mut leaves = Vec::new();
+        for tab in &snapshot.workspace.tabs {
+            walk(&tab.layout, &mut leaves);
+        }
+        let sessions: HashSet<String> = leaves
+            .iter()
+            .filter_map(|l| match l {
+                workspace::Layout::Terminal { session, .. } => Some(session.clone()),
+                _ => None,
+            })
+            .collect();
+        // The view factory takes open terminals from the main window itself;
+        // release those in other windows first so each moves exactly once.
+        if let Ok(current) = (self.record)() {
+            let mut open = Vec::new();
+            for tab in &current.tabs {
+                walk(&tab.layout, &mut open);
+            }
+            let by_view: HashMap<String, String> = open
+                .iter()
+                .filter_map(|l| match l {
+                    workspace::Layout::Terminal { view_id, session } => {
+                        Some((view_id.clone(), session.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            for other in (self.windows)().into_iter().filter(|t| *t != self.tabs) {
+                for root in tiles::views(&other) {
+                    if by_view
+                        .get(root.widget_name().as_str())
+                        .is_some_and(|session| sessions.contains(session))
+                    {
+                        let _ = tiles::detach(&other, &root);
+                    }
+                }
+            }
         }
         for tab in &mut snapshot.workspace.tabs {
             tab.id = ruwac_protocol::id("tab");

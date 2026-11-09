@@ -98,7 +98,7 @@ try:
     eventually(lambda: len(windows()) >= 2, 10)
     assert set(baseline.items()) <= set(panes().items())
     mark('tabs-move-between-windows-and-keep-their-PTYs')
-    command('detach-tab', operation='return', window=len(windows()) - 1)
+    # Keep that tab in its detached window: the saved layout spans two windows.
     eventually(lambda: sum(len(w['tabs']) for w in windows()) == 4, 10)
 
     # 3. A saved workspace opens in a new window and continues its sessions.
@@ -108,19 +108,27 @@ try:
     saved = eventually(lambda: next((s for s in rpc('workspace.saved', gui=True)['saved_workspaces']
                                      if s['name'] == 'Generated layout'), None), 10)
     before_windows = len(windows())
-    before_views = {v['id'] for v in views()}
+    before_list = views()
+    (r / 'views-before.json').write_text(json.dumps(before_list, indent=2))
+    before_views = {v['id'] for v in before_list}
     command('workspace-picker', operation='refresh')
     time.sleep(0.5)
     command('workspace-picker', operation='window', value=saved['id'])
     eventually(lambda: len(windows()) == before_windows + 1, 15)
-    added = eventually(lambda: [v for v in views() if v['id'] not in before_views and v['session']] or None, 15)
-    sessions_before = {v['session'] for v in views() if v['id'] in before_views and v['session']}
-    assert {v['session'] for v in added} == sessions_before, (added, sessions_before)
-    assert len(windows()[-1]['tabs']) == saved['tabs']
+    saved_sessions = {v['session'] for v in before_list if v['session']}
+    def moved():
+        now = views()
+        new_tabs = {t['id'] for t in windows()[-1]['tabs']}
+        inside = [v for v in now if v['tab'] in new_tabs]
+        return (now, inside) if len(inside) == saved['tabs'] else None
+    now, inside = eventually(moved, 15)
+    (r / 'views-after.json').write_text(json.dumps(now, indent=2))
+    # Same sessions continue in the new window: moved, never duplicated or lost.
+    assert {v['session'] for v in inside} == saved_sessions, (inside, saved_sessions)
+    assert len(now) == len(before_list) and {v['session'] for v in now} == saved_sessions
     assert set(baseline.items()) <= set(panes().items())
-    assert all(v['id'] in {x['id'] for x in views()} for v in [{'id': i} for i in before_views])
     mark('saved-workspace-opens-in-a-new-window-continuing-the-same-sessions',
-         tabs=saved['tabs'], sessions=sorted({v['session'] for v in added}))
+         tabs=saved['tabs'], sessions=sorted(saved_sessions))
     (r / 'acceptance.json').write_text(json.dumps({'PASS': True, 'checks': checks,
                                                   'scope': 'Isolated Mutter display; fixture-driven button click and tab transfer; '
                                                            'pointer drag between windows and launcher remote activation not driven.'},
