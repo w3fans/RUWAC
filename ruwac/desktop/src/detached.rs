@@ -450,6 +450,18 @@ impl Windows {
                     }
                 }
             }
+            "new-window" => {
+                // The real header button, as a user click would trigger it.
+                if let Some(window) = from.root().and_downcast::<gtk::Window>() {
+                    crate::chrome::walk(window.upcast_ref(), &|w| {
+                        if w.widget_name() == "new-workspace-window" {
+                            if let Some(b) = w.downcast_ref::<gtk::Button>() {
+                                b.emit_clicked();
+                            }
+                        }
+                    });
+                }
+            }
             "close" => {
                 if let Some((w, _, _)) = self
                     .entries
