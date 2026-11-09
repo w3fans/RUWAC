@@ -46,7 +46,7 @@ if name == 'dnf':
         section, option = key.rsplit('.', 1)
         d = Path(os.environ['STUB_ROOT']) / 'etc/dnf/repos.override.d'
         d.mkdir(parents=True, exist_ok=True)
-        (d / '99-config_manager.repo').write_text('[%s]\n%s = %s\n' % (section, option, value))
+        (d / '99-config_manager.repo').write_text('[%s]\n%s=%s\n' % (section, option, value))
         sys.exit(0)
     if 'check-upgrade' in args: sys.exit(state['check_rc'])
     if 'upgrade' in args:
@@ -208,7 +208,7 @@ class FleetSetup(unittest.TestCase):
         self.assertEqual(set(f.installed()), {'ruwac'})  # headless: no desktop
         override = (f.root / 'etc/dnf/repos.override.d/99-config_manager.repo').read_text()
         self.assertIn(f'[{REPO}]', override)
-        self.assertIn('metadata_expire = 300', override)
+        self.assertIn('metadata_expire=300', override)
         self.assertIn('OnUnitActiveSec=3h', (f.root / 'etc/systemd/system/ruwac-package-update.timer.d/ring.conf').read_text())
         before = len(f.calls())
         rc, again = f.setup('--ring', 'standard')
@@ -216,10 +216,14 @@ class FleetSetup(unittest.TestCase):
         self.assertFalse(any(c[0] == 'dnf' and ('install' in c or 'enable' in c or 'setopt' in c) for c in f.calls()[before:]))
 
     def test_desktop_machine_gets_matching_desktop_and_canary_interval(self):
+        # A graphical default without a display manager is still headless.
         f = self.fixture(installed={}, repos=['fedora', 'updates'], default_target='graphical.target')
+        rc, out = f.setup('--ring', 'standard')
+        self.assertEqual((rc, set(f.installed())), (0, {'ruwac'}), out)
+        f = self.fixture(installed={'gdm': '49-1.fc45'}, repos=['fedora', 'updates'], default_target='graphical.target')
         rc, out = f.setup('--ring', 'canary')
         self.assertEqual(rc, 0, out)
-        self.assertEqual(set(f.installed()), {'ruwac', 'ruwac-desktop'})
+        self.assertEqual(set(f.installed()), {'gdm', 'ruwac', 'ruwac-desktop'})
         self.assertTrue(out['desktop'])
         self.assertIn('OnUnitActiveSec=45min', (f.root / 'etc/systemd/system/ruwac-package-update.timer.d/ring.conf').read_text())
 

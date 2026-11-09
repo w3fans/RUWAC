@@ -35,9 +35,12 @@ project=zvegelj/ruwac
 repo=copr:copr.fedorainfracloud.org:zvegelj:ruwac
 changed=() unchanged=()
 note() { if [ "$2" = changed ]; then changed+=("$1"); else unchanged+=("$1"); fi; }
+# Plain shell only: python3 may not exist before RUWAC is installed.
+jstr() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
+jlist() { local out="" item; for item in "$@"; do out="$out${out:+,}$(jstr "$item")"; done; printf '[%s]' "$out"; }
 fail() {
     if [ $json = 1 ]; then
-        python3 -c 'import json,sys; print(json.dumps({"ok":False,"error":sys.argv[1]}))' "$1"
+        printf '{"ok":false,"error":%s}\n' "$(jstr "$1")"
     else
         echo "fleet-setup: $1" >&2
     fi
@@ -63,20 +66,10 @@ fi
 
 # 2. Fresh metadata for this repository only (DNF's default can be 48 hours).
 # `dnf config-manager setopt` records repository options in repos.override.d.
-current=$(python3 - "$root/etc/dnf/repos.override.d" "$repo" <<'PY'
-import configparser, pathlib, sys
-value = ""
-for f in sorted(pathlib.Path(sys.argv[1]).glob("*.repo")):
-    c = configparser.ConfigParser(interpolation=None)
-    try:
-        c.read(f)
-    except configparser.Error:
-        continue
-    if c.has_option(sys.argv[2], "metadata_expire"):
-        value = c.get(sys.argv[2], "metadata_expire").strip()
-print(value)
-PY
-)
+current=$(cat "$root"/etc/dnf/repos.override.d/*.repo 2>/dev/null | awk -v repo="[$repo]" '
+    /^\[/ { inside = ($0 == repo) }
+    inside && /^[[:space:]]*metadata_expire[[:space:]]*=/ { sub(/^[^=]*=[[:space:]]*/, ""); value = $0 }
+    END { print value }')
 if [ "$current" = 300 ]; then
     note metadata_expire unchanged
 else
@@ -89,7 +82,13 @@ fi
 want_desktop=0
 case $desktop in
     yes) want_desktop=1 ;;
-    auto) [ "$(systemctl get-default 2>/dev/null)" = graphical.target ] && want_desktop=1 ;;
+    # A graphical default alone is not enough (plain systemd defaults to it);
+    # also require an installed display manager or GNOME Shell.
+    auto) if [ "$(systemctl get-default 2>/dev/null)" = graphical.target ] \
+            && { rpm -q gdm >/dev/null 2>&1 || rpm -q sddm >/dev/null 2>&1 \
+                 || rpm -q lightdm >/dev/null 2>&1 || rpm -q gnome-shell >/dev/null 2>&1; }; then
+              want_desktop=1
+          fi ;;
 esac
 rpm -q ruwac-desktop >/dev/null 2>&1 && want_desktop=1  # never remove an installed desktop
 packages=(ruwac)
@@ -143,19 +142,18 @@ if [ "$ring" = disabled ]; then
 elif systemctl is-enabled --quiet ruwac-package-update.timer 2>/dev/null; then
     note timer unchanged
 else
-    systemctl enable --now ruwac-package-update.timer >/dev/null 2>&1 || fail "cannot enable the update timer"
+    # Without a running systemd (container, chroot, image build), enable offline.
+    systemctl enable --now ruwac-package-update.timer >/dev/null 2>&1 \
+        || { [ ! -d "$root/run/systemd/system" ] && systemctl enable ruwac-package-update.timer >/dev/null 2>&1; } \
+        || fail "cannot enable the update timer"
     note timer changed
 fi
 
 installed=$(rpm -q --qf '%{VERSION}-%{RELEASE}' ruwac 2>/dev/null || true)
 if [ $json = 1 ]; then
-    python3 - "$installed" "$ring" "$want_desktop" "${#changed[@]}" "${changed[@]}" "${unchanged[@]}" <<'PY'
-import json, sys
-installed, ring, desktop, n = sys.argv[1], sys.argv[2], sys.argv[3] == "1", int(sys.argv[4])
-rest = sys.argv[5:]
-print(json.dumps({"ok": True, "installed": installed, "ring": ring, "desktop": desktop,
-                  "changed": rest[:n], "unchanged": rest[n:]}))
-PY
+    printf '{"ok":true,"installed":%s,"ring":%s,"desktop":%s,"changed":%s,"unchanged":%s}\n' \
+        "$(jstr "$installed")" "$(jstr "$ring")" "$([ $want_desktop = 1 ] && echo true || echo false)" \
+        "$(jlist ${changed[@]+"${changed[@]}"})" "$(jlist ${unchanged[@]+"${unchanged[@]}"})"
 else
     echo "RUWAC $installed · ring $ring · desktop $([ $want_desktop = 1 ] && echo yes || echo no)"
     echo "changed: ${changed[*]:-nothing}"
