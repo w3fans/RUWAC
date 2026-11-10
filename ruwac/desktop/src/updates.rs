@@ -105,15 +105,25 @@ fn engine_controls(content: &gtk::Box, status: &gtk::Label, socket: &std::path::
     let button = gtk::Button::with_label("New window on installed engine");
     button.set_widget_name("update-engine");
     let socket = socket.to_path_buf();
+    let engine_socket = socket.clone();
     let weak_status = status.downgrade();
     button.connect_clicked(move |button| {
-        // Same routing as `ruwac gui`: the installed engine, never by stopping work.
+        // `engine gui` starts (or reopens) the installed-version engine beside
+        // the engine this window uses, in the same private directory, and never
+        // stops or moves running work. A neutral base lets it reopen an already
+        // selected versioned engine.
         let launched = std::env::current_exe()
             .map_err(|e| e.to_string())
             .and_then(|exe| installed_cli(&exe))
             .and_then(|cli| {
+                let base = engine_socket
+                    .parent()
+                    .ok_or("Engine socket directory unavailable")?
+                    .join("control.sock");
                 std::process::Command::new(cli)
-                    .args(["gui", "--new-instance"])
+                    .arg("--socket")
+                    .arg(base)
+                    .args(["engine", "gui"])
                     .env_remove("RUWAC_SOCKET")
                     .env_remove("RUWAC_STATE_FILE")
                     .spawn()
