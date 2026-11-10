@@ -3216,7 +3216,8 @@ impl View {
             }
             return;
         }
-        let navigation = navigation_key(key, mods, self.grid_flag("application_cursor"));
+        let navigation = navigation_key(key, mods, self.grid_flag("application_cursor"))
+            .or_else(|| function_key(key, mods));
         let is_navigation = navigation.is_some();
         let mut text = navigation.unwrap_or_else(|| match key {
             gdk::Key::Return | gdk::Key::KP_Enter => "\r".into(),
@@ -3642,6 +3643,82 @@ impl Drop for View {
     }
 }
 
+// Xterm function keys: F1–F4 are SS3 P–S (CSI 1;m P–S with modifiers),
+// F5–F12 are CSI n~ (CSI n;m~). Without this they produced no input at all.
+fn function_key(key: gdk::Key, mods: gdk::ModifierType) -> Option<String> {
+    let (parameter, final_byte) = match key {
+        gdk::Key::F1 => (1, 'P'),
+        gdk::Key::F2 => (1, 'Q'),
+        gdk::Key::F3 => (1, 'R'),
+        gdk::Key::F4 => (1, 'S'),
+        gdk::Key::F5 => (15, '~'),
+        gdk::Key::F6 => (17, '~'),
+        gdk::Key::F7 => (18, '~'),
+        gdk::Key::F8 => (19, '~'),
+        gdk::Key::F9 => (20, '~'),
+        gdk::Key::F10 => (21, '~'),
+        gdk::Key::F11 => (23, '~'),
+        gdk::Key::F12 => (24, '~'),
+        _ => return None,
+    };
+    let modifier = 1
+        + u8::from(mods.contains(gdk::ModifierType::SHIFT_MASK))
+        + 2 * u8::from(mods.contains(gdk::ModifierType::ALT_MASK))
+        + 4 * u8::from(mods.contains(gdk::ModifierType::CONTROL_MASK));
+    Some(match (modifier > 1, final_byte) {
+        (false, '~') => format!("\x1b[{parameter}~"),
+        (false, _) => format!("\x1bO{final_byte}"),
+        (true, _) => format!("\x1b[{parameter};{modifier}{final_byte}"),
+    })
+}
+
+#[cfg(test)]
+mod function_key_tests {
+    use super::*;
+    #[test]
+    fn function_keys_use_xterm_sequences_with_modifiers() {
+        let none = gdk::ModifierType::empty();
+        let expected = [
+            (gdk::Key::F1, "\x1bOP"),
+            (gdk::Key::F2, "\x1bOQ"),
+            (gdk::Key::F3, "\x1bOR"),
+            (gdk::Key::F4, "\x1bOS"),
+            (gdk::Key::F5, "\x1b[15~"),
+            (gdk::Key::F6, "\x1b[17~"),
+            (gdk::Key::F7, "\x1b[18~"),
+            (gdk::Key::F8, "\x1b[19~"),
+            (gdk::Key::F9, "\x1b[20~"),
+            (gdk::Key::F10, "\x1b[21~"),
+            (gdk::Key::F11, "\x1b[23~"),
+            (gdk::Key::F12, "\x1b[24~"),
+        ];
+        for (key, sequence) in expected {
+            assert_eq!(function_key(key, none).as_deref(), Some(sequence));
+        }
+        assert_eq!(
+            function_key(gdk::Key::F1, gdk::ModifierType::SHIFT_MASK).as_deref(),
+            Some("\x1b[1;2P")
+        );
+        assert_eq!(
+            function_key(gdk::Key::F5, gdk::ModifierType::CONTROL_MASK).as_deref(),
+            Some("\x1b[15;5~")
+        );
+        assert_eq!(
+            function_key(
+                gdk::Key::F12,
+                gdk::ModifierType::ALT_MASK | gdk::ModifierType::SHIFT_MASK
+            )
+            .as_deref(),
+            Some("\x1b[24;4~")
+        );
+        assert_eq!(function_key(gdk::Key::a, none), None);
+        assert_eq!(
+            navigation_key(gdk::Key::Insert, none, false).as_deref(),
+            Some("\x1b[2~")
+        );
+    }
+}
+
 // Xterm navigation modifiers are encoded in CSI parameters, including when
 // unmodified cursor keys use SS3. An ESC prefix alone would lose Shift.
 fn navigation_key(key: gdk::Key, mods: gdk::ModifierType, application: bool) -> Option<String> {
@@ -3652,6 +3729,7 @@ fn navigation_key(key: gdk::Key, mods: gdk::ModifierType, application: bool) -> 
         gdk::Key::Left => (1, 'D'),
         gdk::Key::Home => (1, 'H'),
         gdk::Key::End => (1, 'F'),
+        gdk::Key::Insert | gdk::Key::KP_Insert => (2, '~'),
         gdk::Key::Delete => (3, '~'),
         gdk::Key::Page_Up => (5, '~'),
         gdk::Key::Page_Down => (6, '~'),

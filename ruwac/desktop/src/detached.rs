@@ -390,7 +390,9 @@ impl Windows {
                 }
                 return glib::Propagation::Stop;
             }
-            if shortcuts::local_escape(key, mods) || crate::chrome::controls_shortcut(key, mods) {
+            if shortcuts::local_escape(key, mods)
+                || crate::chrome::controls_shortcut(key, mods, mode.active())
+            {
                 c.popup();
                 return glib::Propagation::Stop;
             }

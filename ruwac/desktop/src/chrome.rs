@@ -669,10 +669,32 @@ impl Chrome {
         serde_json::json!({"tab_new_terminal":self.bar.end_action_widget().map(|w|serde_json::json!({"name":w.widget_name().as_str(),"mapped":w.is_mapped(),"sensitive":w.is_sensitive(),"width":w.width(),"height":w.height(),"origin":w.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()])})),"header_tree":tree.into_inner(),"header_height":self.header.height(),"tab_bar_width":self.bar.width(),"tab_layout":self.bar.inspect(window),"two_tab_rows":p.two_tab_rows,"compact_tabs":p.compact_tabs,"actions_revealed":self.reveal.reveals_child(),"docked":p.controls_docked,"dock_height":self.dock.height(),"scheme":p.scheme,"term_font":p.term_font,"term_size_pt":p.term_size_pt,"terminal_shortcuts":p.terminal_shortcuts,"copy_selection_to_clipboard":p.copy_selection_to_clipboard,"content_height":content.as_ref().height(),"maximized":window.is_maximized(),"fullscreen":window.is_fullscreen(),"window_height":window.height(),"window_width":window.width(),"terminal_background":schemes::current().colors[8],"open":self.pop.is_visible()})
     }
 }
-pub fn controls_shortcut(key: gdk::Key, mods: gdk::ModifierType) -> bool {
+/// F10 opens session controls only while keys stay with this computer; with
+/// Map keys on (AltGr tap) it reaches the terminal program or remote desktop
+/// like every other function key. Ctrl+. always opens the controls.
+pub fn controls_shortcut(key: gdk::Key, mods: gdk::ModifierType, map_keys: bool) -> bool {
     let m = mods - gdk::ModifierType::LOCK_MASK;
-    (key == gdk::Key::F10 && m.is_empty())
+    (key == gdk::Key::F10 && m.is_empty() && !map_keys)
         || (key == gdk::Key::period && m == gdk::ModifierType::CONTROL_MASK)
+}
+
+#[cfg(test)]
+mod controls_shortcut_tests {
+    use super::*;
+    #[test]
+    fn f10_belongs_to_the_program_while_keys_are_mapped() {
+        let none = gdk::ModifierType::empty();
+        assert!(controls_shortcut(gdk::Key::F10, none, false));
+        assert!(!controls_shortcut(gdk::Key::F10, none, true));
+        assert!(!controls_shortcut(gdk::Key::F9, none, false));
+        for mapped in [false, true] {
+            assert!(controls_shortcut(
+                gdk::Key::period,
+                gdk::ModifierType::CONTROL_MASK,
+                mapped
+            ));
+        }
+    }
 }
 
 pub fn tab_title_widget(bar: &impl IsA<gtk::Widget>) -> gtk::Widget {
