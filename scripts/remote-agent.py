@@ -21,6 +21,33 @@ class LaunchError(Exception):
     """A fixed, safe-to-display launcher diagnostic."""
 
 
+SYSTEM_RUWAC = '/usr/bin/ruwac'
+DISTRIBUTION_MARKER = '/usr/share/ruwac/rpm-installation.json'
+
+
+def select_executable(binary):
+    """The RUWAC CLI to use for the default name `ruwac`, or an explicit path.
+
+    On a machine with a distribution (COPR/DNF) installation the packaged CLI
+    is canonical. A leftover per-user copy in ~/.local/bin usually comes first
+    on PATH and would otherwise shadow the updated package.
+    """
+    if binary == 'ruwac':
+        try:
+            with open(DISTRIBUTION_MARKER, encoding='utf-8') as marker:
+                distribution = json.load(marker).get('kind') == 'distribution'
+        except (OSError, ValueError, AttributeError):
+            distribution = False
+        if distribution and os.path.isfile(SYSTEM_RUWAC) and os.access(SYSTEM_RUWAC, os.X_OK):
+            return SYSTEM_RUWAC
+    exe = shutil.which(binary)
+    if not exe and binary == 'ruwac':
+        candidate = os.path.expanduser('~/.local/bin/ruwac')
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            exe = candidate
+    return exe
+
+
 def main():
     if len(sys.argv) not in (5, 6, 7):
         raise LaunchError('Invalid remote agent request')
@@ -32,11 +59,7 @@ def main():
     session_name = shared or name
     if name not in ('codex', 'claude', 'kimi'):
         raise LaunchError('Choose a supported remote agent')
-    exe = shutil.which(binary)
-    if not exe and binary == 'ruwac':
-        candidate = os.path.expanduser('~/.local/bin/ruwac')
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            exe = candidate
+    exe = select_executable(binary)
     if not exe:
         raise LaunchError('Install the RUWAC CLI on this machine before launching a persistent agent.')
     # Check the executable actually selected on every connection, including

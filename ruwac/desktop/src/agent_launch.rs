@@ -37,7 +37,7 @@ fn copr_function() -> String {
         [ -n "$first_party" ] || {{ echo 'RUWAC: no supported Fedora dependency repository is enabled.' >&2; return 2; }}
         repos="--repo=$repo --setopt=$repo.skip_if_unavailable=0"
         for id in $first_party; do repos="$repos --repo=$id"; done
-        if grep -qs '\"kind\":\"distribution\"' /usr/share/ruwac/rpm-installation.json; then
+        if grep -qsF '"kind":"distribution"' /usr/share/ruwac/rpm-installation.json; then
             # A machine set up with fleet-setup updates itself in the background;
             # never block an agent launch on the network or a sudo prompt.
             if systemctl is-enabled --quiet ruwac-package-update.timer 2>/dev/null; then
@@ -63,10 +63,10 @@ fn copr_function() -> String {
         packages=ruwac; rpm -q ruwac-desktop >/dev/null 2>&1 && packages='ruwac ruwac-desktop'
         if rpm -q ruwac >/dev/null 2>&1; then
             sudo dnf -y --refresh upgrade $repos $packages &&
-            {{ grep -qs '\"kind\":\"distribution\"' /usr/share/ruwac/rpm-installation.json ||
+            {{ grep -qsF '"kind":"distribution"' /usr/share/ruwac/rpm-installation.json ||
                sudo dnf -y reinstall $repos $packages; }} || return 2
         else sudo dnf -y --refresh install $repos ruwac || return 2; fi
-        grep -qs '\"kind\":\"distribution\"' /usr/share/ruwac/rpm-installation.json || {{ echo 'RUWAC: distribution installation marker missing; refusing a parallel per-user install.' >&2; return 2; }}
+        grep -qsF '"kind":"distribution"' /usr/share/ruwac/rpm-installation.json || {{ echo 'RUWAC: distribution installation marker missing; refusing a parallel per-user install.' >&2; return 2; }}
         /usr/bin/ruwac update >/dev/null 2>&1
         return 0
     }}"#,
@@ -618,9 +618,73 @@ mod tests {
             fs::remove_dir_all(&dir).unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(stdout.ends_with("rc=0\n"), "{output:?}");
+            // GNU grep 3.8+ warns about `\"` in a pattern; the launcher must stay silent.
+            assert!(output.stderr.is_empty(), "{output:?}");
             assert_eq!(calls.contains("check-upgrade"), expect_dnf_check, "{calls}");
             assert!(!calls.contains("sudo"), "{calls}");
         }
+    }
+    #[test]
+    fn copr_marker_checks_are_fixed_strings_without_stray_escapes() {
+        let script = copr_function();
+        assert!(!script.contains("\\\""), "{script}");
+        assert_eq!(
+            script
+                .matches(
+                    r#"grep -qsF '"kind":"distribution"' /usr/share/ruwac/rpm-installation.json"#
+                )
+                .count(),
+            3
+        );
+    }
+    #[test]
+    fn packaged_cli_wins_over_a_stale_per_user_copy() {
+        let dir = std::env::temp_dir().join(ruwac_protocol::id("cli_select"));
+        let (home_bin, system) = (dir.join("home/.local/bin"), dir.join("usr-bin-ruwac"));
+        fs::create_dir_all(&home_bin).unwrap();
+        for path in [home_bin.join("ruwac"), system.clone()] {
+            fs::write(&path, "#!/bin/sh\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let marker = dir.join("rpm-installation.json");
+        let select = |kind: &str| {
+            fs::write(&marker, format!(r#"{{"kind":"{kind}"}}"#)).unwrap();
+            let probe = format!(
+                "import sys,types\nm=types.ModuleType('remote_agent')\nexec(compile(sys.stdin.read(),'remote-agent.py','exec'),m.__dict__)\n\
+                 m.SYSTEM_RUWAC={:?}\nm.DISTRIBUTION_MARKER={:?}\nprint(m.select_executable('ruwac'))\nprint(m.select_executable('/explicit/ruwac'))",
+                system.display().to_string(),
+                marker.display().to_string()
+            );
+            let mut child = Command::new("python3")
+                .args(["-I", "-c", &probe])
+                .env("PATH", format!("{}:/usr/bin:/bin", home_bin.display()))
+                .env("HOME", dir.join("home"))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(include_str!("../../../scripts/remote-agent.py").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "{out:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        // A distribution install is canonical even though ~/.local/bin is first on PATH.
+        assert_eq!(
+            select("distribution"),
+            format!("{}\nNone\n", system.display())
+        );
+        // Without the marker (per-user install), PATH order is kept.
+        assert_eq!(
+            select("user"),
+            format!("{}\nNone\n", home_bin.join("ruwac").display())
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
     fn defaults_open_resume_pickers_without_a_prompt() {
