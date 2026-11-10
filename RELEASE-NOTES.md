@@ -1,42 +1,42 @@
-RUWAC v0.4.73 — colored scrollback and visible COPR update failures
+RUWAC v0.4.74 — upgrades that reach new work, roomy tabs and many windows
 
-Closing a tab from its context menu now retains the menu parent until cleanup
-finishes, avoiding a GTK lifetime failure exposed by the RDP regression tests.
+Package updates now reach new work without stopping anything. After an update,
+new terminals, `ruwac -S NAME`, `ruwac start` and the GUI use an engine of the
+installed version. An older engine that is completely idle is retired safely
+and replaced on the default socket, keeping its ended history readable; an
+older engine that still runs programs is preserved untouched and the installed
+engine starts beside it. Existing named sessions are still found wherever they
+live, and `ruwac -ls` lists every engine's sessions. The new atomic
+`daemon.stopIfIdle` (and `ruwac engine stop`) never stops an engine while a
+terminal runs or another client is attached. `ruwac engine show` and the GUI's
+Updates dialog show the installed package, every engine and where new sessions
+go.
 
-Terminal history retains text colors and attributes while scrolling and selecting
-beyond the visible page. Styles are requested only for history snapshots, stored
-as bounded runs and a shared palette, and rendered only for visible rows. Existing
-selection, soft-wrap copying and application mouse/Shift-override behavior remain.
-Older engines and plain recovery checkpoints continue to work with plain history;
-discarded checkpoint colors cannot be reconstructed.
+Fedora machines can be set up once and then update RUWAC on their own:
+`/usr/libexec/ruwac/fleet-setup --ring canary|standard|disabled` enables the
+RUWAC COPR with five-minute metadata, installs the matching packages and
+enables a package-only update timer. It never touches running engines or
+terminals; `ruwac update status` shows the result.
 
-Remote Fedora updates distinguish a current package, an available upgrade and a
-failed COPR query. Targeted checks require the COPR repository to be reachable,
-keep DNF diagnostics visible and choose enabled Fedora/updates or Rawhide
-repositories for dependencies. Fedora package failures do not trigger a parallel
-per-user installation. CLI and desktop upgrade together when both are installed.
+Tabs share the bar equally — at most about a fifth of it each — shrink evenly as
+more open, and scroll with arrows when crowded, with a lighter bottom-border
+style. New windows open in the same RUWAC, so tabs can be dragged between
+windows, and a saved workspace can be opened in a new window to continue its
+terminals. Saved SSH machines can run a startup command such as `su` after
+login. Ctrl+V of a clipboard image now reaches Claude Code behind a nested
+RUWAC session. File transfers show progress again with rsync 3.5.2, which
+changed its progress format. Remote Codex and Claude tabs on COPR machines
+start without grep warnings and use the installed package, not a leftover
+~/.local/bin copy. Function keys F1–F12 and Insert now reach terminal programs
+such as nvtop, htop and mc; with Map keys on (Right Alt tap), F10 does too.
 
-The README includes permanent COPR enablement, a repository-only five-minute
-metadata cache override, immediate refresh commands and default-engine replacement
-instructions. Apply the repository setup on each client. Ordinary system updates
-keep their existing unavailable-repository policy.
+Update a Fedora machine with:
 
-Generated native tests cover ordinary wheel scrolling, selection at both pane
-edges, historical colors and PRIMARY copy. The published v0.4.72 negative control
-reproduces the missing colors. A controlled 2,400-key A/B/A check with 20 terminal
-windows and deep history passed latency, CPU and memory budgets; this is received
-output timing, not physical GTK/RDP latency. External hardware acceptance remains
-separate. No broad typing-speed improvement is claimed.
+    sudo dnf upgrade --refresh ruwac ruwac-desktop
 
-Fedora CLI/desktop packages and portable CLI archive/Debian packages follow the
-existing release gates. Portable targets include Ubuntu 22.04/24.04 and Debian
-12/13; real Proxmox-host acceptance and an APT repository remain open. The known
-RSA advisory and maintenance warnings remain visible and unsuppressed.
-
-Updates now offers **Open updated engine**, including COPR installations. It
-uses the current installed CLI, preserves the existing engine, and starts with
-independent history. Update both the GUI and engine for colored history. Reopening a GUI can reuse its
-older persistent engine. `ruwac engine gui` opens a separate updated engine without
-ending existing work. Replacing the default engine ends any programs it still
-owns; follow the README from an external terminal after closing those programs.
-No live engine is automatically stopped or migrated by this update.
+Reopen the GUI to load the new client; running engines and terminals are kept.
+The desktop's SQLite binding moves to rusqlite 0.41.1 / libsqlite3-sys 0.39.1,
+clearing RUSTSEC-2026-0459 (RUWAC links the system SQLite and never built the
+affected bundled copy). The desktop RSA advisory RUSTSEC-2023-0071 remains: stable `rsa 0.10.0` is now
+patched upstream, but IronRDP's Picky/SSPI/winscard releases still pin the
+release candidate. No complete security or physical qualification is implied.

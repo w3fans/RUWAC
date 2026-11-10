@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.4.74 — 2026-11-09 — Stable source release
+
 - Ctrl+V of a clipboard image into Claude Code running behind a nested RUWAC
   session (a GUI tab that runs `ruwac -r NAME`) now attaches the image to the
   draft. The desktop recognized only Codex's input box there, so it fell back to
@@ -55,6 +57,20 @@
   updated on disk) and GUI, and which engine new sessions use;
   `ruwac engine status --json` adds the same under `machine`, keeping the
   original fields. Engine `health` reports live and ended terminals and the PID.
+- The desktop's SQLite binding moves to rusqlite 0.41.1 / libsqlite3-sys
+  0.39.1, clearing RUSTSEC-2026-0459. RUWAC links the system SQLite and never
+  compiled the affected bundled copy; the inventory store is unchanged.
+- Rsync transfers read progress from rsync 3.5.2, which prints the byte count
+  with a "B" suffix; previously every update was dropped, so progress stayed
+  at zero.
+- Remote agent tabs on COPR-provisioned Fedora machines no longer print
+  `grep: warning: stray \ before "` lines (GNU grep 3.8+), and launch the
+  packaged /usr/bin/ruwac instead of a stale per-user copy that came first on
+  PATH.
+- Function keys F1–F12 (with Shift/Alt/Ctrl) and Insert now send xterm
+  sequences to terminal programs; previously they sent nothing. F10 still
+  opens session controls, except with Map keys on, where it reaches the
+  program or remote desktop; Ctrl+. always opens the controls.
 ## v0.4.73 — 2026-11-08 — Stable source release
 
 - Keep a tab-menu parent alive until popover cleanup completes, preventing a
