@@ -30,7 +30,7 @@ png = "=0.18.0"
 serde = { version = "=1.0.228", features = ["derive"] }
 futures-util = "=0.3.34"
 ssh2 = "=0.9.6"
-rusqlite = { version = "=0.39.0", default-features = false }
+rusqlite = { version = "=0.41.1", default-features = false }
 webkit6 = "=0.6.1"
 url = "=2.5.8"
 unicode-width = "=0.2.2"
