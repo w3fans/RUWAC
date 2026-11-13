@@ -687,7 +687,7 @@ Repeated `Terminal` names are independent persistent sessions created by GUI ter
 
 Product purpose, requested capabilities, realized scope and recent code-review findings: [functionality audit](spec/RUWAC_FUNCTIONALITY_AUDIT.md).
 
-After installation, `man ruwac` documents session commands, keyboard controls and updates. Machines: Alt+M; Agents: Alt+A. Preferences → Tight line spacing reduces vertical spacing; existing saved appearance settings are preserved.
+After installation, `man ruwac` documents session commands, keyboard controls and updates. Machines: Alt+M; other Alt letters go to applications. Preferences → Tight line spacing reduces vertical spacing; existing saved appearance settings are preserved.
 
 ### Mouse selection across Linux RDP desktops
 

@@ -1,42 +1,31 @@
-RUWAC v0.4.74 — upgrades that reach new work, roomy tabs and many windows
+RUWAC v0.4.75 — copy nested selections and pass application Alt keys
 
-Package updates now reach new work without stopping anything. After an update,
-new terminals, `ruwac -S NAME`, `ruwac start` and the GUI use an engine of the
-installed version. An older engine that is completely idle is retired safely
-and replaced on the default socket, keeping its ended history readable; an
-older engine that still runs programs is preserved untouched and the installed
-engine starts beside it. Existing named sessions are still found wherever they
-live, and `ruwac -ls` lists every engine's sessions. The new atomic
-`daemon.stopIfIdle` (and `ruwac engine stop`) never stops an engine while a
-terminal runs or another client is attached. `ruwac engine show` and the GUI's
-Updates dialog show the installed package, every engine and where new sessions
-go.
+Ctrl+Shift+C can now copy a nested terminal application's mouse selection to
+CLIPBOARD. Desktop Ctrl+C also copies that selection, and becomes an interrupt
+again after typing clears it. Previously a nested RUWAC could report that text
+was copied to its mouse-selection buffer while the outer window had no text
+for the keyboard Copy action. The new fallback requires the focused pane's
+approved selection and current PRIMARY ownership. A new selection, typing,
+focus loss or a different owner invalidates it; stale responses cannot copy
+text from another pane. Copy requested while that approved selection is still
+loading finishes when it arrives, rather than interrupting the application.
 
-Fedora machines can be set up once and then update RUWAC on their own:
-`/usr/libexec/ruwac/fleet-setup --ring canary|standard|disabled` enables the
-RUWAC COPR with five-minute metadata, installs the matching packages and
-enables a package-only update timer. It never touches running engines or
-terminals; `ruwac update status` shows the result.
+Plain Alt+M opens Machines and Alt+digits select workspace tabs. Other plain
+Alt letters belong to the application: Alt+A no longer opens RUWAC's Agents
+menu. Agents remains available from its button. Native tests verify exact
+Alt+A, Alt+X and Alt+S input bytes, keyboard selection copy, interrupt restoration
+and stale-owner refusal, alongside the existing word and Shift-selection tests.
 
-Tabs share the bar equally — at most about a fifth of it each — shrink evenly as
-more open, and scroll with arrows when crowded, with a lighter bottom-border
-style. New windows open in the same RUWAC, so tabs can be dragged between
-windows, and a saved workspace can be opened in a new window to continue its
-terminals. Saved SSH machines can run a startup command such as `su` after
-login. Ctrl+V of a clipboard image now reaches Claude Code behind a nested
-RUWAC session. File transfers show progress again with rsync 3.5.2, which
-changed its progress format. Remote Codex and Claude tabs on COPR machines
-start without grep warnings and use the installed package, not a leftover
-~/.local/bin copy. Function keys F1–F12 and Insert now reach terminal programs
-such as nvtop, htop and mc; with Map keys on (Right Alt tap), F10 does too.
-
-Update a Fedora machine with:
+Update Fedora packages with:
 
     sudo dnf upgrade --refresh ruwac ruwac-desktop
 
-Reopen the GUI to load the new client; running engines and terminals are kept.
-The desktop's SQLite binding moves to rusqlite 0.41.1 / libsqlite3-sys 0.39.1,
-clearing RUSTSEC-2026-0459 (RUWAC links the system SQLite and never built the
-affected bundled copy). The desktop RSA advisory RUSTSEC-2023-0071 remains: stable `rsa 0.10.0` is now
-patched upstream, but IronRDP's Picky/SSPI/winscard releases still pin the
-release candidate. No complete security or physical qualification is implied.
+Reopen the GUI to load the new client. Running terminal programs are preserved;
+for a nested terminal inside an RDP desktop, its remote RUWAC GUI also needs the
+updated client. No live engine, remote desktop or login service is restarted.
+
+Repeated GNOME RDP handover/disconnection failures remain under investigation.
+This patch does not claim to fix them and does not raise handover limits or
+change automatic-login settings. Native tests use isolated generated input;
+physical keyboard, touchpad and cross-machine acceptance remain separate.
+The existing RSA dependency advisory remains unsuppressed.

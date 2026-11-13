@@ -26,9 +26,7 @@ pub fn install(
     let button = gtk::MenuButton::new();
     button.set_widget_name("agent-host-menu");
     button.set_icon_name("applications-science-symbolic");
-    button.set_tooltip_text(Some(
-        "Agents · Alt+A · saved hosts · Codex, Claude and Kimi",
-    ));
+    button.set_tooltip_text(Some("Agents · saved hosts · Codex, Claude and Kimi"));
     button.update_property(&[gtk::accessible::Property::Label("Saved agent hosts")]);
     let pop = gtk::Popover::new();
     pop.connect_show(move |pop| {

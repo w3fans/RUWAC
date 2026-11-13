@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## v0.4.75 — 2026-11-13 — Stable source release
+
+- Ctrl+Shift+C and desktop Ctrl+C can copy a nested terminal application's
+  mouse selection to the regular clipboard. The copied text must still belong
+  to the focused pane and its current PRIMARY owner; typing, focus changes
+  and a replacement selection invalidate the keyboard-copy fallback. Copy while
+  that approved selection is still loading waits for it instead of sending an
+  interrupt to the application.
+- Reserve plain Alt+M for Machines and Alt+digits for tabs. Alt+A now reaches
+  the terminal or remote application; Agents remains available from its button.
+  Native tests also verify that Alt+X and Alt+S reach the terminal unchanged.
+- Add a native real-PTY regression for nested selection copy, interrupt
+  restoration and stale-owner rejection. Retain the existing Shift-selection,
+  word-selection and host-menu tests. Repeated GNOME RDP handover failures
+  remain under investigation; this release does not claim to fix them.
+
 ## v0.4.74 — 2026-11-09 — Stable source release
 
 - Ctrl+V of a clipboard image into Claude Code running behind a nested RUWAC

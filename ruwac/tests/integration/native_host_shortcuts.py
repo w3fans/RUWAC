@@ -188,7 +188,7 @@ try:
  keys((56,True),(50,True),(50,False),(56,False)) # Alt+M
  eventually(lambda:command('sidebar-shell')['shown'])
  command('sidebar-shell',shown=False);command('focus-view')
- keys((56,True),(30,True),(30,False),(56,False)) # Alt+A
+ command('host-shortcuts',operation='header') # Agents stays available from its button
  eventually(lambda:'Saved agent hosts' in command('host-shortcuts')['sections'])
  keys((1,True),(1,False));command('host-shortcuts',close=True);time.sleep(.35)
  tabs=command('tab-status')['tabs']
@@ -197,9 +197,9 @@ try:
  command('focus-view');time.sleep(.2);eventually(lambda:command('inspect')['active']);keys((100,True),(100,False));time.sleep(.2)
  keys((56,True),(50,True),(50,False),(56,False));eventually(lambda:command('sidebar-shell')['shown'])
  command('sidebar-shell',shown=False);command('focus-view')
- keys((56,True),(30,True),(30,False),(56,False));eventually(lambda:'Saved agent hosts' in command('host-shortcuts')['sections'])
+ command('host-shortcuts',operation='header');eventually(lambda:'Saved agent hosts' in command('host-shortcuts')['sections'])
  keys((1,True),(1,False));command('host-shortcuts',close=True);time.sleep(.35);command('focus-view');keys((100,True),(100,False))
- checks.append('real-GDK-Alt-M-and-Alt-A-work-with-collapsed-actions-and-Map-keys-host-title-colour-status')
+ checks.append('real-GDK-Alt-M-and-Agents-button-with-collapsed-actions-and-Map-keys-host-title-colour-status')
 
  command('focus-view');time.sleep(.5)
  before_draw=command('inspect')['drawn'][0]

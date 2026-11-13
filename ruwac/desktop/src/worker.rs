@@ -632,6 +632,14 @@ impl Worker {
                                     Ok((m, json!({"closed":true})))
                                 })()
                             }
+                            Command::Rpc(m, p) if m == "pane.selection" => {
+                                let (pane, serial) = (p["pane"].clone(), p["serial"].clone());
+                                rpc.call(&m, p).map(|mut v| {
+                                    v["request_pane"] = pane;
+                                    v["request_serial"] = serial;
+                                    (m, v)
+                                })
+                            }
                             Command::Rpc(m, p) => rpc.call(&m, p).map(|v| (m, v)),
                             Command::Close => {
                                 halt.store(true, Ordering::Relaxed);

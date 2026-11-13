@@ -31,7 +31,6 @@ pub fn host_menu(key: gdk::Key, mods: gdk::ModifierType) -> Option<bool> {
     }
     match key.to_unicode()?.to_ascii_lowercase() {
         'm' => Some(false),
-        'a' => Some(true),
         _ => None,
     }
 }
@@ -263,8 +262,18 @@ mod menu_tests {
                 gdk::Key::a,
                 gdk::ModifierType::ALT_MASK | gdk::ModifierType::LOCK_MASK
             ),
-            Some(true)
+            None
         );
+        for key in [
+            gdk::Key::a,
+            gdk::Key::s,
+            gdk::Key::x,
+            gdk::Key::A,
+            gdk::Key::S,
+            gdk::Key::X,
+        ] {
+            assert_eq!(host_menu(key, gdk::ModifierType::ALT_MASK), None);
+        }
         for mods in [
             gdk::ModifierType::empty(),
             gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK,

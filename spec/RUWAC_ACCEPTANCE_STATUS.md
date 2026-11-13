@@ -1,5 +1,35 @@
 # RUWAC acceptance status
 
+## Input regression investigation — 2026-11-13
+
+Baseline: v0.4.74, `2da3e92368578017251ba40440842810ddbae93f`.
+An isolated native Wayland/real-PTY test reproduced an application-owned
+PRIMARY selection that could be pasted with the mouse but could not be copied
+with Ctrl+Shift+C. The candidate lets explicit keyboard copy promote that
+view's approved selection while retaining focus, pane, serial and ownership
+checks. New input, a new selection, focus loss and ownership changes invalidate
+it; Ctrl+C without a current selection remains an application interrupt.
+A delayed-IPC native negative control also reproduced an interrupt while an
+approved selection was loading; the candidate queues explicit copy until that
+bounded, same-pane response arrives.
+
+The candidate reserves Alt+M for Machines and Alt+digits for workspace tabs;
+other plain Alt letters pass to the application. Agents remains available from
+its button. Native input checks cover exact Alt+A/X/S bytes, keyboard copy,
+interrupt restoration and stale-selection refusal. Existing native word and
+Shift-selection coverage remains separate from physical hardware acceptance.
+
+Repeated GNOME RDP handovers remain under investigation. Read-only live
+metadata showed “GNOME handover limit reached”; corresponding server logs
+recorded transport failures and aborted handovers. This is not a verified
+inactivity timeout diagnosis. Keep bounded handover-loop protection and
+one-use redirect tokens; do not increase retries, restart live desktops or
+claim this input patch fixes the disconnections. The recovery counter may
+retain an earlier attempt after a view reconnects.
+
+These are candidate results, not a new publication or physical acceptance.
+The normal release controller and full exact-source gates still apply.
+
 ## Source reconciliation — 2026-11-08
 
 Published baseline: v0.4.72, `da6b856b56b700157ad70c12d0dc422053200631`.

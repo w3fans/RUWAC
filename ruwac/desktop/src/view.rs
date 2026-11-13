@@ -522,6 +522,9 @@ pub struct View {
     selection_scroll_at: Cell<std::time::Instant>,
     selection_motion_at: Cell<std::time::Instant>,
     primary_provider: RefCell<Option<gdk::ContentProvider>>,
+    /// Approved nested selection, valid only while this focused view owns PRIMARY.
+    program_selection_text: RefCell<Option<String>>,
+    program_selection_pending: RefCell<Option<(String, u64, u64, bool)>>,
     link_click: Cell<bool>,
     /// Last handled OSC 52 PRIMARY (offer, request) serials of the target pane.
     selection_serials: Cell<(u64, u64)>,
@@ -707,6 +710,8 @@ impl View {
             selection_scroll_at: Cell::new(std::time::Instant::now()),
             selection_motion_at: Cell::new(std::time::Instant::now()),
             primary_provider: RefCell::new(None),
+            program_selection_text: RefCell::new(None),
+            program_selection_pending: RefCell::new(None),
             link_click: Cell::new(false),
             selection_serials: Cell::new((0, 0)),
             mouse_gesture: Cell::new(None),
@@ -1076,6 +1081,8 @@ impl View {
         focus.connect_leave(move |_| {
             if let Some(v) = w.upgrade() {
                 v.cancel_image_paste();
+                v.program_selection_text.borrow_mut().take();
+                v.program_selection_pending.borrow_mut().take();
                 v.word_click.set(false);
                 if v.selection_copy_pending.get().is_some() {
                     v.clear_selection();
@@ -1204,6 +1211,8 @@ impl View {
         *self.wake_task.borrow_mut() = Some(task);
     }
     fn clear_selection(&self) {
+        self.program_selection_text.borrow_mut().take();
+        self.program_selection_pending.borrow_mut().take();
         if self.selection_copy_pending.take().is_some() {
             self.history_request
                 .set(self.history_request.get().saturating_add(1));
@@ -2054,9 +2063,13 @@ impl View {
         worker.set_visible(self.area.is_mapped());
         let mut s = worker.state.lock().unwrap();
         if let Some(error) = s.error.take() {
+            self.program_selection_pending.borrow_mut().take();
             self.history_pending.set(false);
             self.history_inline.set(false);
             self.warn(&error);
+        }
+        if s.disconnected || s.session_gone {
+            self.program_selection_pending.borrow_mut().take();
         }
         if s.session_gone {
             // Removed by exit, kill-session or another client: same as exit.
@@ -2247,8 +2260,31 @@ impl View {
         }
         if let Some((method, v)) = s.reply.pop_front() {
             if method == "pane.selection" {
-                if let Some(text) = v["text"].as_str() {
-                    self.offer_program_selection(text);
+                let matches = self
+                    .program_selection_pending
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|(pane, _, serial, _)| {
+                        v["request_pane"].as_str() == Some(pane.as_str())
+                            && v["request_serial"].as_u64() == Some(*serial)
+                    });
+                let pending = if matches {
+                    self.program_selection_pending.borrow_mut().take()
+                } else {
+                    None
+                };
+                if let Some((pane, epoch, _, copy)) = pending {
+                    if pane == *self.target.borrow()
+                        && epoch == self.broker.borrow().epoch()
+                        && self.area.has_focus()
+                        && self.broker.borrow().desktop_enabled()
+                    {
+                        if let Some(text) = v["text"].as_str() {
+                            if self.offer_program_selection(text) && copy {
+                                self.copy_clipboard(false);
+                            }
+                        }
+                    }
                 }
             }
             if method == "client.retireEnded" && v["closed"] == true && self.retiring.get() {
@@ -2586,6 +2622,10 @@ impl View {
         mods: gdk::ModifierType,
         release: bool,
     ) {
+        if button == 1 && !release {
+            self.program_selection_text.borrow_mut().take();
+            self.program_selection_pending.borrow_mut().take();
+        }
         if button == 1 && release && self.link_click.replace(false) {
             return;
         }
@@ -2910,6 +2950,24 @@ impl View {
         };
         selection_text(&g, a, z)
     }
+    fn clipboard_selection(&self) -> String {
+        let selected = self.selected();
+        if !selected.is_empty() {
+            return selected;
+        }
+        if self.area.has_focus()
+            && self.primary_provider.borrow().as_ref().is_some_and(|ours| {
+                self.area.display().primary_clipboard().content().as_ref() == Some(ours)
+            })
+        {
+            return self
+                .program_selection_text
+                .borrow()
+                .clone()
+                .unwrap_or_default();
+        }
+        String::new()
+    }
     pub fn copy_clipboard(&self, primary: bool) {
         if self.selection_copy_pending.get().is_some() {
             self.status
@@ -2920,7 +2978,15 @@ impl View {
             self.status.set_text("Desktop clipboard disabled");
             return;
         }
-        let text = self.selected();
+        if !primary {
+            if let Some((_, _, _, copy)) = self.program_selection_pending.borrow_mut().as_mut() {
+                *copy = true;
+                self.status
+                    .set_text("Loading application selection; copy will finish when ready");
+                return;
+            }
+        }
+        let text = self.clipboard_selection();
         if text.is_empty() {
             self.status.set_text("Select terminal text before copying");
             return;
@@ -2975,6 +3041,8 @@ impl View {
         let pane = self.target.borrow().clone();
         if offer > seen_offer && recent(0, 2000) {
             self.mouse_gesture.set(None);
+            *self.program_selection_pending.borrow_mut() =
+                Some((pane.clone(), self.broker.borrow().epoch(), offer, false));
             self.command("pane.selection", json!({"pane":pane,"serial":offer}));
         }
         if request > seen_request && recent(1, 1500) {
@@ -3001,9 +3069,9 @@ impl View {
             );
         }
     }
-    fn offer_program_selection(&self, text: &str) {
+    fn offer_program_selection(&self, text: &str) -> bool {
         if text.is_empty() || text.len() > ruwac_clipboard::MAX_DESKTOP_TEXT {
-            return;
+            return false;
         }
         self.broker.borrow_mut().local_copy();
         let provider = gdk::ContentProvider::for_value(&text.to_value());
@@ -3018,10 +3086,12 @@ impl View {
             self.primary_provider.borrow_mut().take();
             self.status
                 .set_text("The desktop could not publish this PRIMARY selection");
-            return;
+            return false;
         }
         crate::terminal_primary::remember(&provider, text);
+        *self.program_selection_text.borrow_mut() = Some(text.into());
         self.status.set_text("Selection offered to PRIMARY");
+        true
     }
     pub fn paste_clipboard(self: &Rc<Self>, primary: bool) {
         let display = self.area.display();
@@ -3084,7 +3154,8 @@ impl View {
         if self.desktop_shortcuts.get()
             && plain_control
             && key == gdk::Key::c
-            && !self.selected().is_empty()
+            && (!self.clipboard_selection().is_empty()
+                || self.program_selection_pending.borrow().is_some())
         {
             self.copy_clipboard(false);
             return;
