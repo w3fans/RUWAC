@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.4.77 — 2026-11-14 — Stable source release
+
+- Recognize a compiler-generated duplicate jump-table fallback address during
+  binary privacy checks. The dispatch, preceding entries, exact fallback and
+  next object boundary must all validate; actual private text and unrecognized
+  data remain subject to the same policy. Add complete-ELF and malformed-table
+  regressions for the false positive observed during release verification.
+
 ## v0.4.76 — 2026-11-14 — Stable source release
 
 - A stalled RDP clipboard no longer closes an otherwise healthy desktop.

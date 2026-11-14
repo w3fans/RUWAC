@@ -1,5 +1,28 @@
 # RUWAC acceptance status
 
+## Published reconciliation — 2026-11-14
+
+v0.4.76, commit `2d75780cb26d979067ef24bcaca477824285d807`, is delivered.
+The dated candidate sections below retain their original scope and are not
+current publication blockers. All 19 frozen source gates, 18 downloaded assets
+with checksums/provenance, 24 actual-public acceptance phases, four COPR targets
+and four portable CLI userspaces passed. An authorized Fedora desktop update
+preserved active GUI, engine and agent process identities.
+
+The published RDP client passed the generated clipboard-timeout case for
+61 seconds, including native keyboard input, framebuffer change, stale reply
+rejection and saved-profile reconnect with restored transfers. The published
+frontend also passed the 2,400-key latency/CPU/memory regression comparison.
+These do not certify physical Claude selection, a GNOME greeter, external
+Windows interoperability, physical Proxmox or busy-history latency.
+
+Publication verification exposed a binary-scanner false positive in a duplicate
+LLVM fallback-address word. A reviewed structural check qualified the exact
+published artifacts without suppressing a policy term. The current maintenance change integrates that check
+in the public scanner; private literals and unknown instruction/table forms
+must continue to fail. Its source and publication gates remain required. Known dependency
+advisories remain open and unsuppressed.
+
 ## RDP clipboard timeout candidate — 2026-11-14
 
 Baseline: v0.4.75, `90841a300e5e13b86909c412deb6ab056b4505a0`.

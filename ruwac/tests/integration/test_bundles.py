@@ -239,17 +239,20 @@ class Bundles(unittest.TestCase):
         checker = runpy.run_path(str(ROOT / 'scripts/privacy-check.py'))
         self.assertTrue(bundles.artifact_findings(self.relocation_elf(b'toy\x00'), checker, ['toy'])[0])
 
-    def branch_elf(self, literal=b'generated fixture', bad_target=False, unchecked=False):
+    def branch_elf(self, literal=b'generated fixture', bad_target=False, unchecked=False, fallback_tail=False):
         # The generated relative address happens to encode a short identifier.
         table, dispatch = 0x3000, 0x1000
         target = table + int.from_bytes(b'toy\0', 'little')
         code = (b'\x48\x8d\x41\xff\x48\x83\xf8\x02\x0f\x83'
-                + struct.pack('<i', 0) + b'\x48\x8d\x05'
+                + struct.pack('<i', target - dispatch - 14 if fallback_tail else 0) + b'\x48\x8d\x05'
                 + struct.pack('<i', table - dispatch - 21)
                 + b'\x48\x63\x0c\x88\x48\x01\xc1\xff\xe1')
         if unchecked:
             code = b'\x90' + code[1:]
         numbers = b'toy\0' * 3
+        if fallback_tail:
+            code += b'\x48\x8d\x05' + struct.pack('<i', table + 16 - dispatch - len(code) - 7)
+            numbers += b'toy\0'
         if bad_target:
             numbers = numbers[:8] + struct.pack('<i', -1)
         payloads = [code, b'\x90\xc3', numbers + literal]
@@ -276,6 +279,61 @@ class Bundles(unittest.TestCase):
         checker = runpy.run_path(str(ROOT / 'scripts/privacy-check.py'))
         for options in [{'unchecked': True}, {'bad_target': True}]:
             self.assertTrue(bundles.artifact_findings(self.branch_elf(**options), checker, ['toy'])[0])
+
+    def test_duplicate_branch_fallback_is_numeric_but_adjacent_text_is_not(self):
+        checker = runpy.run_path(str(ROOT / 'scripts/privacy-check.py'))
+        path = self.branch_elf(fallback_tail=True)
+        self.assertFalse(bundles.artifact_findings(path, checker, ['toy'])[0])
+        for literal in [b'toy\0', b'generated-private-host\0']:
+            with self.subTest(literal=literal):
+                path = self.branch_elf(literal, fallback_tail=True)
+                self.assertTrue(bundles.artifact_findings(path, checker, ['toy', 'generated-private-host'])[0])
+
+    def test_duplicate_fallback_requires_exact_guard_target_and_object_boundary(self):
+        def fixture():
+            data = bytearray(1024)
+            dispatch, table, fallback = 0x1000, 0x4000, 0x1080
+            code = (b'\x48\x8d\x41\xff\x48\x83\xf8\x02\x0f\x83'
+                    + struct.pack('<i', fallback - dispatch - 14)
+                    + b'\x48\x8d\x05' + struct.pack('<i', table - dispatch - 21)
+                    + b'\x48\x63\x0c\x88\x48\x01\xc1\xff\xe1')
+            data[:len(code)] = code
+            data[64:71] = b'\x48\x8d\x05' + struct.pack('<i', table + 16 - dispatch - 71)
+            for i, target in enumerate([0x1020, 0x1030, 0x1040, fallback]):
+                struct.pack_into('<i', data, 512 + 4 * i, target - table)
+            records = [(0, 1, 6, dispatch, 0, 256, 0, 0, 16, 0),
+                       (0, 1, 2, table, 512, 32, 0, 0, 4, 0)]
+            return data, records
+
+        data, records = fixture()
+        self.assertEqual(bundles.indexed_branch_slots(data, records), {0x4000, 0x4004, 0x4008, 0x400c})
+        mutations = [
+            ('different-valid-code-target', 524, struct.pack('<i', 0x1090 - 0x4000)),
+            ('text-word', 524, b'HOST'),
+            ('missing-next-reference', 64, b'\x90' * 7),
+            ('interior-reference', 67, struct.pack('<i', 0x400d - 0x1047)),
+            ('prefix-interior-reference', 67, struct.pack('<i', 0x4004 - 0x1047)),
+            ('reference-too-far', 67, struct.pack('<i', 0x4014 - 0x1047)),
+            ('unknown-dispatch', 27, b'\x90'),
+            ('invalid-prefix-target', 512, struct.pack('<i', 0x9000 - 0x4000)),
+            ('zero-index-bound', 7, b'\x00'),
+            ('sign-extended-index-bound', 7, b'\x80'),
+        ]
+        for name, offset, content in mutations:
+            with self.subTest(case=name):
+                data, records = fixture()
+                data[offset:offset + len(content)] = content
+                self.assertNotIn(0x400c, bundles.indexed_branch_slots(data, records))
+        for name in ['truncated-word', 'word-outside-section', 'nonallocated-data', 'executable-data']:
+            with self.subTest(case=name):
+                data, records = fixture()
+                section = list(records[1])
+                if name == 'truncated-word': data = data[:526]
+                if name == 'word-outside-section': section[5] = 12
+                if name == 'nonallocated-data': section[2] = 0
+                if name == 'executable-data': section[2] = 6
+                records[1] = tuple(section)
+                self.assertNotIn(0x400c, bundles.indexed_branch_slots(data, records))
 
     def byte_branch_elf(self, literal=b'generated fixture', bad_target=False, unknown=False, spill=True, count=4, positive=False, writable=False, unaligned=False, wrong_jump=False, extra_reference=False, far=False, wide_displacement=False, bounded=None):
         table = (1342177280 if far else 16777216) + (1 if unaligned else 0)

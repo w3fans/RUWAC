@@ -1,26 +1,20 @@
-RUWAC v0.4.76 — keep RDP connected when clipboard replies stall
+RUWAC v0.4.77 — reliable binary privacy checks
 
-Previously, a missing RDP clipboard reply closed the entire connection after
-10 seconds. RUWAC now disables clipboard transfers for that connection while
-leaving display and keyboard input available. The connection status explains
-what happened. Use Reconnect to enable clipboard transfers again.
+Release verification previously mistook one compiler-generated branch address
+for a short private identifier. The scanner now recognizes an optional duplicate
+fallback word only after validating the dispatch, original table entries, exact
+fallback target and next independently referenced object boundary.
 
-Late clipboard data, acknowledgements and new offers are ignored while the
-channel is disabled. Pending copy/paste work is cancelled, so a late reply
-cannot become a different request's content or trigger a delayed remote paste.
+The policy still rejects actual private text and unknown or malformed tables.
+No hostname, artifact hash or file-specific exception is added. Complete-ELF
+regressions cover the original failure and genuine adjacent private strings;
+negative controls cover changed targets, missing or overlapping references,
+unknown instructions, invalid bounds and section permissions. The public
+scanner also passes the exact previously published CLI and GUI without a
+private workaround; the previous scanner fails the new reproduction.
 
-An authenticated loopback regression reproduces the disconnect in published
-0.4.75. The candidate stays connected for a full minute, handles native keyboard
-input and a framebuffer change, preserves local clipboard content, and restores
-transfers through a normal saved-profile reconnect. All 277 desktop unit tests
-and ten selected native RDP regression groups passed before release qualification.
-These generated tests do not certify physical GNOME sign-in or Windows clients;
-other GNOME handover and network failures remain separate investigations.
-
-Update Fedora packages with:
-
-    sudo dnf upgrade --refresh ruwac ruwac-desktop
-
-Reopen the GUI to load the client fix. Existing terminal engines and programs
-can stay running. No owner RDP connection or login service is restarted by the
-package update. The existing RSA dependency advisory remains unsuppressed.
+This is release-tool maintenance. Terminal, clipboard and RDP runtime source is
+unchanged. Existing GUI processes, engines and active programs can stay running.
+The dated development and acceptance documents now distinguish the delivered
+RDP fix from remaining physical input, handover and interoperability work.
+Known dependency advisories remain unsuppressed.

@@ -261,6 +261,20 @@ def indexed_branch_slots(data, records):
     """
     executable = [(s[3], s[3] + s[5]) for s in records if s[2] & 4]
     slots = set()
+    # An independently referenced object starts a new conservative boundary,
+    # even when its instruction form is unknown. Do not let recognition of one
+    # table classify a neighboring table whose own dispatch was not validated.
+    references = set()
+    rip_lea = re.compile(rb'[\x48-\x4f]\x8d[\x05\x0d\x15\x1d\x25\x2d\x35\x3d](.{4})', re.S)
+    for section in records:
+        if not section[2] & 4:
+            continue
+        start, size = section[4:6]
+        if start + size > len(data):
+            raise ValueError('Executable section exceeds artifact bounds')
+        for match in rip_lea.finditer(data[start:start + size]):
+            references.add(section[3] + match.start() + 7 + struct.unpack('<i', match[1])[0])
+    ordered_references = sorted(references)
     # lea -1(%rcx),%rax; cmp $count,%rax; jae fallback;
     # lea table(%rip),%rax; movslq (%rax,%rcx,4),%rcx;
     # add %rax,%rcx; jmp *%rcx
@@ -293,20 +307,17 @@ def indexed_branch_slots(data, records):
                        for i in range(count + 1)]
             if all(any(a <= target < b for a, b in executable) for target in targets):
                 slots.update(range(table, table + length, 4))
-    # An independently referenced object starts a new conservative boundary,
-    # even when its instruction form is unknown. Do not let recognition of one
-    # table classify a neighboring table whose own dispatch was not validated.
-    references = set()
-    rip_lea = re.compile(rb'[\x48-\x4f]\x8d[\x05\x0d\x15\x1d\x25\x2d\x35\x3d](.{4})', re.S)
-    for section in records:
-        if not section[2] & 4:
-            continue
-        start, size = section[4:6]
-        if start + size > len(data):
-            raise ValueError('Executable section exceeds artifact bounds')
-        for match in rip_lea.finditer(data[start:start + size]):
-            references.add(section[3] + match.start() + 7 + struct.unpack('<i', match[1])[0])
-    ordered_references = sorted(references)
+                # LLVM can retain one duplicate fallback word after this table.
+                # Classify it only when the proven guard's exact target matches
+                # and the next independent object bounds this single word.
+                end = table + length
+                next_index = bisect_right(ordered_references, table)
+                if (table % 4 == 0 and next_index < len(ordered_references)
+                        and ordered_references[next_index] == end + 4
+                        and end + 4 <= source[3] + source[5]
+                        and offset + length + 4 <= len(data)
+                        and table + struct.unpack_from('<i', data, offset + length)[0] == fallback):
+                    slots.add(end)
     # LLVM also emits byte-discriminant tables without an explicit comparison.
     # movzbl bounds the index to 0..255. Accept the observed RSI+disp8 and
     # RBX+disp32 loads into EAX; calculate RIP from the displacement end, not
