@@ -348,6 +348,88 @@ try:
   return {'first_response_delay_ms':800,'newest_copy_received':True,'explicit_receive_actions':0}
  case('RDP-NATIVE-SUPERSEDED-CLIPBOARD-READ',newer_offer_during_read)
 
+ def clipboard_timeout_preserves_desktop():
+  extra=root/'clipboard-timeout-peer';extra.mkdir(mode=0o700)
+  for name in ['cert.pem','key.pem']:(extra/name).write_bytes((root/name).read_bytes());(extra/name).chmod(0o600)
+  endpoint=start([a.server,str(extra)],'clipboard-timeout-peer')
+  spike.eventually(lambda:(extra/'server-ready.json').exists(),10)
+  port=json.loads((extra/'server-ready.json').read_text())['ports'][0]
+  reference='generated-timeout-'+root.name
+  subprocess.run(['secret-tool','store','--label=RUWAC generated timeout test','application','RUWAC','profile',reference],input=b'generated-local-only',env=env,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
+  command('gui','profile-editor',operation='new',response='keep',fields={'0':'Generated timeout peer','3':'127.0.0.1:'+str(port),'4':'fixture','9':reference,'10':str(root/'cert.pem'),'13':0})
+  spike.eventually(lambda:any(d['width']>0 and d['height']>0 for d in command('gui','profile-editor',operation='layout')['dialogs']),10)
+  saved=command('gui','profile-editor',operation='inspect',response='connect');assert not saved['error'],saved
+  spike.eventually(lambda:r if (r:=command('gui','rdp-inspect',rdp=3))['status'].startswith('Connected')and r['size']==[320,180]else False,20)
+  seq=0
+  def remote_command(**kw):
+   nonlocal seq
+   seq+=1;tmp=extra/'command.tmp';tmp.write_text(json.dumps({'seq':seq,**kw}));tmp.replace(extra/'server-0-request.json')
+   def response():
+    try:r=json.loads((extra/'server-0-response.json').read_text());return r['result']if r['seq']==seq else None
+    except(OSError,ValueError):return None
+   return spike.eventually(response,8)
+  try:
+   focus('gui');command('gui','rdp-switch',rdp=3);command('gui','rdp-policy',rdp=3,policy=0)
+   # A responsive display/input transport whose CLIPRDR data reply is delayed.
+   # Responses have no request ID, so a timed-out channel must remain disabled
+   # even after that late response and a different offer arrive.
+   sentinel=b'LOCAL-CLIPBOARD-MUST-SURVIVE-TIMEOUT'
+   (root/'timeout-local.txt').write_bytes(sentinel)
+   (root/'timeout-late.txt').write_bytes(b'LATE-REMOTE-CLIPBOARD-MUST-NOT-APPEAR')
+   for name in ['timeout-local.txt','timeout-late.txt']:(extra/name).write_bytes((root/name).read_bytes())
+   focus('peer');command('peer','set-text',file='timeout-local.txt');focus('gui')
+   before=command('gui','rdp-inspect',rdp=3)
+   pending=extra/'server-0-pending.json'
+   requests=json.loads(pending.read_text())['requests']if pending.exists()else 0
+   remote_command(format='text',file='timeout-late.txt',delay_ms=18000)
+   spike.eventually(lambda:pending.exists()and json.loads(pending.read_text())['requests']>requests,8)
+   started=time.monotonic();trace=[]
+   while time.monotonic()-started<61:
+    time.sleep(.5);now=command('gui','rdp-inspect',rdp=3);trace.append(now)
+    (root/'clipboard-timeout-trace.json').write_text(json.dumps(trace,indent=2))
+    assert now['transport_id']==before['transport_id']and now['size']==before['size'],now
+    assert not now['reconnect_visible'],now
+    if time.monotonic()-started>12:
+     assert now.get('clipboard_suspended')is True,now
+   # A changed framebuffer and native keyboard input must still cross the
+   # same authenticated transport after a full minute of clipboard suspension.
+   command('gui','rdp-display',rdp=3,mode='fit',width=640,height=480)
+   updated=spike.eventually(lambda:r if (r:=command('gui','rdp-inspect',rdp=3))['size']==[640,480]and r['metrics']['decoded_updates']>before['metrics']['decoded_updates']else False,15)
+   assert updated['transport_id']==before['transport_id']and updated['clipboard_suspended'],updated
+   assert mutter_input is not None,'Native keyboard acceptance requires owned Mutter input'
+   from gi.repository import GLib
+   keys=extra/f"input-{port}.keys.json"
+   key_count=len(json.loads(keys.read_text())['events'])if keys.exists()else 0
+   mutter_input('NotifyKeyboardKeycode',GLib.Variant('(ub)',(30,True)))
+   mutter_input('NotifyKeyboardKeycode',GLib.Variant('(ub)',(30,False)))
+   spike.eventually(lambda:keys.exists()and len(json.loads(keys.read_text())['events'])>=key_count+2,8)
+   assert any(x['code']==30 and x['down']for x in json.loads(keys.read_text())['events'][key_count:])
+
+   assert not now['pending'],now
+   focus('peer');assert command('peer','read-text')['sha256']==digest(sentinel)
+   focus('gui');remote_command(format='text',file='timeout-late.txt')
+   time.sleep(.5)
+   assert json.loads(pending.read_text())['requests']==requests+1
+   focus('peer');assert command('peer','read-text')['sha256']==digest(sentinel)
+   # Explicit reconnect creates a fresh channel and permits clipboard again.
+   focus('gui');tab=command('gui','rdp-inspect',rdp=3)['tab'];command('gui','rdp-tab-menu',tab=tab,control='reconnect')
+   fresh=spike.eventually(lambda:r if (r:=command('gui','rdp-inspect',rdp=3))['transport_id']!=before['transport_id']and min(r['size'])>0 and r['status'].startswith('Connected')else False,20)
+   assert not fresh['clipboard_suspended'],fresh
+   focus('peer');command('peer','set-text',file='timeout-local.txt');focus('gui')
+   before_received=json.loads((extra/'server-0-receipt.json').read_text()).get('received',0)
+   command('gui','rdp-send',rdp=3)
+   def delivered():
+    data=json.loads((extra/'server-0-receipt.json').read_text())
+    return data if data.get('received',0)>before_received and data.get('sha256')==digest(sentinel)else None
+   spike.eventually(delivered,12)
+   return {'healthy_transport_preserved_seconds':61,'late_reply_delay_ms':18000,'late_reply_and_new_offer_ignored':True,'local_clipboard_preserved':True,'explicit_reconnect_restores_clipboard':True,'native_keyboard_and_changed_frame_after_minute':True,'scope':'Generated authenticated loopback peer; not physical GNOME greeter acceptance'}
+  finally:
+   command('gui','close-rdp',rdp=3)
+   subprocess.run(['secret-tool','clear','application','RUWAC','profile',reference],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
+   endpoint.terminate();endpoint.wait(timeout=5)
+ case('RDP-NATIVE-CLIPBOARD-TIMEOUT',clipboard_timeout_preserves_desktop)
+
+
 
  def reconnect():
   # This case can run independently of the policy case that uses the same file.

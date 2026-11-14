@@ -1,31 +1,26 @@
-RUWAC v0.4.75 — copy nested selections and pass application Alt keys
+RUWAC v0.4.76 — keep RDP connected when clipboard replies stall
 
-Ctrl+Shift+C can now copy a nested terminal application's mouse selection to
-CLIPBOARD. Desktop Ctrl+C also copies that selection, and becomes an interrupt
-again after typing clears it. Previously a nested RUWAC could report that text
-was copied to its mouse-selection buffer while the outer window had no text
-for the keyboard Copy action. The new fallback requires the focused pane's
-approved selection and current PRIMARY ownership. A new selection, typing,
-focus loss or a different owner invalidates it; stale responses cannot copy
-text from another pane. Copy requested while that approved selection is still
-loading finishes when it arrives, rather than interrupting the application.
+Previously, a missing RDP clipboard reply closed the entire connection after
+10 seconds. RUWAC now disables clipboard transfers for that connection while
+leaving display and keyboard input available. The connection status explains
+what happened. Use Reconnect to enable clipboard transfers again.
 
-Plain Alt+M opens Machines and Alt+digits select workspace tabs. Other plain
-Alt letters belong to the application: Alt+A no longer opens RUWAC's Agents
-menu. Agents remains available from its button. Native tests verify exact
-Alt+A, Alt+X and Alt+S input bytes, keyboard selection copy, interrupt restoration
-and stale-owner refusal, alongside the existing word and Shift-selection tests.
+Late clipboard data, acknowledgements and new offers are ignored while the
+channel is disabled. Pending copy/paste work is cancelled, so a late reply
+cannot become a different request's content or trigger a delayed remote paste.
+
+An authenticated loopback regression reproduces the disconnect in published
+0.4.75. The candidate stays connected for a full minute, handles native keyboard
+input and a framebuffer change, preserves local clipboard content, and restores
+transfers through a normal saved-profile reconnect. All 277 desktop unit tests
+and ten selected native RDP regression groups passed before release qualification.
+These generated tests do not certify physical GNOME sign-in or Windows clients;
+other GNOME handover and network failures remain separate investigations.
 
 Update Fedora packages with:
 
     sudo dnf upgrade --refresh ruwac ruwac-desktop
 
-Reopen the GUI to load the new client. Running terminal programs are preserved;
-for a nested terminal inside an RDP desktop, its remote RUWAC GUI also needs the
-updated client. No live engine, remote desktop or login service is restarted.
-
-Repeated GNOME RDP handover/disconnection failures remain under investigation.
-This patch does not claim to fix them and does not raise handover limits or
-change automatic-login settings. Native tests use isolated generated input;
-physical keyboard, touchpad and cross-machine acceptance remain separate.
-The existing RSA dependency advisory remains unsuppressed.
+Reopen the GUI to load the client fix. Existing terminal engines and programs
+can stay running. No owner RDP connection or login service is restarted by the
+package update. The existing RSA dependency advisory remains unsuppressed.

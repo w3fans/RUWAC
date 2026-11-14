@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## v0.4.76 — 2026-11-14 — Stable source release
+
+- A stalled RDP clipboard no longer closes an otherwise healthy desktop.
+  Clipboard transfers stop for that connection until explicit Reconnect;
+  late data, acknowledgements and new offers cannot satisfy a newer request.
+  The connection status explains the clipboard timeout.
+- Add an authenticated native regression with a delayed clipboard response,
+  a full minute of continued connection, framebuffer and keyboard checks,
+  stale clipboard rejection and normal saved-profile reconnect. Existing
+  text, PNG, clipboard-policy and ownership regressions remain required.
+  This fixes a reproduced clipboard-triggered drop, not every GNOME handover
+  or external network failure.
+
 ## v0.4.75 — 2026-11-13 — Stable source release
 
 - Ctrl+Shift+C and desktop Ctrl+C can copy a nested terminal application's

@@ -347,7 +347,7 @@ async fn run(dir: PathBuf) -> anyhow::Result<()> {
                                     }
 
                                     data_delay = Duration::from_millis(
-                                        q["delay_ms"].as_u64().unwrap_or(0).min(1000),
+                                        q["delay_ms"].as_u64().unwrap_or(0).min(60_000),
                                     );
                                     let mut formats = if offered_kind == Format::Png {
                                         vec![ironrdp_cliprdr::pdu::ClipboardFormat::new(cliprdr::PNG_ID).with_name(ironrdp_cliprdr::pdu::ClipboardFormatName::new_static("PNG"))]

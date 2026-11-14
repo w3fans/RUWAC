@@ -1,5 +1,24 @@
 # RUWAC acceptance status
 
+## RDP clipboard timeout candidate — 2026-11-14
+
+Baseline: v0.4.75, `90841a300e5e13b86909c412deb6ab056b4505a0`.
+An isolated authenticated RDP peer reproduced a healthy desktop closing when
+its clipboard data response arrived after the ten-second deadline. The
+candidate disables CLIPRDR transfers until explicit reconnect, invalidates
+pending callbacks and ignores late responses without closing display/input.
+A generated saved-profile regression passed a 61-second connection check,
+changed framebuffer, native keyboard delivery, local clipboard preservation,
+stale-offer rejection and reconnect with restored clipboard transfers.
+All 277 desktop unit tests and ten selected native RDP regression groups pass.
+
+These are isolated Mutter input and generated loopback-peer results. They do
+not reproduce a physical GNOME greeter or certify external Windows/Fedora
+interoperability. Other handover/network failures remain unqualified. Normal
+release gates and actual published-artifact checks are still required; this
+section records candidate evidence and does not claim published delivery.
+Owner GUI processes, engines, terminal programs and RDP sessions were preserved.
+
 ## Input regression investigation — 2026-11-13
 
 Baseline: v0.4.74, `2da3e92368578017251ba40440842810ddbae93f`.

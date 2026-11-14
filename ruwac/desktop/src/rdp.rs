@@ -1728,6 +1728,7 @@ pub struct RdpView {
     id: String,
     policy: Cell<ClipPolicy>,
     serial: Cell<u64>,
+    clipboard_suspended: Cell<bool>,
     bridge: RefCell<Bridge>,
     advertised: Cell<u64>,
     received_generation: Cell<u64>,
@@ -1961,6 +1962,7 @@ impl RdpView {
             id: ruwac_protocol::id("rdp"),
             policy: Cell::new(ClipPolicy::Bidirectional),
             serial: Cell::new(0),
+            clipboard_suspended: Cell::new(false),
             bridge: RefCell::new(Bridge::default()),
             advertised: Cell::new(0),
             received_generation: Cell::new(0),
@@ -2724,7 +2726,7 @@ impl RdpView {
                 .collect();
             serde_json::json!({"decoded_updates":s.frames,"decoded_sizes":s.decoded_sizes,"update_intervals_ms":times})
         });
-        serde_json::json!({"draws":self.drawn.get(),"mouse_selection":self.primary_status.text().as_str(),"selection_paste_pending":self.primary_click.borrow().is_some(),"selection_sharing_ready":self.primary.borrow().as_ref().is_some_and(|b|b.ready),"connection_pending":self.pending_connect.borrow().is_some(),"transport_id":self.connection.borrow().as_ref().map(|c|c.id.as_str()),"requested_size":self.requested.get(),"display_mode":format!("{:?}",self.mode.get()),"reconnect_visible":self.disconnect_card.is_visible(),"metrics":metrics,"selection_settings":self.profile_metadata.borrow().as_ref().map(|p|serde_json::json!({"enabled":p.preferences.primary_sync,"paste":p.preferences.primary_paste})),"gnome_auto":{"armed":self.auto_gdm.borrow().armed,"step":format!("{:?}",self.auto_gdm.borrow().sequence.step),"input_epoch":self.assist_epoch.load(Ordering::Acquire),"guards":{"canvas_focus":self.area.has_focus(),"window_active":self.root.root().and_downcast::<gtk::Window>().is_some_and(|w|w.is_active()),"selected":self.selected.borrow().as_ref().is_some_and(|f|f()),"profile_current":self.profile_metadata.borrow().as_ref().is_some_and(crate::profiles::assist_profile_current),"rendered_generation":self.rendered_generation.get(),"surface_generation":self.surface_generation.get()},"generation":self.connection.borrow().as_ref().map(|c|c.state.lock().unwrap().generation),"handovers":self.connection.borrow().as_ref().map(|c|c.state.lock().unwrap().handovers)},"last_pixel":self.last_pixel.get(),"status":self.status.text().as_str(),"size":self.size.get(),"zoom":self.zoom.get(),"pan":[self.scroll.hadjustment().value(),self.scroll.vadjustment().value()],"viewport":[self.area.width(),self.area.height()],"window_width":self.root.root().and_then(|r|r.downcast::<gtk::Window>().ok()).map(|w|w.width()),"active":self.broker.borrow().active()==Some(self.id.as_str()),"epoch":self.broker.borrow().epoch(),"pending":self.pending.borrow().is_some(),"received_generation":self.received_generation.get(),"offers":self.offers_seen.get(),"policy":format!("{:?}",self.policy.get())})
+        serde_json::json!({"draws":self.drawn.get(),"mouse_selection":self.primary_status.text().as_str(),"selection_paste_pending":self.primary_click.borrow().is_some(),"selection_sharing_ready":self.primary.borrow().as_ref().is_some_and(|b|b.ready),"connection_pending":self.pending_connect.borrow().is_some(),"transport_id":self.connection.borrow().as_ref().map(|c|c.id.as_str()),"requested_size":self.requested.get(),"display_mode":format!("{:?}",self.mode.get()),"reconnect_visible":self.disconnect_card.is_visible(),"metrics":metrics,"selection_settings":self.profile_metadata.borrow().as_ref().map(|p|serde_json::json!({"enabled":p.preferences.primary_sync,"paste":p.preferences.primary_paste})),"gnome_auto":{"armed":self.auto_gdm.borrow().armed,"step":format!("{:?}",self.auto_gdm.borrow().sequence.step),"input_epoch":self.assist_epoch.load(Ordering::Acquire),"guards":{"canvas_focus":self.area.has_focus(),"window_active":self.root.root().and_downcast::<gtk::Window>().is_some_and(|w|w.is_active()),"selected":self.selected.borrow().as_ref().is_some_and(|f|f()),"profile_current":self.profile_metadata.borrow().as_ref().is_some_and(crate::profiles::assist_profile_current),"rendered_generation":self.rendered_generation.get(),"surface_generation":self.surface_generation.get()},"generation":self.connection.borrow().as_ref().map(|c|c.state.lock().unwrap().generation),"handovers":self.connection.borrow().as_ref().map(|c|c.state.lock().unwrap().handovers)},"last_pixel":self.last_pixel.get(),"status":self.status.text().as_str(),"size":self.size.get(),"zoom":self.zoom.get(),"pan":[self.scroll.hadjustment().value(),self.scroll.vadjustment().value()],"viewport":[self.area.width(),self.area.height()],"window_width":self.root.root().and_then(|r|r.downcast::<gtk::Window>().ok()).map(|w|w.width()),"active":self.broker.borrow().active()==Some(self.id.as_str()),"epoch":self.broker.borrow().epoch(),"pending":self.pending.borrow().is_some(),"clipboard_suspended":self.clipboard_suspended.get(),"received_generation":self.received_generation.get(),"offers":self.offers_seen.get(),"policy":format!("{:?}",self.policy.get())})
     }
     pub fn fixture_policy(&self, index: u32) {
         fn find(w: &gtk::Widget) -> Option<gtk::DropDown> {
@@ -3271,7 +3273,7 @@ impl RdpView {
                     "disconnected".into()
                 }
             });
-        serde_json::json!({"id":self.root.widget_name().as_str(),"automatic_sign_in":automatic_sign_in,"phase":phase,"display_mode":format!("{:?}",self.mode.get()),"viewport":[self.scroll.width(),self.scroll.height()],"zoom":self.zoom.get(),"input_paused_for_login":self.auto_gdm.borrow().armed,"reactivating":connection.as_ref().is_some_and(|c|c.state.lock().unwrap().reactivating),"mouse_selection":self.primary_status.text().as_str(),"connection_stage":connection.as_ref().map(|c|c.state.lock().unwrap().connection_stage.clone()),"recovery":connection.as_ref().map(|c|{let st=c.state.lock().unwrap();serde_json::json!({"attempt":st.reconnect_attempt,"elapsed_ms":st.reconnect_elapsed.as_millis() as u64,"background":st.reconnect_background})}),"size":self.size.get(),"transport_id":connection.as_ref().map(|c|c.id.as_str()),"decoded_updates":connection.as_ref().map(|c|c.state.lock().unwrap().frames).unwrap_or(0),"clipboard_owner":self.broker.borrow().active()==Some(self.id.as_str()),"display_control":connection.as_ref().map(|c|{let s=c.state.lock().unwrap();serde_json::json!({"channel_opened":s.display_channel_opened,"capability_messages":s.display_capability_messages,"negotiated":s.display_cap.is_some()})}),"clipboard_channel_negotiated":connection.as_ref().is_some_and(|c|c.state.lock().unwrap().clipboard_channel_negotiated),"verified_tls_sha256":connection.as_ref().and_then(|c|c.state.lock().unwrap().verified_tls_sha256.clone()),"protocol_error":connection.as_ref().and_then(|c|c.state.lock().unwrap().protocol_error.clone()),"authentication_error":connection.as_ref().and_then(|c|c.state.lock().unwrap().authentication_error.clone()),"certificate_review":self.certificate.borrow().as_ref().map(|r|serde_json::json!({"sha256":r.fingerprint(),"changed":r.changed,"valid_now":r.valid_now})),"profile":self.profile_metadata.borrow().as_ref().map(|p|p.id.clone())})
+        serde_json::json!({"id":self.root.widget_name().as_str(),"automatic_sign_in":automatic_sign_in,"phase":phase,"display_mode":format!("{:?}",self.mode.get()),"viewport":[self.scroll.width(),self.scroll.height()],"zoom":self.zoom.get(),"input_paused_for_login":self.auto_gdm.borrow().armed,"reactivating":connection.as_ref().is_some_and(|c|c.state.lock().unwrap().reactivating),"mouse_selection":self.primary_status.text().as_str(),"connection_stage":connection.as_ref().map(|c|c.state.lock().unwrap().connection_stage.clone()),"recovery":connection.as_ref().map(|c|{let st=c.state.lock().unwrap();serde_json::json!({"attempt":st.reconnect_attempt,"elapsed_ms":st.reconnect_elapsed.as_millis() as u64,"background":st.reconnect_background})}),"size":self.size.get(),"transport_id":connection.as_ref().map(|c|c.id.as_str()),"decoded_updates":connection.as_ref().map(|c|c.state.lock().unwrap().frames).unwrap_or(0),"clipboard_owner":self.broker.borrow().active()==Some(self.id.as_str()),"display_control":connection.as_ref().map(|c|{let s=c.state.lock().unwrap();serde_json::json!({"channel_opened":s.display_channel_opened,"capability_messages":s.display_capability_messages,"negotiated":s.display_cap.is_some()})}),"clipboard_suspended":self.clipboard_suspended.get(),"clipboard_channel_negotiated":connection.as_ref().is_some_and(|c|c.state.lock().unwrap().clipboard_channel_negotiated),"verified_tls_sha256":connection.as_ref().and_then(|c|c.state.lock().unwrap().verified_tls_sha256.clone()),"protocol_error":connection.as_ref().and_then(|c|c.state.lock().unwrap().protocol_error.clone()),"authentication_error":connection.as_ref().and_then(|c|c.state.lock().unwrap().authentication_error.clone()),"certificate_review":self.certificate.borrow().as_ref().map(|r|serde_json::json!({"sha256":r.fingerprint(),"changed":r.changed,"valid_now":r.valid_now})),"profile":self.profile_metadata.borrow().as_ref().map(|p|p.id.clone())})
     }
     pub fn connect_profile(&self) {
         fn find(w: &gtk::Widget) -> Option<gtk::Button> {
@@ -3398,34 +3400,21 @@ impl RdpView {
     /// Deliver deferred commands; a connection that accepts nothing for 30
     /// seconds is closed so Reconnect can start a fresh one.
     fn flush_commands(&self) {
-        if self
+        let data_expired = self
             .pending
             .borrow()
             .as_ref()
-            .is_some_and(|r| r.created.elapsed() > Duration::from_secs(10))
-        {
-            // DataResponse also has no request ID: reset the transport rather
-            // than allowing its late reply to satisfy a later request.
-            self.lazy_reply.borrow_mut().take();
-            if let Some(c) = self.connection.borrow().as_ref() {
-                c.close();
-            }
-        }
-        self.flush_offer();
-        if self
+            .is_some_and(|r| r.created.elapsed() > Duration::from_secs(10));
+        let offer_expired = self
             .offers
             .borrow()
             .inflight
             .as_ref()
-            .is_some_and(|o| o.created.elapsed() > Duration::from_secs(10))
-        {
-            self.offers.borrow_mut().waiting.take();
-            if let Some(conn) = self.connection.borrow().as_ref() {
-                conn.close();
-            }
-            self.status
-                .set_text("Remote clipboard response timed out; reconnect to reset the channel");
+            .is_some_and(|o| o.created.elapsed() > Duration::from_secs(10));
+        if data_expired || offer_expired {
+            self.suspend_clipboard();
         }
+        self.flush_offer();
         if let Some(conn) = self.connection.borrow().as_ref() {
             if conn.flush() {
                 self.status
@@ -3433,6 +3422,30 @@ impl RdpView {
                 conn.close();
             }
         }
+    }
+    /// CLIPRDR replies have no request ID. Keep this channel quarantined until
+    /// explicit reconnect, rather than letting a late reply satisfy a new read
+    /// or sacrificing the independent display and keyboard transport.
+    fn suspend_clipboard(&self) {
+        if self.clipboard_suspended.replace(true) {
+            return;
+        }
+        self.serial.set(self.serial.get().saturating_add(1));
+        self.pending.borrow_mut().take();
+        if let Some(reply) = self.lazy_reply.borrow_mut().take() {
+            let _ = reply.send(Err(
+                "Remote clipboard timed out; reconnect to enable clipboard".into(),
+            ));
+        }
+        self.offers.borrow_mut().clear();
+        self.remote_formats.borrow_mut().clear();
+        self.remote.set(None);
+        self.advertised.set(0);
+        self.replying.set(false);
+        self.decoding.set(false);
+        self.status.set_text(
+            "Remote clipboard timed out; desktop remains connected. Reconnect to enable clipboard",
+        );
     }
     fn primary_tick(&self) {
         let enabled = self
@@ -3723,7 +3736,8 @@ impl RdpView {
         }
     }
     fn allowed(&self, receive: bool, manual: bool) -> bool {
-        self.broker.borrow().desktop_enabled()
+        !self.clipboard_suspended.get()
+            && self.broker.borrow().desktop_enabled()
             && self.broker.borrow().active() == Some(self.id.as_str())
             && match self.policy.get() {
                 ClipPolicy::Disabled => false,
@@ -3784,6 +3798,9 @@ impl RdpView {
             })
     }
     fn enqueue_offer(&self, formats: Vec<ClipboardFormat>, intent: bool) {
+        if self.clipboard_suspended.get() {
+            return;
+        }
         let Some((transport, generation)) = self
             .connection
             .borrow()
@@ -3805,6 +3822,9 @@ impl RdpView {
         self.flush_offer();
     }
     fn flush_offer(&self) {
+        if self.clipboard_suspended.get() {
+            return;
+        }
         if self.offers.borrow().inflight.is_some() {
             return;
         }
@@ -3846,7 +3866,8 @@ impl RdpView {
     // Serving another MIME from an already-owned offer is not a new clipboard
     // promotion. Consumers in other windows may read it after focus changes.
     fn owns_remote_provider(&self, provider: &gdk::ContentProvider) -> bool {
-        self.broker.borrow().desktop_enabled()
+        !self.clipboard_suspended.get()
+            && self.broker.borrow().desktop_enabled()
             && matches!(
                 self.policy.get(),
                 ClipPolicy::Manual | ClipPolicy::RemoteToLocal | ClipPolicy::Bidirectional
@@ -3860,6 +3881,9 @@ impl RdpView {
         epoch: u64,
         generation: u64,
     ) -> Option<ClipboardRequest> {
+        if self.clipboard_suspended.get() {
+            return None;
+        }
         let binding = self.connection.borrow();
         let c = binding.as_ref()?;
         let state = c.state.lock().unwrap();
@@ -3906,6 +3930,9 @@ impl RdpView {
         self.command(Command::Request(id));
     }
     fn clip_event(self: &Rc<Self>, e: Event) {
+        if self.clipboard_suspended.get() && !matches!(e, Event::Reset) {
+            return;
+        }
         if std::env::var_os("RUWAC_RDP_CLIP_TRACE").as_deref() == Some(std::ffi::OsStr::new("1")) {
             let event = match &e {
                 Event::Reset => "reset",
@@ -5469,6 +5496,7 @@ impl RdpView {
         }
     }
     pub fn close(&self) {
+        self.clipboard_suspended.set(false);
         self.primary.borrow_mut().take();
         self.primary_attempted.set(false);
         self.primary_status.set_visible(false);
@@ -5530,18 +5558,6 @@ impl RdpView {
             0
         };
         self.bridge.borrow().epoch.store(epoch, Ordering::Release);
-        if self
-            .pending
-            .borrow()
-            .as_ref()
-            .is_some_and(|p| p.created.elapsed() > Duration::from_secs(30))
-        {
-            self.close();
-            self.status.set_text(
-                "CLIPRDR response timed out; disconnected to prevent stale response reuse",
-            );
-            return;
-        }
         let events = self.bridge.borrow().drain();
         for e in events {
             self.clip_event(e);
