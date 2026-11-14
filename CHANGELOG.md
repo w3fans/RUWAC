@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.4.78 — 2026-11-14 — Stable source release
+
+- Update rustix from 1.1.5 to 1.1.6 to address RUSTSEC-2026-0486, an
+  uninitialized-buffer defect in extended-attribute size queries. Cargo also
+  reselects existing Windows-only dependency edges within their upstream
+  version ranges; other package versions and checksums are unchanged.
+  The separate desktop RSA advisory remains visible and unsuppressed.
+
 ## v0.4.77 — 2026-11-14 — Stable source release
 
 - Recognize a compiler-generated duplicate jump-table fallback address during

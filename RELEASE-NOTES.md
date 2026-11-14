@@ -1,20 +1,16 @@
-RUWAC v0.4.77 — reliable binary privacy checks
+RUWAC v0.4.78 — rustix security maintenance
 
-Release verification previously mistook one compiler-generated branch address
-for a short private identifier. The scanner now recognizes an optional duplicate
-fallback word only after validating the dispatch, original table entries, exact
-fallback target and next independently referenced object boundary.
+Update rustix from 1.1.5 to the upstream patched 1.1.6 for
+RUSTSEC-2026-0486. Its extended-attribute functions could treat a zero-length
+buffer query as initialized data. The update keeps the existing APIs and
+uses the normal Cargo resolver, without an advisory suppression or crate override.
 
-The policy still rejects actual private text and unknown or malformed tables.
-No hostname, artifact hash or file-specific exception is added. Complete-ELF
-regressions cover the original failure and genuine adjacent private strings;
-negative controls cover changed targets, missing or overlapping references,
-unknown instructions, invalid bounds and section permissions. The public
-scanner also passes the exact previously published CLI and GUI without a
-private workaround; the previous scanner fails the new reproduction.
+Cargo also reselects existing Windows-only dependency edges in errno, gio-sys
+and tempfile within their upstream version ranges. Their versions and checksums
+remain unchanged. Other package versions and checksums are unchanged. Windows
+runtime acceptance remains pending on the established R7 validation path.
 
-This is release-tool maintenance. Terminal, clipboard and RDP runtime source is
-unchanged. Existing GUI processes, engines and active programs can stay running.
-The dated development and acceptance documents now distinguish the delivered
-RDP fix from remaining physical input, handover and interoperability work.
-Known dependency advisories remain unsuppressed.
+The separate desktop RSA advisory and maintenance warnings remain visible.
+This update follows the existing source, runtime, package and publication gates.
+Installing packages preserves running engines and terminal programs; existing
+sessions are not migrated or restarted.

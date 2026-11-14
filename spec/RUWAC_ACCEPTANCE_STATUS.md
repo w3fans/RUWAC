@@ -1,5 +1,26 @@
 # RUWAC acceptance status
 
+## Published reconciliation and dependency maintenance — 2026-11-14
+
+v0.4.77, commit `11eee6fa0d1570106da4f73424418067ba106321`, is delivered.
+All 19 frozen source gates, 18 downloaded assets with six attestations,
+24 published-artifact acceptance phases, four COPR repositories and four
+portable CLI userspaces passed. The 2,400-key comparison passed latency,
+CPU and memory budgets. The verified Fedora desktop update preserved all
+nine existing application process identities. These remain isolated fixture
+results, not physical clipboard, GNOME handover, Windows or Proxmox acceptance.
+
+Current maintenance updates rustix 1.1.5 to the upstream patched 1.1.6 for
+RUSTSEC-2026-0486. The isolated lockfile audit against the recorded advisory
+database removes that warning; fresh build, runtime, audit and publication
+checks are still required. Cargo reselects existing Windows-only dependency
+edges in errno, gio-sys and tempfile within their declared ranges, without
+changing those packages' versions or checksums. Windows runtime validation
+remains pending on the established R7 path. The separate RSA finding and
+maintenance warnings remain unsuppressed.
+
+The dated sections below retain their original evidence and limitations.
+
 ## Published reconciliation — 2026-11-14
 
 v0.4.76, commit `2d75780cb26d979067ef24bcaca477824285d807`, is delivered.
