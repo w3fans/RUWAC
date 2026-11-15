@@ -20,7 +20,11 @@ impl State {
     /// Role and namespace checks precede cache lookup: a denied viewer call
     /// cannot poison an owner's shared key or replay its cached layout result.
     pub(super) fn check_viewer(&self, m: &str, v: &Value, client: &str) -> Result<()> {
-        let Some(c) = self.clients.get(client).filter(|c| c.non_sizing) else {
+        let Some(c) = self
+            .clients
+            .get(client)
+            .filter(|c| c.non_sizing || !self.sessions[&c.session].size_policy.is_legacy())
+        else {
             return Ok(());
         };
         if c.non_sizing

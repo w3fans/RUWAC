@@ -490,6 +490,7 @@ pub struct View {
     pub worker: RefCell<Worker>,
     socket: PathBuf,
     dead: gtk::Box,
+    sizing_control: gtk::Button,
     dead_title: gtk::Label,
     dead_reason: gtk::Label,
     /// The card offers to reopen an ended remote session rather than reattach.
@@ -658,6 +659,12 @@ impl View {
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&stack));
         overlay.add_overlay(&dead);
+        // Controller-owned sessions only: explicit, confirmed sizing control.
+        let sizing_control = gtk::Button::with_label("Take sizing control…");
+        sizing_control.set_widget_name("terminal-sizing-control");
+        sizing_control.set_halign(gtk::Align::End);
+        sizing_control.set_visible(false);
+        root.append(&sizing_control);
         root.append(&overlay);
         let worker = RefCell::new(Worker::start(socket.clone(), session.clone()));
         let v = Rc::new(Self {
@@ -685,6 +692,7 @@ impl View {
             worker,
             socket,
             dead,
+            sizing_control,
             dead_title,
             dead_reason,
             ended: Cell::new(false),
@@ -738,6 +746,53 @@ impl View {
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default(),
             stack,
+        });
+        let weak = Rc::downgrade(&v);
+        v.sizing_control.connect_clicked(move |_| {
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            let Some(frame) = view.frame.borrow().clone() else {
+                return;
+            };
+            if frame["size_role"] == "size_controller" {
+                view.run_command("size release");
+                return;
+            }
+            // The generation shown now: a later ownership change makes the
+            // delayed confirmation fail instead of silently taking over.
+            let expected = frame["sizing"]["generation"].clone();
+            let action = if frame["sizing"]["controller_present"] == true {
+                "takeover"
+            } else {
+                "claim"
+            };
+            let dialog = gtk::Dialog::builder()
+                .title("Take sizing control?")
+                .modal(true)
+                .build();
+            if let Some(parent) = view.parent() {
+                dialog.set_transient_for(Some(&parent));
+            }
+            dialog.content_area().append(&gtk::Label::new(Some(
+                "Resize this session to this window. Other viewers keep independent focus and input; their applications keep running.",
+            )));
+            dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+            dialog.add_button("Take sizing control", gtk::ResponseType::Accept);
+            dialog.set_default_response(gtk::ResponseType::Cancel);
+            let weak = Rc::downgrade(&view);
+            dialog.connect_response(move |dialog, response| {
+                if response == gtk::ResponseType::Accept {
+                    if let Some(view) = weak.upgrade() {
+                        view.command(
+                            "client.sizeControl",
+                            json!({"session":view.session,"action":action,"expected_generation":expected}),
+                        );
+                    }
+                }
+                dialog.close();
+            });
+            dialog.present();
         });
         let weak = Rc::downgrade(&v);
         let primary = v.area.display().primary_clipboard();
@@ -1597,7 +1652,7 @@ impl View {
         let entry = gtk::Entry::new();
         entry.set_text(seed);
         entry.set_position(-1);
-        entry.set_placeholder_text(Some("new · next · prev · select N · split horizontal/vertical · zoom · copy · paste · detach · help"));
+        entry.set_placeholder_text(Some("new · next · prev · select N · split horizontal/vertical · zoom · size claim/takeover/release · copy · paste · detach · help"));
         dialog.content_area().append(&entry);
         dialog.add_button("Cancel", gtk::ResponseType::Cancel);
         dialog.add_button("Run", gtk::ResponseType::Accept);
@@ -1652,12 +1707,41 @@ impl View {
         });
         dialog.present();
     }
+    /// Called only by the existing explicit private fixture interface.
+    pub fn sizing_fixture(&self, operation: &str) -> Value {
+        if operation == "open" && self.sizing_control.is_visible() {
+            self.sizing_control.emit_clicked();
+        }
+        let parent = self.parent();
+        let dialog = gtk::Window::list_toplevels()
+            .into_iter()
+            .find_map(|widget| {
+                let dialog = widget.downcast::<gtk::Dialog>().ok()?;
+                (dialog.title().as_deref() == Some("Take sizing control?")
+                    && dialog.transient_for() == parent)
+                    .then_some(dialog)
+            });
+        let visible = dialog.as_ref().is_some_and(|d| d.is_visible());
+        if let Some(dialog) = dialog {
+            match operation {
+                "cancel" => dialog.response(gtk::ResponseType::Cancel),
+                "accept" => dialog.response(gtk::ResponseType::Accept),
+                _ => (),
+            }
+        }
+        json!({"button_visible":self.sizing_control.is_visible(),"button_label":self.sizing_control.label().map(|s| s.to_string()),"dialog_visible":visible})
+    }
     pub fn run_command(self: &Rc<Self>, command: &str) {
         let mut words: Vec<_> = command.split_whitespace().collect();
         if let Some(name) = words.first_mut() {
             *name = ruwac_protocol::screen_command(name);
         }
         match words.as_slice(){
+            ["size", action @ ("claim"|"takeover"|"release")] => {
+                if let Some(frame)=self.frame.borrow().as_ref() {
+                    self.command("client.sizeControl",json!({"session":self.session,"action":action,"expected_generation":frame["sizing"]["generation"]}));
+                }
+            },
             ["new"]=>self.navigate("window.create",json!({"session":self.session})),
             ["next"]|["prev"]=>self.navigate("window.cycle",json!({"session":self.session,"previous":words[0]=="prev"})),
             ["select",n]=>match n.parse::<usize>(){Ok(n)=>{self.window_index.set(Some(n));self.command("window.list",json!({"session":self.session}));},Err(_)=>self.status.set_text("select requires a nonnegative window index")},
@@ -1955,6 +2039,9 @@ impl View {
         Ok(rx)
     }
     pub fn command(&self, m: &str, mut p: Value) {
+        if m == "client.sizeControl" {
+            self.warning.borrow_mut().take();
+        }
         if matches!(
             m,
             "client.focus"
@@ -2169,7 +2256,29 @@ impl View {
                     (self.area.height() as f64 / self.cell_height.get()).floor() as u64;
                 let viewport_cols =
                     (self.area.width() as f64 / self.cell_width.get()).floor() as u64;
-                let shared = if let Some(notice) = frame["size_notice"].as_str() {
+                self.sizing_control
+                    .set_visible(frame["size_policy"] == "controller_owned");
+                self.sizing_control
+                    .set_label(if frame["size_role"] == "size_controller" {
+                        "Release sizing control"
+                    } else {
+                        "Take sizing control…"
+                    });
+                let shared = if frame["size_policy"] == "controller_owned" {
+                    let role = if frame["size_role"] == "size_controller" {
+                        "Controller"
+                    } else {
+                        "Viewer"
+                    };
+                    let cropped = rows.is_some_and(|r| r > viewport_rows)
+                        || cols.is_some_and(|c| c > viewport_cols);
+                    format!(
+                        " · Size: {}×{} · {role}{}",
+                        cols.unwrap_or(0),
+                        rows.unwrap_or(0),
+                        if cropped { " · cropped" } else { "" }
+                    )
+                } else if let Some(notice) = frame["size_notice"].as_str() {
                     format!(" · {notice}")
                 } else {
                     match (rows, cols) {

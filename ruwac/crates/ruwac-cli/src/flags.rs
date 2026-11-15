@@ -36,6 +36,7 @@ pub const CONTROL: &[(&str, &str, usize)] = &[
     ("-F", "--favorites", 0),
     ("-N", "--snapshot", 1),
     ("-O", "--viewer", 0),
+    ("-Y", "--size-policy", 1),
 ];
 pub const DESKTOP: &[(&str, &str, usize)] = &[
     ("-G", "--primary-companion", 1),

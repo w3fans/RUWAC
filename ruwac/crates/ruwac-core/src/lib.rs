@@ -3,6 +3,7 @@ mod jobs;
 mod layout;
 mod paste;
 mod recovery;
+mod sizing;
 mod viewer;
 use layout::{Layout, Rect};
 pub use recovery::Store;
@@ -56,6 +57,12 @@ struct Session {
     active: String,
     rows: u16,
     cols: u16,
+    #[serde(default, skip_serializing_if = "sizing::Policy::is_legacy")]
+    size_policy: sizing::Policy,
+    #[serde(skip)]
+    size_generation: u64,
+    #[serde(skip)]
+    size_owner: Option<String>,
     #[serde(skip)]
     buffer: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -134,6 +141,7 @@ struct State {
     checkpoint_revision: u64,
     checkpoint_pending: bool,
     checkpoint_error: Option<String>,
+    size_nonce: String,
 }
 pub fn start() -> Handle {
     start_with_store(None).expect("in-memory state initialization")
@@ -159,6 +167,7 @@ pub fn start_with_store(store: Option<Store>) -> std::io::Result<Handle> {
         checkpoint_revision: 0,
         checkpoint_pending: false,
         checkpoint_error: None,
+        size_nonce: id("sizing"),
     };
     s.restore()?;
     let _ = rev.send(s.revision);
@@ -203,30 +212,35 @@ pub fn start_with_store(store: Option<Store>) -> std::io::Result<Handle> {
                     };
                     let stop = matches!(r.method.as_str(), "daemon.stop" | "daemon.stopIfIdle")
                         && answer.is_ok();
+                    let retained_cleanup = r.method == "pane.close"
+                        && answer.as_ref().is_ok_and(|value| value["retained"] == true);
                     let _ = reply.send(answer);
-                    if !matches!(
-                        r.method.as_str(),
-                        "health"
-                            | "daemon.checkpoint"
-                            | "version"
-                            | "capabilities"
-                            | "schema"
-                            | "describe"
-                            | "session.list"
-                            | "window.list"
-                            | "pane.list"
-                            | "job.list"
-                            | "job.query"
-                            | "agent.probe"
-                            | "pane.history"
-                            | "pane.history.freeze"
-                            | "pane.history.release"
-                            | "pane.capture"
-                            | "pane.wait"
-                            | "buffer.get"
-                            | "pane.selection"
-                            | "client.render"
-                    ) {
+                    if !retained_cleanup
+                        && !matches!(
+                            r.method.as_str(),
+                            "health"
+                                | "daemon.checkpoint"
+                                | "version"
+                                | "capabilities"
+                                | "schema"
+                                | "describe"
+                                | "session.list"
+                                | "session.size"
+                                | "window.list"
+                                | "pane.list"
+                                | "job.list"
+                                | "job.query"
+                                | "agent.probe"
+                                | "pane.history"
+                                | "pane.history.freeze"
+                                | "pane.history.release"
+                                | "pane.capture"
+                                | "pane.wait"
+                                | "buffer.get"
+                                | "pane.selection"
+                                | "client.render"
+                        )
+                    {
                         s.revision += 1;
                         let _ = rev.send(s.revision);
                     }
@@ -272,6 +286,7 @@ pub fn start_with_store(store: Option<Store>) -> std::io::Result<Handle> {
                     }
                 }
                 Message::Disconnect(c) => {
+                    s.release_sizing(&c);
                     s.histories.retain(|_, pin| pin.owner != c);
                     if let Some(c) = s.clients.remove(&c) {
                         if !c.non_sizing {
@@ -343,6 +358,10 @@ impl State {
                 "idempotency key must be 1..128 bytes",
             ));
         }
+        if r.method == "pane.close" && self.retain_viewer_cleanup(&r.params, client) {
+            return Ok(json!({"closed":false,"retained":true,"reason":"sizing_control_required"}));
+        }
+        self.check_sizing(&r.method, &r.params, client)?;
         self.check_viewer(&r.method, &r.params, client)?;
         if let Some(k) = &r.idempotency_key {
             if k.is_empty() || k.len() > 128 {
@@ -355,6 +374,8 @@ impl State {
                 r.method.as_str(),
                 "session.attach"
                     | "session.detach"
+                    | "session.sizeClaim"
+                    | "session.sizeRelease"
                     | "client.render"
                     | "client.input"
                     | "client.paste"
@@ -494,7 +515,7 @@ impl State {
             .unwrap_or(window.zoom)
     }
     fn select_client_window(&mut self, client: &str, session: &str, window: &str) {
-        if !self.is_viewer(client, session) {
+        if !self.is_viewer(client, session) && self.sessions[session].size_policy.is_legacy() {
             self.sessions
                 .get_mut(session)
                 .unwrap()
@@ -544,6 +565,10 @@ impl State {
     }
     fn layout(&mut self, s: &str) {
         self.normalize_client_focus(s);
+        let controlled = self
+            .sessions
+            .get(s)
+            .is_some_and(|s| !s.size_policy.is_legacy());
         let sizes: Vec<_> = self
             .clients
             .values()
@@ -552,7 +577,8 @@ impl State {
             .collect();
         // With only viewers, preserve the last per-pane size, including a
         // former sizing client's local zoom. Viewers cannot restore defaults.
-        if sizes.is_empty()
+        if !controlled
+            && sizes.is_empty()
             && self
                 .clients
                 .values()
@@ -563,7 +589,7 @@ impl State {
         let Some(session) = self.sessions.get_mut(s) else {
             return;
         };
-        if !sizes.is_empty() {
+        if !controlled && !sizes.is_empty() {
             session.rows = sizes.iter().map(|s| s.0).min().unwrap();
             session.cols = sizes.iter().map(|s| s.1).min().unwrap();
         }
@@ -584,10 +610,10 @@ impl State {
             let viewers: Vec<_> = self
                 .clients
                 .values()
-                .filter(|c| c.session == s && c.window == w.id && !c.non_sizing)
+                .filter(|c| !controlled && c.session == s && c.window == w.id && !c.non_sizing)
                 .collect();
             if viewers.is_empty() {
-                if w.zoom {
+                if !controlled && w.zoom {
                     rects.push((w.active.clone(), full));
                 } else {
                     w.layout.rects(full, &mut rects);
@@ -713,7 +739,7 @@ impl State {
                 json!({"name":"ruwac","implementation":"spike","package":env!("CARGO_PKG_VERSION"),"protocol":0}),
             ),
             "capabilities" => Ok(
-                json!({"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"render_cell_encodings":["palette-v1"],"job_metadata":true,"job_metadata_no_argv":true,"structured_agent_state":false,"recovery":self.store.is_some(),"primary_buffer_history":true,"extended_terminal_styles":true,"kitty_keyboard_input":false,"history_checkpoints":"private canonical active and hidden primary tail, 50000 lines or 512 KiB per pane; processes restore ended","desktop_clipboard":false,"primary":false,"graphics":false,"image_attachment":true,"image_attachment_adapters":["codex draft path"],"image_attachment_submits":false,"ssh_transport":"authenticated OpenSSH through CLI --host","shared_focus":false,"independent_client_focus":true,"non_sizing_viewer":1,"pane_divider_cells":true,"client_zoom":true,"atomic_paste":true,"safe_stop":"daemon.stopIfIdle","max_paste_bytes":paste::MAX_BYTES,"pty_sizing":"minimum sizing-client dimensions and visible pane sizes; explicit non-sizing viewers never vote","split":"persistent horizontal/vertical tree, sixteen panes","capture_limit":2000,"capture_formats":["plain","ansi"],"ansi_capture_max_bytes":65536,"history_page_limit":500,"history_style_encoding":"runs-v1","scrollback_default":50000,"max_text_bytes":ruwac_protocol::MAX_TEXT}),
+                json!({"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"render_cell_encodings":["palette-v1"],"job_metadata":true,"job_metadata_no_argv":true,"structured_agent_state":false,"recovery":self.store.is_some(),"primary_buffer_history":true,"extended_terminal_styles":true,"kitty_keyboard_input":false,"history_checkpoints":"private canonical active and hidden primary tail, 50000 lines or 512 KiB per pane; processes restore ended","desktop_clipboard":false,"primary":false,"graphics":false,"image_attachment":true,"image_attachment_adapters":["codex draft path"],"image_attachment_submits":false,"ssh_transport":"authenticated OpenSSH through CLI --host","shared_focus":false,"independent_client_focus":true,"non_sizing_viewer":1,"controller_owned_sizing":1,"pane_divider_cells":true,"client_zoom":true,"atomic_paste":true,"safe_stop":"daemon.stopIfIdle","max_paste_bytes":paste::MAX_BYTES,"pty_sizing":"legacy_minimum: minimum sizing attachments; controller_owned: canonical grid and explicit connection lease; viewers never vote","split":"persistent horizontal/vertical tree, sixteen panes","capture_limit":2000,"capture_formats":["plain","ansi"],"ansi_capture_max_bytes":65536,"history_page_limit":500,"history_style_encoding":"runs-v1","scrollback_default":50000,"max_text_bytes":ruwac_protocol::MAX_TEXT}),
             ),
             "schema" => Ok(schema()),
             "describe" => Ok(
@@ -731,6 +757,7 @@ impl State {
                 let name = text(v, "name")?;
                 checked_text(&name)?;
                 let (rows, cols) = terminal_dimensions(v)?;
+                let size_policy = sizing::Policy::parse(v)?;
                 self.sessions.insert(
                     s.clone(),
                     Session {
@@ -740,6 +767,9 @@ impl State {
                         active: String::new(),
                         rows,
                         cols,
+                        size_policy,
+                        size_generation: 0,
+                        size_owner: None,
                         buffer: String::new(),
                         previous: None,
                     },
@@ -754,8 +784,16 @@ impl State {
                     }
                 }
             }
+            "session.size" => self.size_status(&target(v, "session", "session")?),
+            "session.sizeClaim" => self.claim_sizing(v, client),
+            "session.sizeRelease" => {
+                let session = target(v, "session", "session")?;
+                self.require_sizer(&session, v, client)?;
+                self.release_sizing(client);
+                self.size_status(&session)
+            }
             "session.list" => {
-                let mut a:Vec<_>=self.sessions.values().map(|s|json!({"id":s.id,"name":s.name,"active_window":self.clients.get(client).filter(|c| c.session==s.id).map(|c|&c.window).unwrap_or(&s.active),"windows":s.windows,"rows":s.rows,"cols":s.cols,"previous_window":self.clients.get(client).filter(|c| c.session==s.id).map(|c|&c.previous).unwrap_or(&s.previous),"restored":s.windows.iter().filter_map(|w|self.windows.get(w)).flat_map(|w|w.panes.iter()).all(|p|self.panes.get(p).is_some_and(|p|p.pty.is_none()))})).collect();
+                let mut a:Vec<_>=self.sessions.values().map(|s|json!({"id":s.id,"name":s.name,"active_window":self.clients.get(client).filter(|c| c.session==s.id).map(|c|&c.window).unwrap_or(&s.active),"windows":s.windows,"rows":s.rows,"cols":s.cols,"size_policy":s.size_policy,"previous_window":self.clients.get(client).filter(|c| c.session==s.id).map(|c|&c.previous).unwrap_or(&s.previous),"restored":s.windows.iter().filter_map(|w|self.windows.get(w)).flat_map(|w|w.panes.iter()).all(|p|self.panes.get(p).is_some_and(|p|p.pty.is_none()))})).collect();
                 a.sort_by_key(|v| v["id"].as_str().unwrap().to_owned());
                 Ok(json!(a))
             }
@@ -765,7 +803,8 @@ impl State {
                     return Err(Error::new("STALE_ID", "session does not exist"));
                 }
                 let (rows, cols) = terminal_dimensions(v)?;
-                let non_sizing = viewer::role(v)?;
+                let non_sizing = viewer::role(v)? || !self.sessions[&s].size_policy.is_legacy();
+                self.release_sizing(client);
                 // Replace atomically: removing the sole old attachment first
                 // must not transiently restore a zoomed pane's shared defaults.
                 let old = self.clients.remove(client);
@@ -800,10 +839,11 @@ impl State {
                 );
                 self.layout(&s);
                 Ok(
-                    json!({"client":client,"session":s,"size_role":if non_sizing {"viewer"} else {"legacy"},"canonical_rows":self.sessions[&s].rows,"canonical_cols":self.sessions[&s].cols}),
+                    json!({"client":client,"session":s,"size_role":if non_sizing {"viewer"} else {"legacy"},"canonical_rows":self.sessions[&s].rows,"canonical_cols":self.sessions[&s].cols,"size_policy":self.sessions[&s].size_policy,"sizing":self.size_status(&s)?}),
                 )
             }
             "session.detach" => {
+                self.release_sizing(client);
                 self.histories.retain(|_, pin| pin.owner != client);
                 if let Some(c) = self.clients.remove(client) {
                     if !c.non_sizing {
@@ -988,7 +1028,9 @@ impl State {
                 let id = p.id.clone();
                 let w = p.window.clone();
                 let session = self.windows[&w].session.clone();
-                if !self.is_viewer(client, &session) {
+                if !self.is_viewer(client, &session)
+                    && self.sessions[&session].size_policy.is_legacy()
+                {
                     self.windows.get_mut(&w).unwrap().active = id.clone();
                 }
                 if let Some(c) = self
@@ -1008,11 +1050,10 @@ impl State {
                     .get_mut(&id)
                     .ok_or_else(|| Error::new("STALE_ID", "window does not exist"))?;
                 if let Some(zoom) = v.get("zoom").and_then(Value::as_bool) {
-                    if !self
-                        .clients
-                        .get(client)
-                        .is_some_and(|c| c.non_sizing && c.session == w.session)
-                    {
+                    if !self.clients.get(client).is_some_and(|c| {
+                        (c.non_sizing || !self.sessions[&c.session].size_policy.is_legacy())
+                            && c.session == w.session
+                    }) {
                         w.zoom = zoom;
                     }
                     if let Some(c) = self
@@ -1334,6 +1375,11 @@ impl State {
                 c.cols = cols;
                 let s = c.session.clone();
                 let non_sizing = c.non_sizing;
+                if !self.sessions[&s].size_policy.is_legacy() && !non_sizing {
+                    let session = self.sessions.get_mut(&s).unwrap();
+                    session.rows = rows;
+                    session.cols = cols;
+                }
                 if !non_sizing {
                     self.layout(&s);
                 }
@@ -1411,7 +1457,7 @@ impl State {
                     "window_index":s.windows.iter().position(|id|id==&w.id),
                     "windows":s.windows.iter().filter_map(|id|self.windows.get(id)).enumerate().map(|(index,w)|json!({"id":w.id,"index":index,"name":w.name})).collect::<Vec<_>>(),
                     "name":w.name,"rows":s.rows,"cols":s.cols,"active_pane":active,
-                    "layout":w.layout.json(),"zoom":zoom,"size_role":if c.non_sizing {"viewer"} else {"legacy"},"viewport":{"rows":c.rows,"cols":c.cols},
+                    "layout":w.layout.json(),"zoom":zoom,"size_role":if c.non_sizing {"viewer"} else if s.size_policy.is_legacy() {"legacy"} else {"size_controller"},"size_policy":s.size_policy,"sizing":self.size_status(&s.id)?,"viewport":{"rows":c.rows,"cols":c.cols},
                     "panes":rects.iter().filter_map(|(id,r)|self.panes.get(id).map(|p|json!({
                         "id":p.id,"epoch":p.term.history_epoch,"foreground":p.foreground,
                         "selection":p.term.selection_serials(),"ended":p.ended,
@@ -1429,7 +1475,7 @@ impl State {
                     return Ok(json!({"revision":self.revision,"unchanged":true}));
                 }
                 let panes=rects.iter().filter_map(|(id,r)|self.panes.get(id).map(|p|json!({"id":p.id,"grid":p.term.render_snapshot(compact),"selection_offer":p.term.selection_serials().0,"selection_request":p.term.selection_serials().1,"ended":p.ended,"restored":p.pty.is_none(),"exit_code":p.exit_code.or_else(||p.pty.as_ref().and_then(Pty::exit_code)),"rect":{"x":r.x,"y":r.y,"rows":r.rows,"cols":r.cols}}))).collect::<Vec<_>>();
-                let frame = json!({"revision":self.revision,"session":s.id,"session_name":s.name,"window":w.id,"window_index":s.windows.iter().position(|id|id==&w.id),"windows":s.windows.iter().filter_map(|id|self.windows.get(id)).enumerate().map(|(index,w)|json!({"id":w.id,"index":index,"name":w.name})).collect::<Vec<_>>(),"name":w.name,"rows":s.rows,"cols":s.cols,"active_pane":active,"layout":w.layout.json(),"zoom":zoom,"size_role":if c.non_sizing {"viewer"} else {"legacy"},"viewport":{"rows":c.rows,"cols":c.cols},"panes":panes});
+                let frame = json!({"revision":self.revision,"session":s.id,"session_name":s.name,"window":w.id,"window_index":s.windows.iter().position(|id|id==&w.id),"windows":s.windows.iter().filter_map(|id|self.windows.get(id)).enumerate().map(|(index,w)|json!({"id":w.id,"index":index,"name":w.name})).collect::<Vec<_>>(),"name":w.name,"rows":s.rows,"cols":s.cols,"active_pane":active,"layout":w.layout.json(),"zoom":zoom,"size_role":if c.non_sizing {"viewer"} else if s.size_policy.is_legacy() {"legacy"} else {"size_controller"},"size_policy":s.size_policy,"sizing":self.size_status(&s.id)?,"viewport":{"rows":c.rows,"cols":c.cols},"panes":panes});
                 self.clients.get_mut(client).unwrap().render_stamp = Some((self.revision, stamp));
                 Ok(frame)
             }
@@ -1512,7 +1558,7 @@ impl State {
     }
 }
 pub fn schema() -> Value {
-    json!({"protocol":0,"framing":"u32 big-endian byte length + UTF-8 JSON","max_frame_bytes":ruwac_protocol::MAX_FRAME,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"methods":["job.list","job.query","agent.probe","health","version","capabilities","schema","describe","session.create","session.list","session.attach","session.detach","window.create","window.list","window.rename","window.select","window.cycle","window.previous","pane.create","pane.layout","pane.history","pane.history.freeze","pane.history.release","pane.close","pane.list","pane.select","pane.attachImage","pane.sendText","pane.sendKey","pane.capture","pane.wait","pane.selection","pane.selectionReply","buffer.set","buffer.get","buffer.paste","client.resize","client.render","client.input","client.paste","events.subscribe","daemon.checkpoint","daemon.stop","daemon.stopIfIdle"],"targets":{"session":"session_ + 32 hex","window":"window_ + 32 hex","pane":"pane_ + 32 hex"},"request":{"version":0,"id":"JSON request correlation value","method":"method name","params":"object","idempotency_key":"optional 1..128 byte daemon-lifetime key"}})
+    json!({"protocol":0,"framing":"u32 big-endian byte length + UTF-8 JSON","max_frame_bytes":ruwac_protocol::MAX_FRAME,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"methods":["job.list","job.query","agent.probe","health","version","capabilities","schema","describe","session.create","session.list","session.attach","session.detach","session.size","session.sizeClaim","session.sizeRelease","window.create","window.list","window.rename","window.select","window.cycle","window.previous","pane.create","pane.layout","pane.history","pane.history.freeze","pane.history.release","pane.close","pane.list","pane.select","pane.attachImage","pane.sendText","pane.sendKey","pane.capture","pane.wait","pane.selection","pane.selectionReply","buffer.set","buffer.get","buffer.paste","client.resize","client.render","client.input","client.paste","events.subscribe","daemon.checkpoint","daemon.stop","daemon.stopIfIdle"],"targets":{"session":"session_ + 32 hex","window":"window_ + 32 hex","pane":"pane_ + 32 hex"},"request":{"version":0,"id":"JSON request correlation value","method":"method name","params":"object","idempotency_key":"optional 1..128 byte daemon-lifetime key"}})
 }
 
 fn primary_buffer(v: &Value) -> std::result::Result<bool, Error> {

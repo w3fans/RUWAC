@@ -15,7 +15,7 @@ pub struct Pending {
     _cancel: offer::Cancel,
 }
 impl Pending {
-    pub fn begin(rpc: &mut UnixStream, frame: &Value) -> io::Result<Option<Self>> {
+    pub fn begin(rpc: &mut super::Connection, frame: &Value) -> io::Result<Option<Self>> {
         let Some((mut stream, cancel)) = offer::claim()? else {
             return Ok(None);
         };
@@ -70,7 +70,7 @@ impl Pending {
     }
     /// No waiting for the desktop clipboard in the input loop. On delivery,
     /// re-read this client's frame and foreground before its normal guarded RPC.
-    pub fn poll(&self, rpc: &mut UnixStream) -> Option<io::Result<Value>> {
+    pub fn poll(&self, rpc: &mut super::Connection) -> Option<io::Result<Value>> {
         let result = match self.receive.try_recv() {
             Ok(result) => result,
             Err(mpsc::TryRecvError::Empty) => return None,

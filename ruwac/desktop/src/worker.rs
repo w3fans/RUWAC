@@ -24,6 +24,8 @@ pub struct Rpc {
     requested_size: Option<(u16, u16)>,
     pane_pids: std::collections::HashMap<String, Value>,
     legacy_wrap_history: bool,
+    /// Sizing lease of a controller-owned session held by this connection.
+    sizing_lease: Option<String>,
 }
 impl Rpc {
     pub fn connect(path: &Path) -> io::Result<Self> {
@@ -70,6 +72,7 @@ impl Rpc {
             requested_size: None,
             pane_pids: Default::default(),
             legacy_wrap_history: true,
+            sizing_lease: None,
         })
     }
     /// Linux peer identity binds private launch records to this running engine,
@@ -103,7 +106,26 @@ impl Rpc {
             Sha256::digest(format!("{}:{start}:{}", cred.pid, boot.trim()).as_bytes())
         ))
     }
-    fn request(&mut self, method: &str, params: Value) -> io::Result<Value> {
+    fn request(&mut self, method: &str, mut params: Value) -> io::Result<Value> {
+        // Shared-layout mutations carry this connection's sizing lease; the
+        // daemon ignores it for legacy sessions.
+        if matches!(
+            method,
+            "client.resize"
+                | "window.create"
+                | "pane.create"
+                | "pane.close"
+                | "pane.layout"
+                | "session.sizeRelease"
+        ) && params.get("size_generation").is_none()
+        {
+            if let Some(token) = &self.sizing_lease {
+                params["size_generation"] = json!(token);
+            }
+        }
+        if method == "session.attach" {
+            self.sizing_lease = None;
+        }
         let r = request(method, params);
         write_frame(&mut self.stream, &r)?;
         self.stream
@@ -126,9 +148,38 @@ impl Rpc {
         if let Some(e) = v.get("error") {
             return Err(io::Error::other(e.to_string()));
         }
+        if method == "session.sizeClaim" {
+            self.sizing_lease = v["result"]["generation"].as_str().map(str::to_owned);
+        }
+        if matches!(method, "session.detach" | "session.sizeRelease")
+            || (method == "client.render" && v["result"]["size_role"] == "viewer")
+        {
+            self.sizing_lease = None;
+        }
         Ok(v["result"].take())
     }
     pub fn call(&mut self, method: &str, mut params: Value) -> io::Result<Value> {
+        if method == "client.sizeControl" {
+            let action = params["action"]
+                .as_str()
+                .ok_or_else(|| io::Error::other("Sizing action missing"))?;
+            if action == "release" {
+                return self.call("session.sizeRelease", json!({"session":params["session"]}));
+            }
+            if !matches!(action, "claim" | "takeover") {
+                return Err(io::Error::other("Unknown sizing action"));
+            }
+            // Use the generation shown to the person, never a fresh token that
+            // could silently take over an intervening ownership decision.
+            let reply = self.call(
+                "session.sizeClaim",
+                json!({"session":params["session"],"expected_generation":params["expected_generation"],"takeover":action=="takeover"}),
+            )?;
+            if let Some((rows, cols)) = self.requested_size {
+                self.call("client.resize", json!({"rows":rows,"cols":cols}))?;
+            }
+            return Ok(reply);
+        }
         if method == "client.focusLaunch" {
             let panes = self.request("pane.list", json!({"session":params["session"]}))?;
             let valid = panes.as_array().is_some_and(|rows| {
@@ -166,7 +217,25 @@ impl Rpc {
             params["rows"] = json!(rows);
             params["cols"] = json!(cols);
         }
-        let mut result = ruwac_protocol::client_call(method, params, |m, v| self.request(m, v))?;
+        let allocation = params.clone();
+        let mut result =
+            match ruwac_protocol::client_call(method, params, |m, v| self.request(m, v)) {
+                // A lease lost to takeover or reattach: resize as a viewer
+                // (never sizing) instead of failing the allocation.
+                Err(error)
+                    if method == "client.resize"
+                        && serde_json::from_str::<Value>(&error.to_string())
+                            .is_ok_and(|e| e["code"] == "SIZE_NOT_OWNED") =>
+                {
+                    self.sizing_lease = None;
+                    let mut allocation = allocation;
+                    if let Some(map) = allocation.as_object_mut() {
+                        map.remove("size_generation");
+                    }
+                    self.request(method, allocation)?
+                }
+                other => other?,
+            };
         if method == "session.create" {
             let identity = self
                 .daemon_identity()
@@ -1085,6 +1154,7 @@ mod launch_focus_tests {
                 requested_size: None,
                 pane_pids: Default::default(),
                 legacy_wrap_history: true,
+                sizing_lease: None,
             };
             let result = rpc.call("client.focusLaunch", target);
             assert_eq!(result.is_ok(), fault == "none");

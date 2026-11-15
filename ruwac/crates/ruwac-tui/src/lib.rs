@@ -315,7 +315,33 @@ fn dimensions(limits: ruwac_protocol::TerminalLimits) -> (u16, u16) {
     limits.clamp(rows.saturating_sub(1), cols)
 }
 
-fn raw_call(s: &mut UnixStream, m: &str, v: Value) -> io::Result<Value> {
+struct Connection {
+    stream: UnixStream,
+    sizing_lease: Option<String>,
+    viewport: Option<(u16, u16)>,
+}
+impl Connection {
+    fn new(stream: UnixStream) -> Self {
+        Self {
+            stream,
+            sizing_lease: None,
+            viewport: None,
+        }
+    }
+}
+impl std::ops::Deref for Connection {
+    type Target = UnixStream;
+    fn deref(&self) -> &UnixStream {
+        &self.stream
+    }
+}
+impl std::ops::DerefMut for Connection {
+    fn deref_mut(&mut self) -> &mut UnixStream {
+        &mut self.stream
+    }
+}
+fn raw_call(c: &mut Connection, m: &str, v: Value) -> io::Result<Value> {
+    let s = &mut c.stream;
     let sent = request(m, v);
     write_frame(s, &sent)?;
     s.set_read_timeout(Some(Duration::from_secs(if m == "client.render" {
@@ -339,11 +365,57 @@ fn raw_call(s: &mut UnixStream, m: &str, v: Value) -> io::Result<Value> {
     }
     Ok(r["result"].take())
 }
-fn call(s: &mut UnixStream, m: &str, mut v: Value) -> io::Result<Value> {
+fn call(s: &mut Connection, m: &str, mut v: Value) -> io::Result<Value> {
     if matches!(m, "session.create" | "window.create" | "pane.create") && v.get("argv").is_none() {
         v["argv"] = json!(ruwac_pty::shell::default_terminal_argv().map_err(io::Error::other)?);
     }
-    let mut result = ruwac_protocol::client_call(m, v, |m, v| raw_call(s, m, v))?;
+    if matches!(m, "session.attach" | "client.resize") {
+        s.viewport = v["rows"]
+            .as_u64()
+            .zip(v["cols"].as_u64())
+            .map(|(r, c)| (r as u16, c as u16));
+    }
+    if m == "session.attach" {
+        s.sizing_lease = None;
+    }
+    if matches!(
+        m,
+        "client.resize"
+            | "window.create"
+            | "pane.create"
+            | "pane.close"
+            | "pane.layout"
+            | "session.sizeRelease"
+    ) {
+        if let Some(token) = &s.sizing_lease {
+            v["size_generation"] = json!(token);
+        }
+    }
+    let retry_viewport = v.clone();
+    let result = ruwac_protocol::client_call(m, v, |m, v| raw_call(s, m, v));
+    let mut result = match result {
+        Err(error)
+            if m == "client.resize"
+                && serde_json::from_str::<Value>(&error.to_string())
+                    .is_ok_and(|e| e["code"] == "SIZE_NOT_OWNED") =>
+        {
+            // A revoked controller becomes a viewer. Only allocation is safe
+            // to repeat; input and structural changes are never replayed.
+            s.sizing_lease = None;
+            let mut params = retry_viewport;
+            params.as_object_mut().unwrap().remove("size_generation");
+            raw_call(s, m, params)?
+        }
+        other => other?,
+    };
+    if m == "session.sizeClaim" {
+        s.sizing_lease = result["generation"].as_str().map(str::to_owned);
+    }
+    if matches!(m, "session.detach" | "session.sizeRelease")
+        || (m == "client.render" && result["size_role"] == "viewer")
+    {
+        s.sizing_lease = None;
+    }
     if m == "client.render" && result["unchanged"] != true && result.get("session_name").is_none() {
         if let Ok(sessions) = call(s, "session.list", json!({})) {
             if let Some(session) = sessions
@@ -450,6 +522,9 @@ fn status_layout(v: &Value, size: (u16, u16), status: &str) -> StatusLayout {
                 ""
             }
         )
+    } else if v["size_role"] == "size_controller" {
+        // This connection holds the sizing lease of a controller-owned session.
+        format!("Controller {}×{} · ", v["cols"], v["rows"])
     } else {
         String::new()
     };
@@ -1150,7 +1225,7 @@ fn history_rows(page: &Value, legacy: bool) -> io::Result<Vec<copy::Line>> {
         .collect()
 }
 
-fn history(s: &mut UnixStream, pane: &str) -> io::Result<copy::Copy> {
+fn history(s: &mut Connection, pane: &str) -> io::Result<copy::Copy> {
     let metadata = match call(s, "pane.history.freeze", json!({"pane":pane})) {
         Ok(metadata) if metadata["snapshot"].as_str().is_some() => metadata,
         Ok(_) => return Err(io::Error::other("History snapshot ID missing")),
@@ -1269,7 +1344,7 @@ fn history(s: &mut UnixStream, pane: &str) -> io::Result<copy::Copy> {
         Err(e) => Err(e),
     }
 }
-fn windows(s: &mut UnixStream, session: &str, current: &Value) -> io::Result<Mode> {
+fn windows(s: &mut Connection, session: &str, current: &Value) -> io::Result<Mode> {
     let v = call(s, "window.list", json!({"session":session}))?;
     let data = v
         .as_array()
@@ -1298,7 +1373,7 @@ fn windows(s: &mut UnixStream, session: &str, current: &Value) -> io::Result<Mod
         typed: String::new(),
     })
 }
-fn plain(s: &mut UnixStream, v: &Value, text: &mut String) -> io::Result<()> {
+fn plain(s: &mut Connection, v: &Value, text: &mut String) -> io::Result<()> {
     if text.is_empty() {
         return Ok(());
     }
@@ -1341,7 +1416,7 @@ fn plain(s: &mut UnixStream, v: &Value, text: &mut String) -> io::Result<()> {
     }
 }
 fn command(
-    s: &mut UnixStream,
+    s: &mut Connection,
     session: &str,
     snapshot: &Value,
     text: &str,
@@ -1359,10 +1434,28 @@ fn command(
     } else {
         arg.trim()
     };
-    if !arg.is_empty() && !matches!(name, "select" | "rename" | "split") {
+    if !arg.is_empty() && !matches!(name, "select" | "rename" | "split" | "size") {
         return Err(io::Error::other("This command takes no arguments"));
     }
     match name {
+        "size" => {
+            if !matches!(arg, "claim" | "takeover" | "release") {
+                return Err(io::Error::other("size requires claim, takeover or release"));
+            }
+            if arg == "release" {
+                call(s, "session.sizeRelease", json!({"session":session}))?;
+            } else {
+                let current = call(s, "session.size", json!({"session":session}))?;
+                call(
+                    s,
+                    "session.sizeClaim",
+                    json!({"session":session,"expected_generation":current["generation"],"takeover":arg=="takeover"}),
+                )?;
+                if let Some((rows, cols)) = s.viewport {
+                    call(s, "client.resize", json!({"rows":rows,"cols":cols}))?;
+                }
+            }
+        }
         "" => (),
         "new" => {
             call(s, "window.create", json!({"session":session}))?;
@@ -1567,9 +1660,9 @@ fn draw_mode(
     stdout.flush()
 }
 
-fn verified_connect(socket: &Path) -> io::Result<UnixStream> {
+fn verified_connect(socket: &Path) -> io::Result<Connection> {
     verified_path(socket)?;
-    verified_stream(UnixStream::connect(socket)?)
+    verified_stream(UnixStream::connect(socket)?).map(Connection::new)
 }
 
 fn verified_path(socket: &Path) -> io::Result<()> {
@@ -2923,6 +3016,21 @@ mod display_identity_tests {
         assert_eq!(sgr(&json!(260), true), "38;5;1");
     }
     #[test]
+    fn status_names_the_sizing_role_of_this_connection() {
+        let base = json!({"session_name":"s","window_index":0,"window":"a","name":"shell","rows":25,"cols":90,"windows":[{"id":"a","name":"shell","index":0}]});
+        let mut controller = base.clone();
+        controller["size_role"] = json!("size_controller");
+        assert!(status_line(&controller, (26, 90), "").starts_with("Controller 90×25 · RUWAC s"));
+        let mut viewer = base.clone();
+        viewer["size_role"] = json!("viewer");
+        assert!(status_line(&viewer, (26, 90), "").starts_with("Viewer 90×25 · RUWAC s"));
+        for legacy in [json!("legacy"), Value::Null] {
+            let mut v = base.clone();
+            v["size_role"] = legacy;
+            assert!(status_line(&v, (26, 90), "").starts_with("RUWAC s"));
+        }
+    }
+    #[test]
     fn selected_window_identity_and_shared_size_remain_visible_and_safe() {
         let v = json!({"session_name":"d\u{1b}\u{7}","window_index":1,"window":"b","name":"editor","rows":23,"cols":80,"windows":[{"id":"a","name":"shell","index":0},{"id":"b","name":"editor","index":1}]});
         let line = status_line(&v, (30, 160), "");
@@ -3005,6 +3113,7 @@ mod legacy_history_tests {
                 .unwrap();
             }
         });
+        let mut client = Connection::new(client);
         let result = history(&mut client, "pane_test");
         drop(client);
         worker.join().unwrap();

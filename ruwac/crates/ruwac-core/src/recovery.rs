@@ -236,6 +236,9 @@ impl State {
                     active: s.active.clone(),
                     rows: s.rows,
                     cols: s.cols,
+                    size_policy: s.size_policy,
+                    size_generation: 0,
+                    size_owner: None,
                     buffer: String::new(),
                     previous: s.previous.clone(),
                 })
@@ -281,6 +284,13 @@ impl State {
         {
             checkpoint.schema = 6;
         }
+        if checkpoint
+            .sessions
+            .iter()
+            .any(|s| !s.size_policy.is_legacy())
+        {
+            checkpoint.schema = 7;
+        }
         checkpoint
     }
     pub(super) fn restore(&mut self) -> io::Result<()> {
@@ -291,7 +301,7 @@ impl State {
             return Ok(());
         };
         let invalid = || io::Error::other("checkpoint resource graph rejected; original preserved");
-        if !matches!(saved.schema, 1 | 2 | 3 | 4 | 5 | 6)
+        if !matches!(saved.schema, 1 | 2 | 3 | 4 | 5 | 6 | 7)
             || saved.sessions.len() > 64
             || saved.windows.len() > 128
             || saved.panes.len() > 128
@@ -299,6 +309,9 @@ impl State {
             return Err(invalid());
         }
         for s in saved.sessions {
+            if saved.schema < 7 && !s.size_policy.is_legacy() {
+                return Err(invalid());
+            }
             if !valid_id(&s.id, "session")
                 || checked_text(&s.name).is_err()
                 || s.rows < 4

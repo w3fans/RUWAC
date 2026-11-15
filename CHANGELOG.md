@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Opt-in controller-owned sizing: a session created with
+  `--size-policy controller_owned` (`session.create` `size_policy`) is sized
+  only by the one client that explicitly claims it. Every attachment, including
+  older clients, starts as a viewer whose window never resizes the shared PTY.
+  The TUI gains `size claim`, `size takeover` and `size release` in command
+  mode and shows Controller/Viewer in its status bar; the GTK terminal shows
+  "Take sizing control…" (Cancel by default) or "Release sizing control".
+  Detach, socket loss or reattach releases control and freezes the grid.
+  Existing and ordinary sessions keep their current sizing. See
+  spec/RUWAC_CONTROLLER_SIZING.md.
+
 ## v0.4.81 — 2026-11-15 — Stable source release
 
 - Prevent a wide Unicode character in a one-column split from stopping the

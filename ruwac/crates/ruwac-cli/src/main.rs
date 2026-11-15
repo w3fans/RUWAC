@@ -195,7 +195,7 @@ fn named_request(a: &[String]) -> io::Result<Request> {
         _ => return Err(failure()),
     };
     let allowed: &[&str] = match method {
-        "session.create" => &["--name"],
+        "session.create" => &["--name", "--size-policy"],
         "session.list" => &[],
         "window.create" | "window.list" | "pane.list" => &["--session"],
         "pane.sendText" => &["--id", "--text", "--file"],
@@ -238,6 +238,12 @@ fn named_request(a: &[String]) -> io::Result<Request> {
         if allowed.contains(&flag) {
             params[key] = json!(required(flag)?);
         }
+    }
+    if let Some(policy) = options.get("--size-policy") {
+        if !matches!(*policy, "legacy_minimum" | "controller_owned") {
+            return Err(failure());
+        }
+        params["size_policy"] = json!(policy);
     }
     for (flag, key) in [("--lines", "lines"), ("--timeout-ms", "timeout_ms")] {
         if let Some(value) = options.get(flag) {
@@ -640,6 +646,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Supplying argv also fixes shell startup against an already-running older daemon.
     let spawn_call = |request: &Request| {
         let mut request = request.clone();
+        if request.method == "session.create"
+            && request.params["size_policy"] == "controller_owned"
+            && call(&ruwac_protocol::request("capabilities", json!({})))?["result"]["controller_owned_sizing"]
+                != 1
+        {
+            return Err(io::Error::other(
+                "This daemon does not support controller-owned sizing; no legacy fallback was created",
+            ));
+        }
         if matches!(
             request.method.as_str(),
             "session.create" | "window.create" | "pane.create"
