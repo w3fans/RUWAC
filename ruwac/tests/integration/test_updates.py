@@ -31,6 +31,10 @@ class Updates(unittest.TestCase):
         # publication qualification policy has separate refusal regressions.
         readiness = patch.object(updates, 'release_readiness', return_value=None)
         readiness.start(); self.addCleanup(readiness.stop)
+        # Per-user lifecycle fixtures must not see the developer machine's own
+        # COPR/Fedora package; distribution refusal has its own regressions.
+        distribution = patch.object(updates, 'distribution_package', return_value=False)
+        distribution.start(); self.addCleanup(distribution.stop)
 
     def tearDown(self):
         self.environment.stop()
@@ -41,6 +45,22 @@ class Updates(unittest.TestCase):
                    'html_url': 'https://github.com/w3fans/RUWAC/releases/tag/v0.2.1'}
         release.update(changes)
         return release
+
+    def test_short_install_and_mode_options_match_long_options_without_installing(self):
+        # Intercept exactly after argparse: validates real parser values without
+        # networking, installation or mutation of the production prefix.
+        class Parsed(Exception): pass
+        observed=[]
+        original=updates.argparse.ArgumentParser.parse_args
+        def capture(parser,*args,**kwargs):
+            result=original(parser,*args,**kwargs);observed.append(vars(result));raise Parsed()
+        with patch.object(updates.argparse.ArgumentParser,'parse_args',capture):
+            for argv in [
+                ['update','-i','-p','-H','-v','0.4.39','-P',str(self.root/'literal-prefix')],
+                ['update','--install','--prebuilt','--headless','--current','0.4.39','--prefix',str(self.root/'literal-prefix')],
+            ]:
+                with patch.object(sys,'argv',argv),self.assertRaises(Parsed): updates.main()
+        self.assertEqual(observed[0],observed[1]);self.assertTrue(observed[0]['install']);self.assertTrue(observed[0]['headless'])
 
     def test_numeric_order_not_lexical_and_no_downgrade(self):
         data = self.metadata(tag_name='v0.2.10', html_url='https://github.com/w3fans/RUWAC/releases/tag/v0.2.10')
@@ -105,7 +125,12 @@ class Updates(unittest.TestCase):
         def output(args, **kwargs):
             if args[0] == 'git': return (COMMIT + '\n') if kwargs.get('text') else (COMMIT + '\n').encode()
             return original(args, **kwargs)
-        with patch.object(sys, 'argv', ['installer', '--build-root', str(source), '--prefix', str(self.root / 'prefix')]), patch.object(subprocess, 'check_output', side_effect=output), contextlib.redirect_stdout(io.StringIO()):
+        read_text = Path.read_text
+        def read(path, *args, **kwargs):
+            if str(path) == '/usr/share/ruwac/rpm-installation.json':
+                raise FileNotFoundError(path)  # never the developer machine's COPR package
+            return read_text(path, *args, **kwargs)
+        with patch.object(sys, 'argv', ['installer', '--build-root', str(source), '--prefix', str(self.root / 'prefix')]), patch.object(subprocess, 'check_output', side_effect=output), patch.object(Path, 'read_text', read), contextlib.redirect_stdout(io.StringIO()):
             result = runpy.run_path(str(ROOT / 'scripts/install-user.py'), run_name='__main__')
             os.close(result['lock'])
         return source
@@ -379,6 +404,21 @@ class Updates(unittest.TestCase):
             updates.main()
         self.assertEqual(status.call_args.args[0], '0.0.0')
         self.assertTrue(install.call_args.args[3])
+
+    def test_remote_bootstrap_checks_selected_cli_and_never_shadows_a_newer_one(self):
+        with patch.object(sys, 'argv', ['updater', '--bootstrap', '--remote-cli', 'ruwac', '--prefix', str(self.root / 'prefix')]), patch.object(updates, 'remote_cli_version', return_value='0.4.99') as probe, patch.object(updates, 'verified_status', return_value={'available': False}) as status, patch.object(updates, 'install') as install, contextlib.redirect_stdout(io.StringIO()):
+            updates.main()
+        probe.assert_called_once_with('ruwac')
+        status.assert_called_once_with('0.4.99', 'source-build')
+        install.assert_not_called()
+
+    def test_remote_cli_version_probes_actual_executable_and_rejects_invalid_output(self):
+        with patch.object(updates.shutil, 'which', return_value='/generated/ruwac'), patch.object(updates.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'RUWAC 0.4.23\n', '')) as probe:
+            self.assertEqual(updates.remote_cli_version('ruwac'), '0.4.23')
+            self.assertEqual(probe.call_args.args[0], ['/generated/ruwac', '--version'])
+        with patch.object(updates.shutil, 'which', return_value='/generated/ruwac'), patch.object(updates.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'unexpected', '')):
+            with self.assertRaises(ValueError):
+                updates.remote_cli_version('ruwac')
 
     def test_bootstrap_respects_installed_version_and_does_not_downgrade(self):
         self.fixture_install('0.0.2')

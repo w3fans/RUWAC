@@ -1,7 +1,10 @@
 mod cleanup;
 mod doctor;
+mod engine;
+mod flags;
 mod image;
 mod image_transfer;
+mod multiplexer;
 mod remote;
 mod startup;
 mod workspace_api;
@@ -90,6 +93,70 @@ fn alias(command: &str) -> Option<&'static str> {
     })
 }
 
+#[cfg(test)]
+mod viewer_option_tests {
+    use super::*;
+    #[test]
+    fn viewer_options_are_explicit_and_duplicate_or_wrong_targets_fail() {
+        let sid = "session_0123456789abcdef0123456789abcdef";
+        let args = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            attach_options(&args(&["--viewer", "--session", sid])).unwrap(),
+            (sid, None, true)
+        );
+        assert_eq!(
+            attach_options(&args(&["--session", sid])).unwrap(),
+            (sid, None, false)
+        );
+        for bad in [
+            args(&["--viewer"]),
+            args(&["--session", sid, "--viewer", "--viewer"]),
+            args(&["--session", "window_0123456789abcdef0123456789abcdef"]),
+            args(&["--session", sid, "--window"]),
+        ] {
+            assert!(attach_options(&bad).is_err());
+        }
+        let mut short = args(&["attach", "-s", sid, "-O"]);
+        flags::normalize(&mut short);
+        assert_eq!(attach_options(&short[1..]).unwrap(), (sid, None, true));
+    }
+}
+
+fn attach_options(args: &[String]) -> io::Result<(&str, Option<&str>, bool)> {
+    let mut session = None;
+    let mut window = None;
+    let mut viewer = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--viewer" if !viewer => {
+                viewer = true;
+                i += 1;
+            }
+            "--session" if session.is_none() && i + 1 < args.len() => {
+                session = Some(args[i + 1].as_str());
+                i += 2;
+            }
+            "--window" if window.is_none() && i + 1 < args.len() => {
+                window = Some(args[i + 1].as_str());
+                i += 2;
+            }
+            _ => {
+                return Err(io::Error::other(
+                    "attach --session session_ID [--window window_ID] [--viewer (-O)]",
+                ));
+            }
+        }
+    }
+    let session = session
+        .filter(|s| ruwac_protocol::valid_id(s, "session"))
+        .ok_or_else(|| io::Error::other("attach requires a valid --session ID"))?;
+    if window.is_some_and(|w| !ruwac_protocol::valid_id(w, "window")) {
+        return Err(io::Error::other("attach requires a valid --window ID"));
+    }
+    Ok((session, window, viewer))
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("ruwac: {e}");
@@ -112,6 +179,13 @@ fn named_request(a: &[String]) -> io::Result<Request> {
         ("session", "list") => "session.list",
         ("window", "create") => "window.create",
         ("window", "list") => "window.list",
+        ("window", "rename") => "window.rename",
+        ("window", "select") => "window.select",
+        ("pane", "select") => "pane.select",
+        ("pane", "close") => "pane.close",
+        ("buffer", "set") => "buffer.set",
+        ("buffer", "show") => "buffer.get",
+        ("buffer", "paste") => "buffer.paste",
         ("pane", "list") => "pane.list",
         ("pane", "send-text") => "pane.sendText",
         ("pane", "send-key") => "pane.sendKey",
@@ -125,6 +199,11 @@ fn named_request(a: &[String]) -> io::Result<Request> {
         "session.list" => &[],
         "window.create" | "window.list" | "pane.list" => &["--session"],
         "pane.sendText" => &["--id", "--text", "--file"],
+        "window.rename" => &["--window", "--name"],
+        "window.select" => &["--window"],
+        "pane.select" | "pane.close" | "buffer.paste" => &["--id"],
+        "buffer.set" => &["--session", "--text", "--file"],
+        "buffer.get" => &["--session"],
         "pane.sendKey" => &["--id", "--key"],
         "pane.capture" => &["--id", "--lines", "--buffer"],
         "pane.wait" => &["--id", "--contains", "--timeout-ms"],
@@ -171,7 +250,7 @@ fn named_request(a: &[String]) -> io::Result<Request> {
         }
         params["buffer"] = json!(value);
     }
-    if method == "pane.sendText" {
+    if matches!(method, "pane.sendText" | "buffer.set") {
         params["text"] = match (options.get("--text"), options.get("--file")) {
             (Some(text), None) => json!(text),
             (None, Some(path)) => {
@@ -191,6 +270,43 @@ fn named_request(a: &[String]) -> io::Result<Request> {
         };
     }
     Ok(request(method, params))
+}
+
+#[cfg(test)]
+mod buffer_control_tests {
+    use super::*;
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| s.to_string()).collect()
+    }
+    #[test]
+    fn new_native_controls_require_targets_and_preserve_flag_like_text() {
+        assert!(named_request(&args(&["buffer", "paste"])).is_err());
+        assert!(named_request(&args(&["window", "rename", "--window", "w"])).is_err());
+        assert!(
+            named_request(&args(&[
+                "buffer",
+                "set",
+                "--session",
+                "s",
+                "--text",
+                "x",
+                "--file",
+                "not-opened"
+            ]))
+            .is_err()
+        );
+        let mut a = args(&["buffer", "set", "-s", "session_fixture", "-t", "-h"]);
+        flags::normalize(&mut a);
+        let q = named_request(&a).unwrap();
+        assert_eq!(q.method, "buffer.set");
+        assert_eq!(q.params["text"], "-h");
+        assert_eq!(
+            named_request(&args(&["window", "select", "--window", "window_fixture"]))
+                .unwrap()
+                .params["window"],
+            "window_fixture"
+        );
+    }
 }
 
 fn job_request(args: &[String]) -> io::Result<Request> {
@@ -238,6 +354,29 @@ fn job_request(args: &[String]) -> io::Result<Request> {
 }
 
 // Exact identities take precedence; duplicate names never select an arbitrary session.
+/// The engine that already holds this exact session name or ID, searching the
+/// new-session route first. Read-only; unreachable engines are skipped.
+fn find_session(default: &std::path::Path, name: Option<&str>) -> Option<std::path::PathBuf> {
+    let name = name?;
+    engine::lookup_order(default).into_iter().find(|socket| {
+        startup::connect(socket).is_ok()
+            && rpc_quiet(socket, &request("session.list", json!({})))
+                .ok()
+                .and_then(|list| named_session_id(&list, name).ok().flatten())
+                .is_some()
+    })
+}
+fn rpc_quiet(socket: &std::path::Path, r: &Request) -> io::Result<Value> {
+    let mut s = startup::connect(socket)?;
+    s.set_read_timeout(Some(Duration::from_secs(5)))?;
+    s.set_write_timeout(Some(Duration::from_secs(5)))?;
+    write_frame(&mut s, r)?;
+    let v = read_frame(&mut s)?;
+    if v["version"] != 0 || v["id"] != r.id || v.get("error").is_some() {
+        return Err(io::Error::other("request failed"));
+    }
+    Ok(v)
+}
 fn named_session_id(reply: &Value, name: &str) -> io::Result<Option<String>> {
     let sessions = reply["result"]
         .as_array()
@@ -261,8 +400,26 @@ fn named_session_id(reply: &Value, name: &str) -> io::Result<Option<String>> {
     }
 }
 
+fn gui_entry() -> io::Result<PathBuf> {
+    let binary = std::env::current_exe()?;
+    let installed = binary
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("ruwac-desktop");
+    let entry = std::env::var_os("RUWAC_GUI_ENTRY")
+        .map(PathBuf::from)
+        .unwrap_or(installed);
+    if !entry.is_file() {
+        return Err(io::Error::other(
+            "GUI unavailable: optional compiled ruwac-desktop is not installed",
+        ));
+    }
+    Ok(entry)
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut a: Vec<_> = std::env::args().skip(1).collect();
+    flags::normalize(&mut a);
     let mut socket = PathBuf::from(std::env::var("RUWAC_SOCKET").unwrap_or_else(|_| {
         format!(
             "{}/control.sock",
@@ -311,9 +468,38 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             *first = canonical.into();
         }
     }
+    if a.first().is_some_and(|command| command == "update")
+        && a.get(1).is_some_and(|v| v == "status")
+    {
+        if a.len() > 3 || (a.len() == 3 && a[2] != "--json") {
+            return Err("usage: ruwac update status [--json]".into());
+        }
+        let report = engine::update_status(&socket);
+        if a.len() == 3 {
+            println!("{}", json!({"version":0,"result":report}));
+        } else {
+            println!("{}", engine::update_human(&report));
+        }
+        return Ok(());
+    }
     if a.first().is_some_and(|command| command == "update") {
         if host.is_some() || explicit_socket.is_some() {
             return Err("run updates locally on each machine, without --host or --socket".into());
+        }
+        if std::env::current_exe().is_ok_and(|exe| ruwac_protocol::distribution_installation(&exe))
+        {
+            // DNF owns updates. Retire a leftover per-user copy (its command
+            // links, launcher and timer) so it no longer shadows this package;
+            // its running daemon and sessions are untouched.
+            let status = std::process::Command::new("python3")
+                .arg("-c")
+                .arg(include_str!("../../../../scripts/update-user.py"))
+                .args(["--retire-user", "--current", env!("CARGO_PKG_VERSION")])
+                .status()?;
+            if !status.success() {
+                return Err(ruwac_protocol::DISTRIBUTION_UPDATE_HINT.into());
+            }
+            return Ok(());
         }
         let managed =
             std::env::current_exe().is_ok_and(|exe| ruwac_protocol::managed_rpm_installation(&exe));
@@ -334,6 +520,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         return Ok(());
     }
+    // The implicit per-user default routes between engines (engine.rs). An
+    // explicit --socket, RUWAC_SOCKET (set inside every pane) or --host stays literal.
+    let implicit =
+        explicit_socket.is_none() && std::env::var_os("RUWAC_SOCKET").is_none() && host.is_none();
     let remote = host.map(|host| remote::Remote {
         host,
         binary: remote_binary.unwrap_or_else(|| "ruwac".into()),
@@ -342,6 +532,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(remote) = &remote {
         remote.validate()?;
         match a.first().map(String::as_str) {
+            Some("engine") => {
+                if !matches!(
+                    a[1..]
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .as_slice(),
+                    ["status"] | ["status", "--json"]
+                ) {
+                    return Err("Remote engine discovery: --host HOST engine status [--json]. Run engine new directly on its endpoint.".into());
+                }
+                println!("{}", remote.engine_status()?);
+                return Ok(());
+            }
             Some("doctor") => {
                 doctor::options(&a[1..])?;
                 if a[1..].iter().any(|s| s == "--repair") {
@@ -362,10 +566,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             Some("attach") => {
-                if a.len() != 3 || a[1] != "--session" {
-                    return Err("attach --session session_ID".into());
-                }
-                remote.attach(&a[2])?;
+                let (session, window, viewer) = attach_options(&a[1..])?;
+                remote.attach_with_options(session, window, viewer)?;
                 return Ok(());
             }
             Some("workspace" | "rdp" | "host") => {
@@ -404,6 +606,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             _ => (),
         }
     }
+    let mut listing_engines = Vec::new();
+    if implicit {
+        let default = socket.clone();
+        let named = a.get(1).filter(|_| a.len() >= 2).map(String::as_str);
+        match a.first().map(String::as_str) {
+            // Existing named sessions are attached where they live; only a
+            // genuinely new session goes to the installed engine.
+            Some("-S" | "-R" | "-dmS") if a.len() == 2 => {
+                socket = match find_session(&default, named) {
+                    Some(found) => found,
+                    None => engine::route_for_new_work(&default)?,
+                };
+            }
+            Some("-S" | "-r" | "-x" | "-R") => {
+                socket = find_session(&default, named)
+                    .unwrap_or_else(|| engine::current_route(&default));
+            }
+            Some("start" | "gui") => socket = engine::route_for_new_work(&default)?,
+            Some("session") if a.get(1).map(String::as_str) == Some("create") => {
+                socket = engine::route_for_new_work(&default)?
+            }
+            Some("-ls" | "-list") => listing_engines = engine::lookup_order(&default),
+            Some("engine" | "serve" | "-wipe" | "wipe") | None => (),
+            _ => socket = engine::current_route(&default),
+        }
+    }
     let call = |request: &Request| match &remote {
         Some(remote) => remote.rpc(request),
         None => rpc(&socket, request),
@@ -417,13 +645,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "session.create" | "window.create" | "pane.create"
         ) && request.params.get("argv").is_none()
         {
-            request.params["argv"] = json!(ruwac_pty::shell::terminal_argv(match &remote {
-                Some(remote) => remote.shell_argv()?,
-                None => ruwac_pty::shell::default_argv().map_err(io::Error::other)?,
-            }));
+            request.params["argv"] = json!(match &remote {
+                Some(remote) => ruwac_pty::shell::terminal_argv(remote.shell_argv()?),
+                None => ruwac_pty::shell::default_terminal_argv().map_err(io::Error::other)?,
+            });
         }
         call(&request)
     };
+    if let Some(reply) = multiplexer::run(&a, call, spawn_call)? {
+        println!("{reply}");
+        return Ok(());
+    }
     if a.len() >= 4 && a[0] == "-S" && a[2] == "-X" {
         let sessions = call(&request("session.list", json!({})))?;
         let id = named_session_id(&sessions, &a[1])?.ok_or("No exact named session")?;
@@ -436,7 +668,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let window = session["active_window"].clone();
         let name = ruwac_protocol::screen_command(&a[3]);
         let args = &a[4..];
+        let pane = || -> io::Result<Value> {
+            let windows = call(&request("window.list", json!({"session":id})))?;
+            windows["result"]
+                .as_array()
+                .and_then(|rows| rows.iter().find(|r| r["id"] == window))
+                .map(|row| row["active_pane"].clone())
+                .filter(|id| {
+                    id.as_str()
+                        .is_some_and(|s| ruwac_protocol::valid_id(s, "pane"))
+                })
+                .ok_or_else(|| io::Error::other("Active window or pane changed; retry"))
+        };
         let reply = match (name, args) {
+            ("stuff", [text]) => {
+                ruwac_protocol::checked_text(text).map_err(|e| io::Error::other(e.message))?;
+                call(&request("pane.sendText", json!({"pane":pane()?,"text":text})))?
+            }
+            ("paste", []) => call(&request("buffer.paste", json!({"pane":pane()?})))?,
+            ("split", []) => spawn_call(&request("pane.create", json!({"window":window,"orientation":"horizontal"})))?,
+            ("split", [flag]) if flag=="-v" => spawn_call(&request("pane.create", json!({"window":window,"orientation":"vertical"})))?,
+            ("info", []) => {
+                let rows=call(&request("pane.list",json!({"session":id})))?;
+                json!({"result":{"session":id,"window":window,"active_pane":pane()?,"panes":rows["result"].as_array().ok_or("Pane list unavailable")?.iter().filter(|p|p["window"]==window).collect::<Vec<_>>()}})
+            }
             ("new", [] | [_]) => spawn_call(&request("window.create", json!({"session":id,"name":args.first().map(String::as_str).unwrap_or("shell")})))?,
             ("rename", [_, ..]) => call(&request("window.rename", json!({"window":window,"name":args.join(" ")})))?,
             ("windows", []) => call(&request("window.list", json!({"session":id})))?,
@@ -454,7 +709,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 json!({"result":{"closed":true}})
             }
-            _ => return Err("Supported -S NAME -X commands: screen [NAME], title NAME, windows, next, prev, other, select N, kill, quit".into()),
+            _ => return Err("Supported -S NAME -X commands: screen [NAME], title NAME, windows, next, prev, other, select N, stuff TEXT, paste, split [-v], info, kill, quit".into()),
         };
         println!("{reply}");
         return Ok(());
@@ -463,6 +718,52 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         a.remove(1);
     }
     match a.first().map(String::as_str) {
+        Some("engine") => {
+            use std::os::unix::process::CommandExt;
+            let args: Vec<_> = a[1..].iter().map(String::as_str).collect();
+            let result = match args.as_slice() {
+                ["status"] | ["status", "--json"] => {
+                    // Original single-engine fields stay top-level for existing tooling.
+                    let mut report = engine::status(&socket)?;
+                    report["machine"] = engine::inventory(&socket)?;
+                    report
+                }
+                ["show"] => {
+                    println!("{}", engine::human(&engine::inventory(&socket)?));
+                    return Ok(());
+                }
+                ["stop"] | ["stop", "--json"] => engine::stop(&socket, None)?,
+                ["stop", "--legacy-confirm", pid] => engine::stop(
+                    &socket,
+                    Some(pid.parse().map_err(|_| "--legacy-confirm takes the engine PID")?),
+                )?,
+                ["new"] | ["new", "--json"] => engine::start_separate(&socket)?,
+                ["gui"] => {
+                    let entry = gui_entry()?;
+                    let separate = engine::start_separate(&socket)?;
+                    let socket = separate["engine"]["socket"]
+                        .as_str()
+                        .ok_or("engine socket missing")?;
+                    let history = separate["history"]
+                        .as_str()
+                        .ok_or("engine history missing")?;
+                    return Err(std::process::Command::new(entry)
+                        .args([
+                            "--socket",
+                            socket,
+                            "--new-instance",
+                            "--window-id",
+                            &ruwac_protocol::id("window"),
+                        ])
+                        .env("RUWAC_STATE_FILE", history)
+                        .env("RUWAC_SOCKET", socket)
+                        .exec()
+                        .into());
+                }
+                _ => return Err("usage: ruwac engine show | engine status|new|stop [--json] | engine gui | engine stop --legacy-confirm PID".into()),
+            };
+            println!("{}", json!({"version":0,"result":result}));
+        }
         Some("-wipe" | "wipe") => {
             let args: Vec<_> = a[1..].iter().filter(|v| v.as_str() != "--json").collect();
             if args.len() > 1 || a.len() > 3 {
@@ -507,6 +808,56 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("-ls" | "-list") => {
             if a.len() > 2 || (a.len() == 2 && a[1] != "--json") {
                 return Err("usage: ruwac -ls [--json]".into());
+            }
+            if listing_engines.len() > 1 {
+                // Sessions of every running engine, each labelled with its engine.
+                let mut sections = Vec::new();
+                let mut all = Vec::new();
+                for engine_socket in &listing_engines {
+                    let Some(version) = rpc_quiet(engine_socket, &request("version", json!({})))
+                        .ok()
+                        .and_then(|v| v["result"]["package"].as_str().map(str::to_owned))
+                    else {
+                        continue;
+                    };
+                    let mut reply = rpc_quiet(engine_socket, &request("session.list", json!({})))?;
+                    if let Some(rows) = reply["result"].as_array_mut() {
+                        for row in rows.iter_mut() {
+                            let panes = rpc_quiet(
+                                engine_socket,
+                                &request("pane.list", json!({"session":row["id"]})),
+                            )?;
+                            row["ended"] = json!(panes["result"].as_array().is_some_and(|ps| {
+                                ps.iter()
+                                    .all(|p| p["ended"] == true || p["restored"] == true)
+                            }));
+                            row["engine"] = json!(version);
+                            row["engine_socket"] = json!(engine_socket);
+                            all.push(row.clone());
+                        }
+                    }
+                    if reply["result"].as_array().is_some_and(|r| !r.is_empty()) {
+                        sections.push((version, engine_socket.clone(), reply));
+                    }
+                }
+                if a.len() == 2 {
+                    println!("{}", json!({"version":0,"result":all}));
+                } else if sections.len() <= 1 {
+                    let reply = sections.pop().map(|s| s.2).unwrap_or(json!({"result":[]}));
+                    println!("{}", session_listing(&reply)?);
+                } else {
+                    let route = engine::current_route(&socket);
+                    for (version, engine_socket, reply) in sections {
+                        let role = if engine_socket == route {
+                            "new sessions"
+                        } else {
+                            "preserved"
+                        };
+                        println!("Engine {version} ({role}) · {}", engine_socket.display());
+                        println!("{}\n", session_listing(&reply)?);
+                    }
+                }
+                return Ok(());
             }
             let mut reply = call(&request("session.list", json!({})))?;
             if a.len() == 2 {
@@ -597,7 +948,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Some("--version") => println!("RUWAC {}", env!("CARGO_PKG_VERSION")),
-        Some("session" | "window" | "pane") => println!("{}", spawn_call(&named_request(&a)?)?),
+        Some("session" | "window" | "pane" | "buffer") => {
+            println!("{}", spawn_call(&named_request(&a)?)?)
+        }
         Some("shell-argv") => {
             if remote.is_some() || a.len() != 1 {
                 return Err("shell-argv is endpoint-local and takes no options".into());
@@ -610,19 +963,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("job") => println!("{}", call(&job_request(&a[1..])?)?),
         Some("gui") => {
             use std::os::unix::process::CommandExt;
-            let binary = std::env::current_exe()?;
-            let installed = binary
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .join("ruwac-desktop");
-            let entry = std::env::var_os("RUWAC_GUI_ENTRY")
-                .map(PathBuf::from)
-                .unwrap_or(installed);
-            if !entry.is_file() {
-                return Err(
-                    "GUI unavailable: optional compiled ruwac-desktop is not installed".into(),
-                );
-            }
+            let entry = gui_entry()?;
             if !a[1..]
                 .iter()
                 .any(|s| matches!(s.as_str(), "--help" | "--version"))
@@ -683,14 +1024,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .block_on(ruwac_daemon::serve(&socket))?;
         }
         Some("attach") => {
-            if !matches!(a.len(), 3 | 5)
-                || a[1] != "--session"
-                || (a.len() == 5 && a[3] != "--window")
-            {
-                return Err("attach --session session_ID [--window window_ID]".into());
-            }
+            let (session, window, viewer) = attach_options(&a[1..])?;
             drop(startup::connect(&socket)?);
-            ruwac_tui::attach_with_window(&socket, &a[2], a.get(4).map(String::as_str))?;
+            ruwac_tui::attach_with_role(&socket, session, window, viewer)?;
         }
         Some("rpc") => {
             if a.len() < 2 {
@@ -762,10 +1098,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("--help" | "help") | None => {
             println!(
+                "Global short options: {}\nCommand short options: {}\nGUI short options: {}\nUse ruwac update -h for update short options (including -i install). Values after short options are literal; combined short options are not supported.",
+                flags::help(flags::GLOBAL),
+                flags::help(flags::CONTROL),
+                flags::help(flags::DESKTOP)
+            );
+            println!(
                 "Updates (Fedora 44): ruwac update --check | --install | --rollback | --auto-check on|off|status | --auto-install on|off|status | --testing-bundles on|off|status.\nTesting bundle delivery is opt-in for Fedora 44 x86_64; source builds require development dependencies; --headless retains a CLI-only installation. No running processes are restarted."
             );
             println!(
-                "RUWAC\n  ruwac -ls [--json]  # list persistent sessions\n  ruwac -wipe [NAME_OR_SESSION_ID] [--json]  # remove only dead windows/sessions\n  ruwac -S NAME -X COMMAND  # Screen control aliases; kill/quit close programs\n  ruwac -dmS NAME  # create a detached named session\n  ruwac -x NAME  # share an existing session (also -r)\n  ruwac -R NAME  # attach or create an exact named session\n  ruwac -S NAME  # create or attach a named terminal session\n  ruwac -r NAME_OR_SESSION_ID  # reattach an existing session\n  ruwac kill-session NAME_OR_SESSION_ID  # closes all programs in this session\n  ruwac job list [--session session_ID] [--query TEXT] --json\n  ruwac job query --id pane_ID --json\n  ruwac workspace describe|list|saved [--json]\n  ruwac workspace events subscribe --types tab,focus,layout,rdp --json\n  ruwac workspace events poll --subscription subscription_ID --after CURSOR --limit 50 --json\n  ruwac workspace events unsubscribe --subscription subscription_ID --json\n  ruwac workspace save --name NAME --json\n  ruwac workspace open|restore --id workspace_ID --json\n  ruwac host list [--query TEXT] [--group GROUP] [--protocol SSH|RDP] [--favorites] [--limit 1..50] [--offset N --snapshot TOKEN] --json\n  ruwac host query --id endpoint_ID --json\n  ruwac rdp list --json\n  ruwac rdp query|reconnect|disconnect --id view_ID --json\n  ruwac rdp open --profile endpoint_ID [--activate] --json\n  ruwac workspace activate --id tab_ID --json\n  ruwac workspace focus --id view_ID --json\n  ruwac doctor [--desktop] [--terminal [--repair]] [--json]\n  ruwac --version  # also -v / -V\n  Short forms: -h help · ls/list/-l sessions · new NAME = -S NAME · kill NAME = kill-session NAME\n  ruwac start  # starts/reuses a private persistent daemon\n  ruwac gui [--session session_ID]\n  ruwac session create --name NAME --detach --json\n  ruwac session list --json\n  ruwac pane list --session session_ID --json\n  ruwac pane send-text --id pane_ID --text TEXT --json\n  ruwac pane send-text --id pane_ID --file UTF8_FILE --json\n  ruwac pane send-key --id pane_ID --key Enter --json\n  ruwac pane capture --id pane_ID --lines 250 [--buffer active|primary] --json\n  ruwac pane wait --id pane_ID --contains TEXT --timeout-ms 5000 --json\n  ruwac --socket PATH serve\n  ruwac --socket PATH rpc METHOD --params JSON [--idempotency KEY]\n  ruwac --socket PATH request < request.json\n  ruwac --socket PATH attach --session session_ID\n  ruwac image-stage PNG PRIVATE_DIRECTORY\n  ruwac --socket PATH image-attach pane_ID PNG PRIVATE_DIRECTORY\n  ruwac --socket PATH health|version|capabilities|schema|describe\nRemote: ruwac --host SSH_HOST [--remote-binary PATH] [--socket REMOTE_PATH] COMMAND.\n  ruwac --host SSH_HOST describe\n  ruwac --host SSH_HOST pane send-text --id pane_ID --file LOCAL_UTF8_FILE\n  ruwac --host SSH_HOST attach --session session_ID\n  ruwac --host SSH_HOST image-attach pane_ID LOCAL_PNG REMOTE_PRIVATE_DIRECTORY\nHost/workspace/RDP commands address an already-running remote GUI with its explicit permissions. Uses existing SSH keys/config and verified host keys; no credential or agent forwarding. Without explicit --socket, the remote CLI selects its own private default.\nImage attachment: explicit local or SSH Codex draft; no automatic submission. No desktop clipboard or full Screen compatibility claim."
+                "RUWAC\n  ruwac -ls [--json]  # list persistent sessions\n  ruwac -wipe [NAME_OR_SESSION_ID] [--json]  # remove only dead windows/sessions\n  ruwac -S NAME -X COMMAND  # Screen control aliases; kill/quit close programs\n  ruwac -dmS NAME  # create a detached named session\n  ruwac -x NAME  # share an existing session (also -r)\n  ruwac -R NAME  # attach or create an exact named session\n  ruwac -S NAME  # create or attach a named terminal session\n  ruwac -r NAME_OR_SESSION_ID  # reattach an existing session\n  ruwac kill-session NAME_OR_SESSION_ID  # closes all programs in this session\n  tmux-style explicit-target controls: list-sessions; has-session/list-windows/new-window/next-window/previous-window/last-window -t SESSION; rename-window/select-window/split-window -t window_ID; select-pane/kill-pane/send-keys -t pane_ID (send-keys requires -l). See spec/RUWAC_MULTIPLEXER_COMMANDS.md for supported flags.\n  ruwac buffer set --session session_ID --text TEXT|--file UTF8_FILE\n  ruwac buffer show --session session_ID; buffer paste --id pane_ID\n  ruwac job list [--session session_ID] [--query TEXT] --json\n  ruwac job query --id pane_ID --json\n  ruwac workspace describe|list|saved [--json]\n  ruwac workspace events subscribe --types tab,focus,layout,rdp --json\n  ruwac workspace events poll --subscription subscription_ID --after CURSOR --limit 50 --json\n  ruwac workspace events unsubscribe --subscription subscription_ID --json\n  ruwac workspace save --name NAME --json\n  ruwac workspace open|restore --id workspace_ID --json\n  ruwac host list [--query TEXT] [--group GROUP] [--protocol SSH|RDP] [--favorites] [--limit 1..50] [--offset N --snapshot TOKEN] --json\n  ruwac host query --id endpoint_ID --json\n  ruwac rdp list --json\n  ruwac rdp query|reconnect|disconnect --id view_ID --json\n  ruwac rdp open --profile endpoint_ID [--activate] --json\n  ruwac workspace activate --id tab_ID --json\n  ruwac workspace focus --id view_ID --json\n  ruwac doctor [--desktop] [--terminal [--repair]] [--json]\n  ruwac --version  # also -v / -V\n  Short forms: -h help · ls/list/-l sessions · new NAME = -S NAME · kill NAME = kill-session NAME\n  ruwac engine status [--json]  # installed CLI and running engine, without starting it\n  ruwac engine new [--json]  # independent updated engine; preserves existing terminals\n  ruwac engine gui  # new GUI window on the separate updated engine\n  ruwac start  # starts/reuses a private persistent daemon\n  ruwac gui [--session session_ID]\n  ruwac session create --name NAME --detach --json\n  ruwac session list --json\n  ruwac pane list --session session_ID --json\n  ruwac pane send-text --id pane_ID --text TEXT --json\n  ruwac pane send-text --id pane_ID --file UTF8_FILE --json\n  ruwac pane send-key --id pane_ID --key Enter --json\n  ruwac pane capture --id pane_ID --lines 250 [--buffer active|primary] --json\n  ruwac pane wait --id pane_ID --contains TEXT --timeout-ms 5000 --json\n  ruwac --socket PATH serve\n  ruwac --socket PATH rpc METHOD --params JSON [--idempotency KEY]\n  ruwac --socket PATH request < request.json\n  ruwac --socket PATH attach --session session_ID [--window window_ID] [--viewer (-O)]\n  ruwac image-stage PNG PRIVATE_DIRECTORY\n  ruwac --socket PATH image-attach pane_ID PNG PRIVATE_DIRECTORY\n  ruwac --socket PATH health|version|capabilities|schema|describe\nRemote: ruwac --host SSH_HOST [--remote-binary PATH] [--socket REMOTE_PATH] COMMAND.\n  ruwac --host SSH_HOST describe\n  ruwac --host SSH_HOST pane send-text --id pane_ID --file LOCAL_UTF8_FILE\n  ruwac --host SSH_HOST attach --session session_ID [--window window_ID] [--viewer (-O)]\n  ruwac --host SSH_HOST image-attach pane_ID LOCAL_PNG REMOTE_PRIVATE_DIRECTORY\nHost/workspace/RDP commands address an already-running remote GUI with its explicit permissions. Uses existing SSH keys/config and verified host keys; no credential or agent forwarding. Without explicit --socket, the remote CLI selects its own private default.\nImage attachment: explicit local or SSH Codex draft; no automatic submission. No desktop clipboard or full Screen compatibility claim."
             );
         }
         _ => return Err("unknown command; use --help".into()),
@@ -777,6 +1119,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 mod named_session_tests {
     use super::*;
 
+    #[test]
+    fn short_options_create_identical_requests_and_keep_literal_text() {
+        let mut short = vec!["pane", "send-text", "-i", "pane_fixture", "-t", "-j", "-j"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        flags::normalize(&mut short);
+        let request = named_request(&short).unwrap();
+        assert_eq!(request.method, "pane.sendText");
+        assert_eq!(request.params["pane"], "pane_fixture");
+        assert_eq!(request.params["text"], "-j");
+        let mut attach = vec!["-r".into(), "-s".into(), "session_fixture".into()];
+        flags::normalize(&mut attach);
+        assert_eq!(attach[1], "--session");
+    }
     #[test]
     fn conventional_short_forms_map_to_existing_commands() {
         assert_eq!(alias("-v"), Some("--version"));

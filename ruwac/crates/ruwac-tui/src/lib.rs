@@ -1,5 +1,10 @@
 mod copy;
+mod double_click;
+mod local_image;
+mod output_wakeup;
+mod refresh;
 mod status_commands;
+mod word;
 use ruwac_protocol::{MAX_TEXT, request, write_frame};
 use serde_json::{Value, json};
 use std::{
@@ -24,6 +29,8 @@ pub enum Input {
     Keyboard(Vec<u8>),
     Mouse(Vec<u8>),
     Paste(Vec<u8>),
+    /// The outer terminal's OSC 52 answer with the desktop mouse selection.
+    Selection(String),
     Rejected(&'static str),
 }
 #[derive(Default)]
@@ -152,8 +159,14 @@ impl Decoder {
                     .position(|b| *b == 7)
                     .map(|i| i + 1)
                     .or_else(|| find(&self.buf, b"\x1b\\").map(|i| i + 2));
+                // A selection answer carries up to 128 KiB as base64.
+                let limit = if self.buf.starts_with(b"\x1b]52;") {
+                    SELECTION_LIMIT * 4 / 3 + 64
+                } else {
+                    4096
+                };
                 let Some(n) = end else {
-                    if self.buf.len() > 4096 {
+                    if self.buf.len() > limit {
                         out.push(Input::Keyboard(self.buf.drain(..).collect()));
                     }
                     break;
@@ -161,7 +174,18 @@ impl Decoder {
                 let b: Vec<_> = self.buf.drain(..n).collect();
                 let cap = (b.starts_with(b"\x1b]10;rgb:") || b.starts_with(b"\x1b]11;rgb:"))
                     && b.iter().all(|x| x.is_ascii());
-                if !cap {
+                if let Some(data) = b.strip_prefix(b"\x1b]52;p;") {
+                    let data = data
+                        .strip_suffix(b"\x07")
+                        .or_else(|| data.strip_suffix(b"\x1b\\"))
+                        .unwrap_or(data);
+                    if let Some(text) = base64_decode(data)
+                        .and_then(|t| String::from_utf8(t).ok())
+                        .filter(|t| t.len() <= SELECTION_LIMIT)
+                    {
+                        out.push(Input::Selection(text));
+                    }
+                } else if !cap {
                     out.push(Input::Keyboard(b))
                 }
                 continue;
@@ -178,6 +202,54 @@ impl Decoder {
             vec![]
         }
     }
+}
+/// Mouse selections exchanged with the outer terminal over OSC 52 PRIMARY.
+const SELECTION_LIMIT: usize = 128 * 1024;
+const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+fn base64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() {
+                BASE64[(n >> (18 - 6 * i) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    out
+}
+fn base64_decode(data: &[u8]) -> Option<Vec<u8>> {
+    let data = data
+        .strip_suffix(b"==")
+        .or_else(|| data.strip_suffix(b"="))
+        .unwrap_or(data);
+    let mut out = Vec::with_capacity(data.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in data {
+        acc = acc << 6 | BASE64.iter().position(|b| b == c)? as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+/// Offer a mouse selection to the outer terminal's desktop PRIMARY (OSC 52);
+/// terminals without OSC 52 ignore it and the session buffer still has it.
+fn offer_selection(text: &str) {
+    if text.is_empty() || text.len() > SELECTION_LIMIT {
+        return;
+    }
+    let mut stdout = io::stdout().lock();
+    let _ = write!(stdout, "\x1b]52;p;{}\x07", base64_encode(text.as_bytes()));
+    let _ = stdout.flush();
 }
 fn find(b: &[u8], needle: &[u8]) -> Option<usize> {
     b.windows(needle.len()).position(|x| x == needle)
@@ -365,8 +437,24 @@ fn status_layout(v: &Value, size: (u16, u16), status: &str) -> StatusLayout {
     } else {
         (columns * 2 / 3).min(columns.saturating_sub(10))
     };
+    let role = if v["size_role"] == "viewer" {
+        format!(
+            "Viewer {}×{}{} · ",
+            v["cols"],
+            v["rows"],
+            if v["rows"].as_u64().unwrap_or(0) > size.0 as u64
+                || v["cols"].as_u64().unwrap_or(0) > size.1 as u64
+            {
+                " cropped"
+            } else {
+                ""
+            }
+        )
+    } else {
+        String::new()
+    };
     let prefix = if status.trim().is_empty() {
-        format!("RUWAC {identity}{shared}")
+        format!("{role}RUWAC {identity}{shared}")
     } else {
         // Preserve the actual notice before spending the remaining prefix
         // space on identity; the dedicated window list still shows selection.
@@ -375,7 +463,7 @@ fn status_layout(v: &Value, size: (u16, u16), status: &str) -> StatusLayout {
             &identity,
             prefix_limit.saturating_sub(9 + copy::width(&notice)),
         );
-        format!("RUWAC {identity} · {notice}{shared}")
+        format!("{role}RUWAC {identity} · {notice}{shared}")
     };
     let prefix = elide(&prefix, prefix_limit);
     let mut layout = StatusLayout {
@@ -633,6 +721,36 @@ fn mouse_request(v: &Value) -> Option<u16> {
         Some(1000)
     }
 }
+/// Bind a live display cell to its UTF-8 position before reading canonical history.
+fn mouse_word_source(
+    snapshot: &Value,
+    pane: &str,
+    row: usize,
+    col: usize,
+) -> Option<(String, usize)> {
+    let grid = &snapshot["panes"]
+        .as_array()?
+        .iter()
+        .find(|p| p["id"] == pane)?["grid"];
+    let cells = grid["cells"].as_array()?.get(row)?.as_array()?;
+    cells.get(col)?;
+    let mut first = col;
+    while first > 0 && cells[first][1] == true {
+        first -= 1;
+    }
+    let mut text = String::new();
+    let mut byte = None;
+    for (n, cell) in cells.iter().enumerate() {
+        if cell[1] == true {
+            continue;
+        }
+        if n == first {
+            byte = Some(text.len());
+        }
+        text.push_str(cell[0].as_str()?);
+    }
+    Some((text, byte?))
+}
 /// (button, column, row, release) from an SGR mouse report; 1-based.
 fn sgr_mouse(bytes: &[u8]) -> Option<(u64, u64, u64, bool)> {
     let text = std::str::from_utf8(bytes).ok()?.strip_prefix("\x1b[<")?;
@@ -668,43 +786,135 @@ fn route_mouse(v: &Value, bytes: &[u8]) -> Option<(String, Value, bool)> {
 }
 const STATUS_STYLE: &str = "\x1b[0;38;2;16;32;48;48;2;152;198;232m";
 
-fn draw(v: &Value, status: &str) -> io::Result<()> {
+/// Shared live/copy SGR: selection reverses colours without discarding attributes.
+fn cell_style(cell: &Value, selected: bool) -> String {
+    let st = format!(
+        "0;{};{};{};{}",
+        sgr(&cell[2], true),
+        sgr(&cell[3], false),
+        if cell[4] == true { 1 } else { 22 },
+        if (cell[5] == true) != selected { 7 } else { 27 }
+    );
+    let mut st = st;
+    let extra = &cell[6];
+    if extra["italic"] == true {
+        st.push_str(";3");
+    }
+    if extra["dim"] == true {
+        st.push_str(";2");
+    }
+    if extra["hidden"] == true {
+        st.push_str(";8");
+    }
+    if extra["strike"] == true {
+        st.push_str(";9");
+    }
+    match extra["underline"].as_str() {
+        Some("single") => st.push_str(";4"),
+        Some("double") => st.push_str(";4:2"),
+        Some("curly") => st.push_str(";4:3"),
+        Some("dotted") => st.push_str(";4:4"),
+        Some("dashed") => st.push_str(";4:5"),
+        _ => (),
+    }
+    if let Some(rgb) = extra["underline_color"].as_array() {
+        st.push_str(&format!(";58;2;{};{};{}", rgb[0], rgb[1], rgb[2]));
+    } else if let Some(index) = extra["underline_color"].as_u64().filter(|i| *i <= 255) {
+        st.push_str(&format!(";58;5;{index}"));
+    }
+    st
+}
+#[derive(Default)]
+struct DrawCache {
+    geometry: Option<Value>,
+    rows: std::collections::HashMap<String, Vec<Value>>,
+}
+impl DrawCache {
+    fn clear(&mut self) {
+        self.geometry = None;
+        self.rows.clear();
+    }
+    fn begin(&mut self, frame: &Value, screen: (u16, u16), cleared: bool) -> bool {
+        let panes: Vec<_> = frame["panes"].as_array().into_iter().flatten()
+            .map(|p| json!({"id":p["id"],"rect":p["rect"],"rows":p["grid"]["rows"],"cols":p["grid"]["cols"]})).collect();
+        let geometry = json!({"session":frame["session"],"window":frame["window"],"screen":screen,"panes":panes});
+        let full = cleared || self.geometry.as_ref() != Some(&geometry);
+        if full {
+            self.rows.clear();
+            self.geometry = Some(geometry);
+        }
+        full
+    }
+    fn changed(&mut self, pane: &str, row: usize, cells: &Value) -> bool {
+        if !self.rows.contains_key(pane) {
+            self.rows.insert(pane.into(), Vec::new());
+        }
+        let rows = self.rows.get_mut(pane).unwrap();
+        if rows.get(row) == Some(cells) {
+            return false;
+        }
+        if rows.len() <= row {
+            rows.resize(row + 1, Value::Null);
+        }
+        rows[row] = cells.clone();
+        true
+    }
+}
+fn draw(v: &Value, status: &str, cache: &mut DrawCache) -> io::Result<()> {
+    let cleared = CLEAR.swap(false, Ordering::Relaxed);
+    let (screen_rows, screen_cols) = terminal_dimensions();
+    let full = cache.begin(v, (screen_rows, screen_cols), cleared);
     let mut out = format!(
         "\x1b]2;RUWAC {}\x07\x1b[?25l\x1b[0m\x1b[H{}",
         window_identity(v).chars().take(160).collect::<String>(),
-        if CLEAR.swap(false, Ordering::Relaxed) {
-            "\x1b[2J"
-        } else {
-            ""
-        }
+        if cleared { "\x1b[2J" } else { "" }
     );
 
-    let (screen_rows, screen_cols) = terminal_dimensions();
-    // Panes repaint every cell they own; erase only what lies outside them,
-    // before drawing, so frames replace each other without a blank flash.
-    let rects: Vec<(u64, u64, u64, u64)> = v["panes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|p| {
-            let r = &p["rect"];
-            (
-                r["x"].as_u64().unwrap_or(0),
-                r["y"].as_u64().unwrap_or(0),
-                r["cols"].as_u64().unwrap_or(0),
-                r["rows"].as_u64().unwrap_or(0),
-            )
-        })
-        .collect();
-    for row in 0..u64::from(screen_rows.saturating_sub(1)) {
-        let right = rects
-            .iter()
-            .filter(|&&(_, y, _, h)| y <= row && row < y + h)
-            .map(|&(x, _, w, _)| x + w)
-            .max()
-            .unwrap_or(0);
-        if right < u64::from(screen_cols) {
-            out.push_str(&format!("\x1b[{};{}H\x1b[0m\x1b[K", row + 1, right + 1));
+    // Geometry/mode changes repaint completely. Ordinary typing only replaces
+    // changed rows, avoiding full-screen ANSI/SSH traffic for a single glyph.
+    if full {
+        let rects: Vec<_> = v["panes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| {
+                let r = &p["rect"];
+                (
+                    r["x"].as_u64().unwrap_or(0),
+                    r["y"].as_u64().unwrap_or(0),
+                    r["cols"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        .min(p["grid"]["cols"].as_u64().unwrap_or(0)),
+                    r["rows"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        .min(p["grid"]["rows"].as_u64().unwrap_or(0)),
+                )
+            })
+            .collect();
+        for row in 0..u64::from(screen_rows.saturating_sub(1)) {
+            let mut covered: Vec<_> = rects
+                .iter()
+                .filter(|&&(_, y, _, h)| y <= row && row < y + h)
+                .map(|&(x, _, w, _)| (x.min(screen_cols as u64), (x + w).min(screen_cols as u64)))
+                .collect();
+            covered.sort_unstable();
+            let mut right = 0;
+            for (left, end) in covered {
+                if left > right {
+                    out.push_str(&format!(
+                        "\x1b[{};{}H\x1b[0m{}",
+                        row + 1,
+                        right + 1,
+                        " ".repeat((left - right) as usize)
+                    ));
+                }
+                right = right.max(end);
+            }
+            if right < u64::from(screen_cols) {
+                out.push_str(&format!("\x1b[{};{}H\x1b[0m\x1b[K", row + 1, right + 1));
+            }
         }
     }
     let active = v["active_pane"].as_str().unwrap_or("");
@@ -725,59 +935,47 @@ fn draw(v: &Value, status: &str) -> io::Result<()> {
             }
             if let Some(rows) = g["cells"].as_array() {
                 for (r, cells) in rows.iter().enumerate() {
+                    let bottom = u64::from(screen_rows.saturating_sub(1))
+                        .min(offset + p["rect"]["rows"].as_u64().unwrap_or(0));
+                    let right =
+                        u64::from(screen_cols).min(left + p["rect"]["cols"].as_u64().unwrap_or(0));
+                    if offset + r as u64 >= bottom || left >= right {
+                        break;
+                    }
+                    if !cache.changed(p["id"].as_str().unwrap_or(""), r, cells) {
+                        continue;
+                    }
                     out.push_str(&format!("\x1b[{};{}H", offset + r as u64 + 1, left + 1));
                     let mut style = String::new();
-                    for cell in cells.as_array().unwrap() {
+                    let cells = cells.as_array().unwrap();
+                    for (col, cell) in cells.iter().enumerate() {
+                        if left + col as u64 >= right {
+                            break;
+                        }
                         if cell[1] == true {
                             continue;
                         }
-                        let st = format!(
-                            "0;{};{};{};{}",
-                            sgr(&cell[2], true),
-                            sgr(&cell[3], false),
-                            if cell[4] == true { 1 } else { 22 },
-                            if cell[5] == true { 7 } else { 27 }
-                        );
-                        let mut st = st;
-                        let extra = &cell[6];
-                        if extra["italic"] == true {
-                            st.push_str(";3");
-                        }
-                        if extra["dim"] == true {
-                            st.push_str(";2");
-                        }
-                        if extra["hidden"] == true {
-                            st.push_str(";8");
-                        }
-                        if extra["strike"] == true {
-                            st.push_str(";9");
-                        }
-                        match extra["underline"].as_str() {
-                            Some("single") => st.push_str(";4"),
-                            Some("double") => st.push_str(";4:2"),
-                            Some("curly") => st.push_str(";4:3"),
-                            Some("dotted") => st.push_str(";4:4"),
-                            Some("dashed") => st.push_str(";4:5"),
-                            _ => (),
-                        }
-                        if let Some(rgb) = extra["underline_color"].as_array() {
-                            st.push_str(&format!(";58;2;{};{};{}", rgb[0], rgb[1], rgb[2]));
-                        } else if let Some(index) =
-                            extra["underline_color"].as_u64().filter(|i| *i <= 255)
-                        {
-                            st.push_str(&format!(";58;5;{index}"));
-                        }
+                        let st = cell_style(cell, false);
                         if st != style {
                             out.push_str(&format!("\x1b[{st}m"));
                             style = st;
                         }
-                        out.push_str(&safe(cell[0].as_str().unwrap_or(" ")));
+                        if left + col as u64 + 1 == right
+                            && cells.get(col + 1).is_some_and(|next| next[1] == true)
+                        {
+                            out.push(' ');
+                        } else {
+                            out.push_str(&safe(cell[0].as_str().unwrap_or(" ")));
+                        }
                     }
                 }
             }
         }
     }
     for ((row, col), direction) in divider_cells(v) {
+        if row >= u64::from(screen_rows.saturating_sub(1)) || col >= u64::from(screen_cols) {
+            continue;
+        }
         let glyph = match direction {
             1 => "│",
             2 => "─",
@@ -809,7 +1007,9 @@ fn draw(v: &Value, status: &str) -> io::Result<()> {
         None => "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l",
     });
     if let Some((r, c)) = cursor {
-        out.push_str(&format!("\x1b[{};{}H\x1b[?25h", r + 1, c + 1));
+        if r < u64::from(screen_rows.saturating_sub(1)) && c < u64::from(screen_cols) {
+            out.push_str(&format!("\x1b[{};{}H\x1b[?25h", r + 1, c + 1));
+        }
     }
     let mut stdout = io::stdout().lock();
     stdout.write_all(out.as_bytes())?;
@@ -904,57 +1104,122 @@ enum Mode {
     },
     Help(usize),
 }
+fn history_rows(page: &Value, legacy: bool) -> io::Result<Vec<copy::Line>> {
+    if legacy {
+        let flags = page["wrapped"]
+            .as_array()
+            .filter(|a| a.len() == 1)
+            .ok_or_else(|| io::Error::other("Invalid legacy history row"))?;
+        let wrapped = flags[0]
+            .as_bool()
+            .ok_or_else(|| io::Error::other("Invalid legacy wrap flag"))?;
+        let text = page["text"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("Missing legacy text"))?;
+        let text = if wrapped {
+            text
+        } else {
+            text.strip_suffix('\n')
+                .ok_or_else(|| io::Error::other("Missing history newline"))?
+        };
+        if text.chars().any(char::is_control) {
+            return Err(io::Error::other("History row controls rejected"));
+        }
+        return Ok(vec![copy::Line {
+            text: text.into(),
+            wrapped,
+        }]);
+    }
+    page["rows"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("Canonical history rows unavailable"))?
+        .iter()
+        .map(|row| {
+            let text = row["text"]
+                .as_str()
+                .filter(|t| !t.chars().any(char::is_control))
+                .ok_or_else(|| io::Error::other("Invalid canonical row"))?;
+            let wrapped = row["wrapped"]
+                .as_bool()
+                .ok_or_else(|| io::Error::other("Canonical wrap flag missing"))?;
+            Ok(copy::Line {
+                text: text.into(),
+                wrapped,
+            })
+        })
+        .collect()
+}
+
 fn history(s: &mut UnixStream, pane: &str) -> io::Result<copy::Copy> {
-    let metadata = call(s, "pane.history.freeze", json!({"pane":pane}))?;
-    let pin = metadata["snapshot"]
-        .as_str()
-        .ok_or_else(|| io::Error::other("History snapshot ID missing"))?
-        .to_owned();
+    let metadata = match call(s, "pane.history.freeze", json!({"pane":pane})) {
+        Ok(metadata) if metadata["snapshot"].as_str().is_some() => metadata,
+        Ok(_) => return Err(io::Error::other("History snapshot ID missing")),
+        Err(e)
+            if serde_json::from_str::<Value>(&e.to_string())
+                .ok()
+                .is_some_and(|v| v["code"] == "METHOD_NOT_FOUND") =>
+        {
+            // Preserved older engines expose epoch-checked canonical history,
+            // but cannot pin it. Never restart them or combine changing pages.
+            let mut page = call(s, "pane.history", json!({"pane":pane,"offset":0,"lines":1}))?;
+            let render = call(s, "client.render", json!({}))?;
+            let panes = call(s, "pane.list", json!({"session":render["session"]}))?;
+            let geometry = panes
+                .as_array()
+                .and_then(|rows| rows.iter().find(|p| p["id"] == pane))
+                .ok_or_else(|| io::Error::other("History pane geometry unavailable"))?;
+            page["cols"] = geometry["cols"].clone();
+            page["cursor_row"] = json!(page["total_lines"].as_u64().unwrap_or(1).saturating_sub(1));
+            page["cursor_col"] = json!(0);
+            page
+        }
+        Err(e) => return Err(e),
+    };
+    let pin = metadata["snapshot"].as_str().map(str::to_owned);
     let result = (|| -> io::Result<copy::Copy> {
         let total = metadata["total_lines"]
             .as_u64()
-            .filter(|n| *n > 0 && *n <= 50000)
-            .ok_or_else(|| io::Error::other("History snapshot row cap rejected"))?
+            .filter(|n| *n > 0)
+            .ok_or_else(|| io::Error::other("History snapshot is empty"))?
             as usize;
         let cols = metadata["cols"]
             .as_u64()
-            .filter(|n| *n > 0 && *n <= 200)
+            .filter(|n| *n > 0 && *n <= u64::from(ruwac_protocol::TerminalLimits::CURRENT.cols))
             .ok_or_else(|| io::Error::other("History columns rejected"))?
             as usize;
-        let mut lines = Vec::new();
-        let mut offset = 0;
+        // Long-lived sessions keep the newest lines in view: at most 50,000
+        // lines and 8 MiB, dropping the oldest instead of refusing.
+        let mut lines = std::collections::VecDeque::new();
+        // v0.1.x has no canonical rows: one row per response is the only
+        // unambiguous way to retain Unicode, wide-character padding and wraps.
+        let legacy_rows = pin.is_none() && metadata.get("rows").is_none();
+        let mut offset = total.saturating_sub(if legacy_rows { 500 } else { 50_000 });
+        // Index in the full history of the first line kept.
+        let mut first = offset;
         let mut bytes = 0;
         while offset < total {
-            let page = call(
-                s,
-                "pane.history",
-                json!({"pane":pane,"snapshot":pin,"offset":offset,"lines":500}),
-            )?;
+            let mut params = json!({"pane":pane,"offset":offset,"lines":if legacy_rows {1}else{500},"epoch":metadata["epoch"]});
+            if let Some(pin) = &pin {
+                params["snapshot"] = json!(pin);
+            }
+            let page = call(s, "pane.history", params)?;
             if page["epoch"] != metadata["epoch"] || page["total_lines"] != metadata["total_lines"]
             {
                 return Err(io::Error::other("Inconsistent history snapshot rejected"));
             }
-            let rows = page["rows"].as_array().ok_or_else(|| {
-                io::Error::other("Canonical history rows unavailable; use a matching daemon")
-            })?;
-            for row in rows {
-                let text = row["text"]
-                    .as_str()
-                    .ok_or_else(|| io::Error::other("Invalid canonical row"))?;
-                if text.chars().any(char::is_control) {
-                    return Err(io::Error::other("Canonical row controls rejected"));
+            let rows = history_rows(&page, legacy_rows)?;
+            for row in &rows {
+                bytes += row.text.len() + 1;
+                lines.push_back(row.clone());
+                while bytes > 8 * 1024 * 1024 {
+                    match lines.pop_front() {
+                        Some(old) => {
+                            bytes -= old.text.len() + 1;
+                            first += 1;
+                        }
+                        None => break,
+                    }
                 }
-                bytes += text.len() + 1;
-                if bytes > 8 * 1024 * 1024 {
-                    return Err(io::Error::other("Copy view exceeds 8 MiB"));
-                }
-                let wrapped = row["wrapped"]
-                    .as_bool()
-                    .ok_or_else(|| io::Error::other("Canonical wrap flag missing"))?;
-                lines.push(copy::Line {
-                    text: text.into(),
-                    wrapped,
-                });
             }
             let next = page["next_offset"].as_u64().unwrap_or(0) as usize;
             if next != offset + rows.len() || next <= offset || next > total {
@@ -962,18 +1227,40 @@ fn history(s: &mut UnixStream, pane: &str) -> io::Result<copy::Copy> {
             }
             offset = next;
         }
-        Ok(copy::Copy::new(
-            lines,
+        let mut copied = copy::Copy::new(
+            lines.into(),
             cols,
             copy::Position {
-                row: metadata["cursor_row"].as_u64().unwrap_or(0) as usize,
+                row: (metadata["cursor_row"].as_u64().unwrap_or(0) as usize).saturating_sub(first),
                 col: metadata["cursor_col"].as_u64().unwrap_or(0) as usize,
             },
             metadata["dropped_lines"].as_u64().unwrap_or(0) as usize,
             pane.into(),
-        ))
+        );
+        if legacy_rows {
+            copied.message = "Legacy daemon: newest 500 rows · Esc returns to terminal".into();
+        }
+        Ok(copied)
     })();
-    let release = call(s, "pane.history.release", json!({"snapshot":pin}));
+    let release = if let Some(pin) = pin {
+        call(s, "pane.history.release", json!({"snapshot":pin})).map(|_| ())
+    } else {
+        // One final epoch check prevents accepting an output/resize race after
+        // the last unpinned page. The collected client copy is immutable.
+        call(
+            s,
+            "pane.history",
+            json!({"pane":pane,"epoch":metadata["epoch"],"offset":0,"lines":1}),
+        )
+        .and_then(|page| {
+            if page["epoch"] == metadata["epoch"] && page["total_lines"] == metadata["total_lines"]
+            {
+                Ok(())
+            } else {
+                Err(io::Error::other("History changed; retry scrollback"))
+            }
+        })
+    };
     match result {
         Ok(value) => {
             release?;
@@ -1193,13 +1480,16 @@ fn draw_mode(
     size: (u16, u16),
     status: &str,
     config: &Config,
+    cache: &mut DrawCache,
 ) -> io::Result<()> {
     if matches!(mode, Mode::Live) {
-        return draw(snapshot, &format!("{} · {}", config.label(), status));
+        return draw(snapshot, &format!("{} · {}", config.label(), status), cache);
     }
+    cache.clear();
     let height = size.0 as usize;
     let columns = size.1 as usize;
     let mut out = if let Mode::Copy(copy) = mode {
+        copy.preserve_live_styles(snapshot);
         copy.render(height, columns)
     } else {
         let mut out = String::from(
@@ -1248,7 +1538,7 @@ fn draw_mode(
             }
             Mode::Help(offset) => {
                 let text = format!(
-                    "RUWAC Screen controls (prefix {})\nc new window; n/p next/previous; double prefix forwards to nested terminal; o previous window\na literal configured prefix; d detach; 0–9 select window\nS horizontal split; | vertical split; Tab change pane; z zoom\n[ copy/search; ] internal paste; \" window chooser; : command\nCopy: arrows/hjkl; g/G and Home/End; 0/^/$; w/b/e\nPage Up/Down or Ctrl+B/F; Ctrl+U/D half page; H/M/L viewport\nSpace or Enter first mark; move then mark again to copy\n/ forward search; ? reverse; n/N repeat; searches wrap\nv rectangular selection; c/C left/right margins; Esc cancel\nCounts before movement; Unicode graphemes stay intact\nInternal copy buffer is separate from desktop clipboard\nCopy snapshot: newest 8 MiB/50,000 rows; selection cap 256 KiB\nCommands: new, next, prev, other, select N, rename NAME\nsplit horizontal/vertical, zoom, copy, paste, windows, help, detach\nRUWAC_SHORTCUTS prefix: <Control>a through <Control>z\nRUWAC_KEYMAP remaps one prefix key to an implemented key\nCtrl/arrow escape sequences go to applications outside modals\nModal paste/mouse cannot reach a child; search/prompt paste is text\nEsc/Enter close help; arrows/Page Up/Down scroll",
+                    "RUWAC Screen controls (prefix {})\nc new window; n/p next/previous; double prefix forwards to nested terminal; o previous window\na literal configured prefix; d detach; 0–9 select window\nS horizontal split; | vertical split; Tab change pane; z zoom\n[ copy/search; ] internal paste; \" window chooser; : command\nCopy: arrows/hjkl; g/G and Home/End; 0/^/$; w/b/e\nPage Up/Down or Ctrl+B/F; Ctrl+U/D half page; H/M/L viewport\nSpace or Enter first mark; move then mark again to copy\n/ forward search; ? reverse; n/N repeat; searches wrap\nv rectangular selection; c/C left/right margins; Esc cancel\nCounts before movement; Unicode graphemes stay intact\nInternal copy buffer is separate from desktop clipboard\nAuto-update (from shell): ruwac update -a on|off|status\nUpdates preserve running daemons and applications\nCopy snapshot: newest 8 MiB/50,000 rows; selection cap 256 KiB\nCommands: new, next, prev, other, select N, rename NAME\nsplit horizontal/vertical, zoom, copy, paste, windows, help, detach\nRUWAC_SHORTCUTS prefix: <Control>a through <Control>z\nRUWAC_KEYMAP remaps one prefix key to an implemented key\nCtrl/arrow escape sequences go to applications outside modals\nModal paste/mouse cannot reach a child; search/prompt paste is text\nEsc/Enter close help; arrows/Page Up/Down scroll",
                     config.label()
                 );
                 let lines: Vec<_> = text.lines().collect();
@@ -1278,10 +1568,12 @@ fn draw_mode(
 }
 
 fn verified_connect(socket: &Path) -> io::Result<UnixStream> {
-    use std::os::unix::{
-        fs::{FileTypeExt, MetadataExt},
-        io::AsRawFd,
-    };
+    verified_path(socket)?;
+    verified_stream(UnixStream::connect(socket)?)
+}
+
+fn verified_path(socket: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
     for (path, mode) in [
         (
             socket
@@ -1302,7 +1594,11 @@ fn verified_connect(socket: &Path) -> io::Result<UnixStream> {
     if !std::fs::symlink_metadata(socket)?.file_type().is_socket() {
         return Err(io::Error::other("Not a socket"));
     }
-    let s = UnixStream::connect(socket)?;
+    Ok(())
+}
+
+fn verified_stream(s: UnixStream) -> io::Result<UnixStream> {
+    use std::os::fd::AsRawFd;
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut n = std::mem::size_of_val(&cred) as libc::socklen_t;
     if unsafe {
@@ -1322,10 +1618,26 @@ fn verified_connect(socket: &Path) -> io::Result<UnixStream> {
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
     Ok(s)
 }
+fn expired_input(decoder: &mut Decoder, since_input: Duration) -> Vec<Input> {
+    if since_input > Duration::from_millis(40) {
+        decoder.escape_timeout()
+    } else {
+        vec![]
+    }
+}
+
 pub fn attach(socket: &Path, session: &str) -> io::Result<()> {
     attach_with_window(socket, session, None)
 }
 pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) -> io::Result<()> {
+    attach_with_role(socket, session, window, false)
+}
+pub fn attach_with_role(
+    socket: &Path,
+    session: &str,
+    window: Option<&str>,
+    viewer: bool,
+) -> io::Result<()> {
     STOP.store(false, Ordering::Relaxed);
     let config = Config::load()?;
     let mut s = verified_connect(socket)?;
@@ -1355,8 +1667,13 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
         }
         ancestor = parent;
     }
-    let limits =
-        ruwac_protocol::TerminalLimits::advertised(&call(&mut s, "capabilities", json!({}))?);
+    let capabilities = call(&mut s, "capabilities", json!({}))?;
+    let limits = ruwac_protocol::TerminalLimits::advertised(&capabilities);
+    if viewer && capabilities["non_sizing_viewer"] != 1 {
+        return Err(io::Error::other(
+            "This daemon cannot attach a non-sizing viewer; update it or choose an ordinary attachment explicitly",
+        ));
+    }
     if let Some(window) = window {
         if !ruwac_protocol::valid_id(window, "window")
             || !call(&mut s, "window.list", json!({"session":session}))?
@@ -1372,63 +1689,119 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
     let mut screen_size = terminal_dimensions();
     // Left-button press on a pane without mouse support: (pane, column, row).
     let mut drag: Option<(String, usize, usize)> = None;
+    let mut clicks = double_click::Clicks::default();
+    // Middle-click awaiting the outer terminal's selection: (pane, asked at).
+    let mut primary_paste: Option<(String, Instant)> = None;
     let mut size = dimensions(limits);
     call(
         &mut s,
         "session.attach",
-        json!({"session":session,"rows":size.0,"cols":size.1}),
+        json!({"session":session,"rows":size.0,"cols":size.1,"size_role":if viewer {"viewer"} else {"legacy"}}),
     )?;
     if let Some(window) = window {
         call(&mut s, "window.select", json!({"window":window}))?;
     }
     let (tx, rx) = mpsc::sync_channel(64);
+    let output_wake = output_wakeup::OutputWake::new(socket, tx.clone());
     std::thread::spawn(move || {
         let mut stdin = io::stdin().lock();
         let mut b = [0; 8192];
         loop {
             match stdin.read(&mut b) {
                 Ok(0) | Err(_) => {
-                    let _ = tx.send(None);
+                    let _ = tx.send(output_wakeup::Ingress::End);
                     break;
                 }
                 Ok(n) => {
-                    if tx.send(Some(b[..n].to_vec())).is_err() {
+                    if tx
+                        .send(output_wakeup::Ingress::Bytes(b[..n].to_vec()))
+                        .is_err()
+                    {
                         break;
                     }
                 }
             }
         }
     });
+    let mut local_image: Option<local_image::Pending> = None;
     let mut decoder = Decoder::default();
     let mut prefix = false;
     let mut mode = Mode::Live;
     let mut snapshot = call(&mut s, "client.render", json!({}))?;
-    status_commands::refresh(&mut snapshot, |m, p| call(&mut s, m, p));
+    let mut labels = status_commands::Labels::default();
+    labels.refresh(&mut snapshot, |m, p| call(&mut s, m, p));
     let mut running_windows = HashSet::new();
     observe_running_window(&snapshot, &mut running_windows);
     let mut status = String::new();
-    draw_mode(&mut mode, &snapshot, size, &status, &config)?;
+    let mut draw_cache = DrawCache::default();
+    draw_mode(
+        &mut mode,
+        &snapshot,
+        size,
+        &status,
+        &config,
+        &mut draw_cache,
+    )?;
     let mut rendered = Instant::now();
     let mut commands_refreshed = Instant::now();
     let mut input_at = Instant::now();
+    // Pointer row/column, scroll tick and last vertical movement. A horizontal
+    // selection along an edge must not turn into a request to scroll history.
+    let mut copy_drag: Option<(usize, usize, Instant, std::cmp::Ordering)> = None;
     while !STOP.load(Ordering::Relaxed) {
-        let events = match rx.recv_timeout(Duration::from_millis(10)) {
-            Ok(Some(b)) => {
+        // Briefly poll faster after input so local echo is not delayed by the
+        // ordinary output refresh cadence. Quiet terminals keep their old rate.
+        let wait = refresh::input_wait(input_at.elapsed(), rendered.elapsed());
+        if !matches!(mode, Mode::Live) || !refresh::recently_active(input_at.elapsed()) {
+            output_wake.disarm();
+        }
+        let mut output_ready = false;
+        let events = match rx.recv_timeout(wait) {
+            Ok(output_wakeup::Ingress::Bytes(b)) => {
                 input_at = Instant::now();
+                if matches!(mode, Mode::Live) {
+                    output_wake.arm();
+                }
                 decoder.feed(&b)
             }
-            Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(_) => {
-                if input_at.elapsed() > Duration::from_millis(40) {
-                    decoder.escape_timeout()
-                } else {
-                    vec![]
-                }
+            Ok(output_wakeup::Ingress::End) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Ok(output_wakeup::Ingress::Output) => {
+                output_wake.received();
+                output_ready =
+                    matches!(mode, Mode::Live) && refresh::recently_active(input_at.elapsed());
+                expired_input(&mut decoder, input_at.elapsed())
             }
+            Err(mpsc::RecvTimeoutError::Timeout) => expired_input(&mut decoder, input_at.elapsed()),
         };
         let mut dirty = !events.is_empty();
+        if primary_paste
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > Duration::from_millis(400))
+        {
+            let (pane, _) = primary_paste.take().unwrap();
+            if let Err(e) = call(&mut s, "buffer.paste", json!({"pane":pane})) {
+                status = e.to_string();
+            }
+            dirty = true;
+        }
         for event in events {
+            if !matches!(&event, Input::Mouse(_)) {
+                clicks.clear();
+            }
+            // Any subsequent user action revokes an unfinished image paste.
+            local_image = None;
             match event {
+                Input::Selection(text) => {
+                    if let Some((pane, _)) = primary_paste.take() {
+                        if let Err(e) = call(
+                            &mut s,
+                            "client.input",
+                            json!({"pane":pane,"kind":"paste","text":text}),
+                        ) {
+                            status = e.to_string();
+                        }
+                    }
+                }
                 Input::Rejected(e) => {
                     prefix = false;
                     status = e.into();
@@ -1438,6 +1811,7 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
                 }
                 Input::Mouse(b) => {
                     if let Mode::Copy(c) = &mut mode {
+                        clicks.clear();
                         // Scrollback opened by the wheel or a drag.
                         let Some((button, x, y, release)) = sgr_mouse(&b) else {
                             continue;
@@ -1459,12 +1833,24 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
                             0 if !release => {
                                 c.point(row, col);
                                 c.mark();
+                                copy_drag =
+                                    Some((row, col, Instant::now(), std::cmp::Ordering::Equal));
                             }
                             0 | 32 => {
                                 c.point(row, col);
+                                if let Some((last_row, last_col, _, direction)) = copy_drag.as_mut()
+                                {
+                                    if row != *last_row {
+                                        *direction = row.cmp(last_row);
+                                    }
+                                    *last_row = row;
+                                    *last_col = col;
+                                }
                                 if release && c.anchor.is_some() {
+                                    copy_drag = None;
                                     let text = c.selected(MAX_TEXT).map_err(io::Error::other)?;
                                     let bytes = text.len();
+                                    offer_selection(&text);
                                     call(
                                         &mut s,
                                         "buffer.set",
@@ -1486,6 +1872,7 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
                             &format!("{} · {}", config.label(), status),
                         );
                         if bar {
+                            clicks.clear();
                             if let Some(window) = target {
                                 call(&mut s, "window.select", json!({"window":window}))?;
                                 snapshot = call(&mut s, "client.render", json!({}))?;
@@ -1506,6 +1893,7 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
                             snapshot = call(&mut s, "client.render", json!({}))?;
                         }
                         if wants {
+                            clicks.clear();
                             let result = call(
                                 &mut s,
                                 "client.input",
@@ -1525,14 +1913,64 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
                             event["y"].as_u64().unwrap_or(1).saturating_sub(1) as usize,
                         );
                         let release = event["release"] == true;
-                        match event["button"].as_u64().unwrap_or(0) {
-                            64 => {
-                                let mut c = history(&mut s, &pane)?;
-                                c.align_bottom(height);
-                                c.scroll(-3, height);
-                                mode = Mode::Copy(c);
+                        let button = event["button"].as_u64().unwrap_or(0);
+                        if button == 0 && release {
+                            clicks.release(&pane, x, y, Instant::now());
+                        } else if button != 0 {
+                            clicks.clear();
+                        }
+                        match button {
+                            64 => match history(&mut s, &pane) {
+                                Ok(mut c) => {
+                                    c.align_bottom(height);
+                                    c.scroll(-3, height);
+                                    mode = Mode::Copy(c);
+                                }
+                                Err(e) => status = format!("Scrollback unavailable: {e}"),
+                            },
+                            0 if !release => {
+                                if clicks.press(&pane, x, y, Instant::now()) {
+                                    drag = None;
+                                    let rows = snapshot["panes"]
+                                        .as_array()
+                                        .and_then(|p| p.iter().find(|p| p["id"] == pane.as_str()))
+                                        .and_then(|p| p["rect"]["rows"].as_u64())
+                                        .unwrap_or(height as u64)
+                                        as usize;
+                                    match history(&mut s, &pane) {
+                                        Ok(mut c) => {
+                                            c.align_bottom(rows);
+                                            c.point(y, x);
+                                            if let Some((text, byte)) =
+                                                mouse_word_source(&snapshot, &pane, y, x)
+                                                && c.select_word(byte, &text)
+                                            {
+                                                match c.selected(MAX_TEXT) {
+                                                    Ok(text) => {
+                                                        let bytes = text.len();
+                                                        offer_selection(&text);
+                                                        call(
+                                                            &mut s,
+                                                            "buffer.set",
+                                                            json!({"session":session,"text":text}),
+                                                        )?;
+                                                        status = format!(
+                                                            "Copied {bytes} bytes; middle-click pastes"
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        status =
+                                                            format!("Selection unavailable: {e}")
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Err(e) => status = format!("Selection unavailable: {e}"),
+                                    }
+                                } else {
+                                    drag = Some((pane.clone(), x, y));
+                                }
                             }
-                            0 if !release => drag = Some((pane.clone(), x, y)),
                             32 => {
                                 if let Some((start_pane, sx, sy)) = drag.take() {
                                     if start_pane == pane {
@@ -1546,17 +1984,40 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
                                             as usize;
                                         // Pane row r is history line len-rows+r.
                                         let offset = height.saturating_sub(rows);
-                                        let mut c = history(&mut s, &pane)?;
-                                        c.align_bottom(height);
-                                        c.point(offset + sy, sx);
-                                        c.mark();
-                                        c.point(offset + y, x);
-                                        mode = Mode::Copy(c);
+                                        match history(&mut s, &pane) {
+                                            Ok(mut c) => {
+                                                c.align_bottom(height);
+                                                c.point(offset + sy, sx);
+                                                c.mark();
+                                                c.point(offset + y, x);
+                                                // Copy mode fills the client, so retain the
+                                                // physical pointer position rather than the
+                                                // source pane's history-alignment offset.
+                                                copy_drag = sgr_mouse(&b).map(|(_, px, py, _)| {
+                                                    (
+                                                        py.saturating_sub(1) as usize,
+                                                        px.saturating_sub(1) as usize,
+                                                        Instant::now(),
+                                                        y.cmp(&sy),
+                                                    )
+                                                });
+                                                mode = Mode::Copy(c);
+                                            }
+                                            Err(e) => {
+                                                status = format!("Selection unavailable: {e}")
+                                            }
+                                        }
                                     }
                                 }
                             }
+                            // Middle-click pastes the desktop mouse selection
+                            // when the outer terminal answers OSC 52 promptly,
+                            // otherwise the session buffer.
                             1 if !release => {
-                                call(&mut s, "buffer.paste", json!({"pane":pane}))?;
+                                let mut stdout = io::stdout().lock();
+                                stdout.write_all(b"\x1b]52;p;?\x07")?;
+                                stdout.flush()?;
+                                primary_paste = Some((pane.clone(), Instant::now()));
                             }
                             _ => {
                                 if release {
@@ -1598,6 +2059,26 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
                     let text = String::from_utf8(b).map_err(io::Error::other)?;
                     let mut pending = String::new();
                     for key in copy::keys(&text) {
+                        local_image = None;
+                        if matches!(mode, Mode::Live)
+                            && !prefix
+                            && matches!(key, copy::Key::Char('\x16'))
+                        {
+                            if !pending.is_empty() {
+                                plain(&mut s, &snapshot, &mut pending)?;
+                            }
+                            match local_image::Pending::begin(&mut s, &snapshot) {
+                                Ok(Some(image)) => {
+                                    local_image = Some(image);
+                                    continue;
+                                }
+                                Ok(None) => (),
+                                Err(error) => {
+                                    status = error.to_string();
+                                    continue;
+                                }
+                            }
+                        }
                         let mut refresh = false;
                         let result = (|| -> io::Result<()> {
                             match &mut mode {
@@ -1995,8 +2476,40 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
         if STOP.load(Ordering::Relaxed) {
             break;
         }
+        if local_image
+            .as_ref()
+            .is_some_and(|pending| !matches!(mode, Mode::Live) || !pending.current(&snapshot))
+        {
+            local_image = None;
+        }
+        if let Some(result) = local_image
+            .as_ref()
+            .and_then(|pending| pending.poll(&mut s))
+        {
+            status = match result {
+                Ok(_) => "PNG attached to agent draft; not submitted".into(),
+                Err(error) => error.to_string(),
+            };
+            local_image = None;
+            dirty = true;
+        }
+        if let Mode::Copy(copy) = &mut mode {
+            if let Some((row, col, at, direction)) = copy_drag.as_mut() {
+                if at.elapsed() >= Duration::from_millis(35) {
+                    if (*row == 0 && direction.is_lt())
+                        || (*row >= (size.0 as usize).saturating_sub(1) && direction.is_gt())
+                    {
+                        dirty |= copy.drag_scroll(*row, *col, size.0 as usize);
+                    }
+                    *at = Instant::now();
+                }
+            }
+        } else {
+            copy_drag = None;
+        }
         let new_screen_size = terminal_dimensions();
         if new_screen_size != screen_size {
+            copy_drag = None;
             screen_size = new_screen_size;
             CLEAR.store(true, Ordering::Relaxed);
             dirty = true;
@@ -2011,7 +2524,7 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
             )?;
             dirty = true;
         }
-        if rendered.elapsed() > Duration::from_millis(25) {
+        if output_ready || rendered.elapsed() >= refresh::interval(input_at.elapsed()) {
             if matches!(mode, Mode::Live) {
                 // Navigation can already have replaced the frame with an idle
                 // live shell. Observe it before a revision-only poll skips it.
@@ -2049,6 +2562,9 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
                             .as_str()
                             .is_some_and(|id| running_windows.remove(id));
                     if completed {
+                        if viewer {
+                            break;
+                        }
                         let pinned = window
                             .is_some_and(|window| snapshot["window"].as_str() == Some(window));
                         let panes = match call(&mut s, "pane.list", json!({"session":session})) {
@@ -2112,11 +2628,18 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
         }
         if matches!(mode, Mode::Live) && commands_refreshed.elapsed() >= Duration::from_millis(500)
         {
-            dirty |= status_commands::refresh(&mut snapshot, |m, p| call(&mut s, m, p));
+            dirty |= labels.refresh(&mut snapshot, |m, p| call(&mut s, m, p));
             commands_refreshed = Instant::now();
         }
         if dirty {
-            draw_mode(&mut mode, &snapshot, size, &status, &config)?;
+            draw_mode(
+                &mut mode,
+                &snapshot,
+                size,
+                &status,
+                &config,
+                &mut draw_cache,
+            )?;
         }
     }
     let _ = call(&mut s, "session.detach", json!({}));
@@ -2126,6 +2649,70 @@ pub fn attach_with_window(socket: &Path, session: &str, window: Option<&str>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn output_wakes_do_not_postpone_pending_escape_decoding() {
+        let mut decoder = Decoder::default();
+        assert!(decoder.feed(b"\x1b").is_empty());
+        assert!(expired_input(&mut decoder, Duration::from_millis(39)).is_empty());
+        assert_eq!(
+            expired_input(&mut decoder, Duration::from_millis(41)),
+            vec![Input::Keyboard(vec![27])]
+        );
+    }
+    #[test]
+    fn incremental_rows_compare_text_and_every_cell_attribute() {
+        let mut cache = DrawCache::default();
+        let row = json!([["x",false,1,2,false,false,{"italic":true}]]);
+        assert!(cache.changed("pane", 0, &row));
+        assert!(!cache.changed("pane", 0, &row));
+        let mut newer = row.clone();
+        newer[0][0] = json!("y");
+        assert!(cache.changed("pane", 0, &newer));
+        newer[0][6]["italic"] = json!(false);
+        assert!(cache.changed("pane", 0, &newer));
+        assert!(!cache.changed("pane", 0, &newer));
+    }
+    #[test]
+    fn incremental_rows_reset_for_geometry_modes_and_explicit_clear() {
+        let mut cache = DrawCache::default();
+        let mut frame = json!({"session":"session","window":"window","panes":[{"id":"pane","rect":{"x":0,"y":0,"cols":80,"rows":23},"grid":{"cols":80,"rows":23}}]});
+        let row = json!([["x", false]]);
+        assert!(cache.begin(&frame, (24, 80), false));
+        assert!(cache.changed("pane", 0, &row));
+        assert!(!cache.begin(&frame, (24, 80), false));
+        assert!(!cache.changed("pane", 0, &row));
+        frame["panes"][0]["rect"]["x"] = json!(1);
+        assert!(cache.begin(&frame, (24, 80), false));
+        assert!(cache.changed("pane", 0, &row));
+        assert!(cache.begin(&frame, (24, 80), true));
+        assert!(cache.changed("pane", 0, &row));
+        cache.clear(); // Copy/help/chooser paints must not survive into live mode.
+        assert!(cache.begin(&frame, (24, 80), false));
+        assert!(cache.changed("pane", 0, &row));
+    }
+    #[test]
+    fn desktop_selection_answers_decode_and_base64_round_trips() {
+        for text in ["", "a", "ab", "abc", "Že界\n tail"] {
+            let encoded = base64_encode(text.as_bytes());
+            assert_eq!(base64_decode(encoded.as_bytes()).unwrap(), text.as_bytes());
+        }
+        assert_eq!(base64_encode(b"hi"), "aGk=");
+        let mut d = Decoder::default();
+        assert_eq!(
+            d.feed(b"\x1b]52;p;aGk=\x07x"),
+            vec![
+                Input::Selection("hi".into()),
+                Input::Keyboard(b"x".to_vec())
+            ]
+        );
+        // Large answers arrive in pieces and exceed the ordinary OSC bound.
+        let text = "y".repeat(100_000);
+        let answer = format!("\x1b]52;p;{}\x1b\\", base64_encode(text.as_bytes()));
+        let (head, tail) = answer.as_bytes().split_at(30_000);
+        assert!(d.feed(head).is_empty());
+        assert_eq!(d.feed(tail), vec![Input::Selection(text)]);
+        assert!(d.feed(b"\x1b]52;p;!!\x07").is_empty());
+    }
     #[test]
     fn unrelated_revision_is_acknowledged_without_repeated_full_frames() {
         let mut snapshot = json!({"revision":1,"panes":[{"id":"p","grid":{"cells":[["x"]]}}]});
@@ -2353,6 +2940,93 @@ mod display_identity_tests {
         assert!(
             status_line(&renamed, (23, 80), "^A · Window choice cancelled")
                 .contains("Window choice cancelled")
+        );
+    }
+}
+
+#[cfg(test)]
+mod modified_navigation_tests {
+    use super::*;
+
+    #[test]
+    fn fragmented_shift_left_survives_tui_decode_and_key_split() {
+        let sequence = b"\x1b[1;2D";
+        for split in 1..sequence.len() {
+            let mut decoder = Decoder::default();
+            assert!(decoder.feed(&sequence[..split]).is_empty());
+            let events = decoder.feed(&sequence[split..]);
+            assert_eq!(events, vec![Input::Keyboard(sequence.to_vec())]);
+            let keys = copy::keys(std::str::from_utf8(sequence).unwrap());
+            assert_eq!(keys.len(), 1);
+            assert_eq!(keys[0].bytes().as_bytes(), sequence);
+        }
+    }
+}
+
+#[cfg(test)]
+mod legacy_history_tests {
+    use super::*;
+    #[test]
+    fn legacy_single_row_keeps_unicode_wrap_and_rejects_controls() {
+        let row = history_rows(&json!({"text":"界e\u{301} ","wrapped":[true]}), true).unwrap();
+        assert_eq!(row[0].text, "界e\u{301} ");
+        assert!(row[0].wrapped);
+        assert!(history_rows(&json!({"text":"a\nb\n","wrapped":[false]}), true).is_err());
+        assert!(history_rows(&json!({"text":"a","wrapped":[false]}), true).is_err());
+        assert!(history_rows(&json!({"text":"a\n","wrapped":[false,false]}), true).is_err());
+    }
+    fn legacy_copy(changed: bool, denied: bool) -> io::Result<copy::Copy> {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut zeros = 0;
+            while let Ok(q) = ruwac_protocol::read_frame(&mut server) {
+                let result = match q["method"].as_str().unwrap() {
+                    "pane.history.freeze" => {
+                        write_frame(&mut server,&json!({"version":0,"id":q["id"],"error":{"code":if denied {"DENIED"}else{"METHOD_NOT_FOUND"},"message":"test"}})).unwrap();
+                        continue;
+                    }
+                    "client.render" => json!({"session":"session_test","session_name":"test"}),
+                    "pane.list" => json!([{"id":"pane_test","cols":80}]),
+                    "pane.history" => {
+                        assert_eq!(q["params"]["lines"], 1);
+                        let offset = q["params"]["offset"].as_u64().unwrap();
+                        if offset == 0 {
+                            zeros += 1;
+                        }
+                        json!({"epoch":if changed && zeros==3 {2}else{1},"total_lines":3,"next_offset":offset+1,
+                            "text":match offset {0=>"first\n",1=>"界e\u{301}",_=>"last\n"},"wrapped":[offset==1]})
+                    }
+                    other => panic!("Unexpected legacy call: {other}"),
+                };
+                write_frame(
+                    &mut server,
+                    &json!({"version":0,"id":q["id"],"result":result}),
+                )
+                .unwrap();
+            }
+        });
+        let result = history(&mut client, "pane_test");
+        drop(client);
+        worker.join().unwrap();
+        result
+    }
+    #[test]
+    fn old_daemon_copy_works_without_freeze_or_canonical_rows() {
+        let copied = legacy_copy(false, false).unwrap();
+        assert_eq!(copied.lines.len(), 3);
+        assert_eq!(copied.lines[1].text, "界e\u{301}");
+        assert!(copied.lines[1].wrapped);
+        assert!(copied.message.contains("Legacy daemon"));
+    }
+    #[test]
+    fn legacy_copy_rejects_output_race_and_never_falls_back_after_denial() {
+        assert!(legacy_copy(true, false).is_err());
+        assert!(
+            legacy_copy(false, true)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("DENIED")
         );
     }
 }

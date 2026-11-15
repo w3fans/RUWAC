@@ -11,7 +11,8 @@ for key,name in [('HOME','home'),('XDG_CONFIG_HOME','config'),('XDG_DATA_HOME','
 paint=root/'paint.py';paint.write_text('''import os,tty
 tty.setraw(0)
 for row,(code,label)in enumerate([('0','STYLES_READY'),('3','ITALIC'),('2','DIM'),('8','HIDDEN'),('9','STRIKE'),('4','SINGLE'),('4:2','DOUBLE'),('4:3','CURLY'),('4:4','DOTTED'),('4:5','DASHED')],1):
- os.write(1,(f'\\x1b[{row};1H\\x1b[0;{code};58:2::7:8:9m'+label+' e\\u0301界'+'\\x1b[0m').encode())
+ os.write(1,(f'\\x1b[{row};1H\\x1b[0;{code};38;2;23;145;201;48;2;5;9;17;58:2::7:8:9m'+label+' e\\u0301界'+'\\x1b[0m').encode())
+os.write(1,b"\\x1b[11;1HSTYLES_COMPLETE")
 while os.read(0,1):pass
 ''')
 chooser=root/'chooser.py';chooser.write_text('''import json,os,subprocess,sys
@@ -45,11 +46,17 @@ def command(action,**kw):
  return eventually(read,10)
 def record(name,**details):results.append({'id':name,'status':'PASS',**details});print(name,'PASS',flush=True)
 try:
- start('daemon');s=rpc('session.create',{'name':'Extended styles','rows':24,'cols':80,'argv':[sys.executable,str(paint)]});owned.append(s['pid']);eventually(lambda:'STYLES_READY'in rpc('pane.capture',{'pane':s['pane']})['text']);grid=frame(s['session']);cells=grid['cells']
+ start('daemon');s=rpc('session.create',{'name':'Extended styles','rows':24,'cols':80,'argv':[sys.executable,str(paint)]});owned.append(s['pid']);eventually(lambda:'STYLES_COMPLETE'in rpc('pane.capture',{'pane':s['pane']})['text']);grid=frame(s['session']);cells=grid['cells']
  assert cells[1][0][6]['italic']and cells[2][0][6]['dim']and cells[3][0][6]['hidden']and cells[4][0][6]['strike']
  assert [cells[row][0][6]['underline']for row in range(5,10)]==['single','double','curly','dotted','dashed'];assert all(cells[row][0][6]['underline_color']==[7,8,9]for row in range(5,10))
  record('STYLES-ACTUAL-PTY-CANONICAL',five_underlines=True,Unicode_combining_wide=True)
- tui=Tui(Path(a.binary),sock,s['session'],root/'tui.bin');eventually(lambda:b'4:3'in tui.data and b'58;2;7;8;9'in tui.data,10);assert b';3'in tui.data and b';2'in tui.data and b';8'in tui.data and b';9'in tui.data;tui.finish('term');tui=None
+ tui=Tui(Path(a.binary),sock,s['session'],root/'tui.bin');eventually(lambda:b'4:3'in tui.data and b'58;2;7;8;9'in tui.data,10);assert b';3'in tui.data and b';2'in tui.data and b';8'in tui.data and b';9'in tui.data;# Real TUI mouse selection must preserve styled live rows without a blank frame.
+ before=len(tui.data);tui.send(b'\x1b[<0;1;2M\x1b[<32;5;2M');eventually(lambda:b'COPY 'in tui.data[before:])
+ selected=bytes(tui.data[before:]);assert b'\x1b[2J'not in selected,'Selection cleared the entire terminal'
+ assert b'38;2;23;145;201;48;2;5;9;17'in selected,'Selection discarded live colours'
+ assert b'4:3'in selected and b'58;2;7;8;9'in selected,'Selection discarded extended attributes'
+ tui.send(b'\x1b[<32;8;2M');time.sleep(.1);assert b'\x1b[2J'not in tui.data[before:]
+ tui.finish('term');tui=None
  record('STYLES-REAL-TUI-EMISSION',actual_client_PTY=True,extended_ANSI=True)
  if a.gui:
   f=(root/'desktop.log').open('wb');logs.append(f);gui=subprocess.Popen([a.gui,'--socket',str(sock),'--session',s['session'],'--fixture-dir',str(root)],env=env,stdout=f,stderr=f);eventually(lambda:r if (r:=command('inspect')).get('drawn') and all(n>0 for n in r['drawn']) else None,15)
@@ -60,7 +67,12 @@ try:
  w=rpc('window.create',{'session':s['session'],'name':'Real fzf','argv':[sys.executable,str(chooser),str(root),fzf]});owned.append(w['pid']);eventually(lambda:'RUWAC FZF REAL'in rpc('pane.capture',{'pane':w['pane']})['text'],20)
  assert frame(s['session'])['alternate_screen'];assert 'PARENT-BEFORE-FZF'in rpc('pane.capture',{'pane':w['pane'],'buffer':'primary'})['text'];child=int((root/'fzf-pid').read_text());assert Path(f'/proc/{child}/comm').read_text().strip()=='fzf'
  if a.gui:
-  command('switch',view=0,pane=w['pane'],text='Živjo')
+  # Select the window through the real navigation path. Merely assigning a
+  # target pane in the fixture leaves the GUI client's selected window behind;
+  # an asynchronous render can then correctly restore the previous target.
+  command('command',text='select 1')
+  eventually(lambda:command('inspect').get('target')==w['pane'],15)
+  command('switch',view=0,text='Živjo')
   eventually(lambda:'1/3'in rpc('pane.capture',{'pane':w['pane']})['text'],15)
   command('key',key='j',mods=8);command('key',key='k',mods=8);command('key',key='Return')
  else:

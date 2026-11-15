@@ -41,17 +41,25 @@ impl Observation {
         Some((x + r.checked_sub(x)? / 2, y + b.checked_sub(y)? / 2))
     }
 }
-pub fn recognize(w: u16, h: u16, pixels: Vec<u8>) -> mpsc::Receiver<Result<Observation, String>> {
+/// `trusted`: this sign-in already passed a recognized login screen, so
+/// fields are accepted without the Fedora logo.
+pub fn recognize(
+    w: u16,
+    h: u16,
+    pixels: Vec<u8>,
+    trusted: bool,
+) -> mpsc::Receiver<Result<Observation, String>> {
     let (tx, rx) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let _ = tx.send(run(w, h, pixels));
+        let _ = tx.send(run(w, h, pixels, trusted));
     });
     rx
 }
-fn run(w: u16, h: u16, pixels: Vec<u8>) -> Result<Observation, String> {
+fn run(w: u16, h: u16, pixels: Vec<u8>, trusted: bool) -> Result<Observation, String> {
     let failed = || "GNOME recognition unavailable; no login input sent".to_string();
     let n = usize::from(w) * usize::from(h);
-    if w < 200 || h < 200 || w > 4096 || h > 4096 || n > 4 * 1024 * 1024 || pixels.len() != n * 4 {
+    // Large frames are cropped by the recognizer, never refused for size.
+    if w < 200 || h < 200 || w > 4096 || h > 4096 || pixels.len() != n * 4 {
         return Err(failed());
     }
     let base = std::env::var_os("XDG_RUNTIME_DIR")
@@ -96,6 +104,7 @@ fn run(w: u16, h: u16, pixels: Vec<u8>) -> Result<Observation, String> {
         .arg("-c")
         .arg(include_str!("../../../scripts/gdm-recognize.py"))
         .arg(&path)
+        .args(trusted.then_some("--trusted-sequence"))
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0)
@@ -178,7 +187,9 @@ impl Sequence {
                 }
                 None => self.stop(),
             },
-            (Step::Username, Kind::Username) => {
+            // GDM may open on (or the user may already be on) its
+            // "Not listed?" username page; the user list is then skipped.
+            (Step::UserList | Step::Username, Kind::Username) => {
                 self.step = Step::Password;
                 Action::Username
             }
@@ -224,6 +235,11 @@ mod tests {
         assert_eq!(s.observe(&o(Kind::Password)), Action::Password);
         assert_eq!(s.observe(&o(Kind::Password)), Action::Wait);
         assert!(s.authenticated_handover());
+        let mut direct = Sequence::default();
+        assert_eq!(direct.observe(&o(Kind::Password)), Action::Wait);
+        assert_eq!(direct.observe(&o(Kind::Username)), Action::Username);
+        assert_eq!(direct.observe(&o(Kind::Users)), Action::Wait);
+        assert_eq!(direct.observe(&o(Kind::Password)), Action::Password);
     }
     #[test]
     fn ambiguous_fields_and_invalid_geometry_never_authorize_input() {

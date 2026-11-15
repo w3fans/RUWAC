@@ -90,7 +90,7 @@ fn exchange(
         .map_err(|_| io::Error::other("Remote RUWAC response unavailable"))?;
     if channel.exit_status().map_err(io::Error::other)? != 0 || result.get("error").is_some() {
         return Err(io::Error::other(
-            "Remote RUWAC request failed; verify the daemon, pane and Codex draft",
+            "Remote RUWAC request failed; verify the daemon, pane and agent draft",
         ));
     }
     Ok(result)
@@ -137,7 +137,7 @@ pub fn send(target: &Target, path: &Path, ticket: &AtomicBool) -> Result<Value, 
         ))
         .map_err(|e| e.to_string())?;
         if current["result"]["foreground"]["pid"].as_u64() != Some(expected) {
-            return Err("Discovered remote Codex process changed; refresh targets".into());
+            return Err("Discovered remote agent process changed; refresh targets".into());
         }
     }
     let binary =
@@ -261,7 +261,7 @@ pub fn button(
     inventory: InventoryReader,
     reader: ImageProfileReader,
 ) -> gtk::Button {
-    let b = gtk::Button::with_label("Attach PNG to remote Codex…");
+    let b = gtk::Button::with_label("Attach PNG to remote agent…");
     let parent = parent.as_ref().downgrade();
     b.connect_clicked(move |_|{
  let Some(parent)=parent.upgrade()else{return;};let Some(page)=tabs.selected_page()else{return;};
@@ -271,15 +271,15 @@ pub fn button(
  if rows.is_empty(){view.warn("Add an SSH machine profile before selecting a remote Codex target");return;}
  let names=rows.iter().map(|r|format!("{} / {} · {}",r["group"].as_str().unwrap_or(""),r["name"].as_str().unwrap_or("SSH"),r["id"].as_str().unwrap_or(""))).collect::<Vec<_>>();
  let choices=gtk::DropDown::from_strings(&names.iter().map(String::as_str).collect::<Vec<_>>());choices.set_widget_name("remote-image-profile");
- let dialog=gtk::Window::builder().title("Remote Codex image destination").transient_for(&parent).modal(true).default_width(650).build();
+ let dialog=gtk::Window::builder().title("Remote agent image destination").transient_for(&parent).modal(true).default_width(650).build();
  let body=gtk::Box::new(gtk::Orientation::Vertical,10);body.set_margin_start(16);body.set_margin_end(16);body.set_margin_top(16);body.set_margin_bottom(16);
- let text=gtk::Label::new(Some("Select the intended SSH endpoint and already-running remote Codex pane. This sends a PNG to that remote draft; it does not submit a turn or infer a destination from terminal text."));text.set_wrap(true);body.append(&text);body.append(&choices);
+ let text=gtk::Label::new(Some("Select the intended SSH endpoint and already-running remote Codex or Claude Code pane. This sends a PNG to that remote draft; it does not submit a turn or infer a destination from terminal text."));text.set_wrap(true);body.append(&text);body.append(&choices);
  let mut fields=Vec::new();for(name,label)in[("socket","Remote daemon socket (absolute path)"),("pane","Remote pane ID"),("directory","Existing remote private PNG directory (0700)")]{body.append(&gtk::Label::new(Some(label)));let e=gtk::Entry::builder().max_length(512).build();e.set_widget_name(&format!("remote-image-{name}"));body.append(&e);fields.push(e);}
  let discovered:Rc<RefCell<Option<(String,u64)>>>=Rc::new(RefCell::new(None));
  let targets=gtk::Box::new(gtk::Orientation::Vertical,4);let scroll=gtk::ScrolledWindow::builder().child(&targets).min_content_height(40).max_content_height(200).propagate_natural_height(true).build();body.append(&scroll);
- let refresh_targets=gtk::Button::with_label("Find remote Codex panes");refresh_targets.set_widget_name("remote-image-discover");body.append(&refresh_targets);
+ let refresh_targets=gtk::Button::with_label("Find remote agent panes");refresh_targets.set_widget_name("remote-image-discover");body.append(&refresh_targets);
  let status=gtk::Label::new(None);status.set_wrap(true);status.set_widget_name("remote-image-status");body.append(&status);
- let confirm=gtk::CheckButton::with_label("I verified this endpoint, daemon and remote Codex pane");confirm.set_widget_name("remote-image-confirm");body.append(&confirm);
+ let confirm=gtk::CheckButton::with_label("I verified this endpoint, daemon and remote agent pane");confirm.set_widget_name("remote-image-confirm");body.append(&confirm);
  let reviewed:Rc<RefCell<Option<Profile>>>=Rc::new(RefCell::new(None));
  let detail=gtk::Label::new(None);detail.set_wrap(true);body.append(&detail);
  let review:Rc<dyn Fn(u32)>=Rc::new({let(rows,reader,detail,confirm,reviewed,discovered)=(rows.clone(),reader.clone(),detail.downgrade(),confirm.downgrade(),reviewed.clone(),discovered.clone());move|index|{
@@ -306,7 +306,7 @@ pub fn button(
     match rx.try_recv(){Ok(result)=>{
        ticket_monitor.store(false,Ordering::Release);if let Some(b)=button.upgrade(){b.set_sensitive(true);}
        match result{Err(e)=>status.set_text(&e),Ok(rows)=>{
-        status.set_text(if rows.is_empty(){"No live Codex foreground processes found. Start Codex in the chosen remote daemon."}else{"Choose a remote pane, then confirm the destination. Delivery rechecks the process identity."});
+        status.set_text(if rows.is_empty(){"No live Codex or Claude Code foreground found. Start one in the chosen remote daemon."}else{"Choose a remote pane, then confirm the destination. Delivery rechecks the process identity."});
         for row in rows{let b=gtk::Button::with_label(&row.title);b.set_widget_name(&format!("remote-image-choice-{}",row.pane));let(pane,confirm,discovered,reader,reviewed,socket_entry,expected,socket,status,id)=(fields[1].clone(),confirm.clone(),discovered.clone(),reader.clone(),reviewed.clone(),fields[0].clone(),expected.clone(),socket.clone(),status.clone(),profile.id.clone());b.connect_clicked(move|_|{
           if socket_entry.text().as_str()!=socket||reviewed.borrow().as_ref().and_then(|p|serde_json::to_value(p).ok())!=expected||!reader(&id).is_ok_and(|p|serde_json::to_value(p).ok()==expected){status.set_text("Discovered target is stale; refresh remote panes");confirm.set_active(false);return;}
           pane.set_text(&row.pane);*discovered.borrow_mut()=Some((row.pane.clone(),row.pid));confirm.set_active(false);
@@ -328,14 +328,14 @@ pub fn button(
  if !selected(){status.set_text("Terminal or endpoint changed; select the target again");return;}
  if let Some(w)=weak.upgrade(){w.close();}
  let(view,directory)=(view.clone(),directory.clone());
- gtk::glib::timeout_add_local_once(Duration::from_millis(150),move||{view.focus();let weak=Rc::downgrade(&view);crate::image_attach::clipboard_route(&view,directory,selected,Duration::ZERO,Some(target),move|result|if let Some(view)=weak.upgrade(){match result{Ok(v)if v["draft_attachment_observed"]==true&&v["focus_current"]==true=>view.warn("PNG attached to the verified remote Codex draft; submit it there when ready."),Ok(_)=>view.warn("Remote image transfer returned without a current draft confirmation; inspect before retrying."),Err(e)=>view.warn(&e)}});});
+ gtk::glib::timeout_add_local_once(Duration::from_millis(150),move||{view.focus();let weak=Rc::downgrade(&view);crate::image_attach::clipboard_route(&view,directory,selected,Duration::ZERO,Some(target),move|result|if let Some(view)=weak.upgrade(){match result{Ok(v)if v["draft_attachment_observed"]==true&&v["focus_current"]==true=>view.warn("PNG attached to the verified remote draft; submit it there when ready."),Ok(_)=>view.warn("Remote image transfer returned without a current draft confirmation; inspect before retrying."),Err(e)=>view.warn(&e)}});});
  });dialog.present();
  });
     b
 }
 pub fn fixture(parent: &impl IsA<gtk::Window>, q: &Value) -> Value {
     if q["operation"] == "show" {
-        return json!({"clicked":crate::sessions::fixture(parent.as_ref(),"Attach PNG to remote Codex…")});
+        return json!({"clicked":crate::sessions::fixture(parent.as_ref(),"Attach PNG to remote agent…")});
     }
     fn find(w: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
         if w.widget_name() == name {
@@ -352,7 +352,7 @@ pub fn fixture(parent: &impl IsA<gtk::Window>, q: &Value) -> Value {
     }
     for w in gtk::Window::list_toplevels() {
         if let Ok(w) = w.downcast::<gtk::Window>() {
-            if w.title().as_deref() != Some("Remote Codex image destination") {
+            if w.title().as_deref() != Some("Remote agent image destination") {
                 continue;
             }
             let root: gtk::Widget = w.clone().upcast();

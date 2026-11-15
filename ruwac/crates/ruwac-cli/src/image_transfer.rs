@@ -105,7 +105,7 @@ pub fn send(
         || result["consumed"] != false
         || result["queued"] != true
         || !result["draft_attachment_observed"].is_boolean()
-        || result["adapter"] != "codex"
+        || !matches!(result["adapter"].as_str(), Some("codex" | "claude"))
     {
         return Err(io::Error::other(
             "Remote PNG hash, dimensions, permissions or destination receipt rejected; inspect the remote draft before retrying",

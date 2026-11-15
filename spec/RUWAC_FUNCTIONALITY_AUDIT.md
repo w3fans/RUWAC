@@ -1,9 +1,43 @@
 # RUWAC purpose, functionality and implementation audit
 
+## Current reconciliation — 2026-11-04
+
+Use the [cloud index](RUWAC_CLOUD_INDEX_2026-11-04.md) for the current reading
+order and the [acceptance reconciliation](RUWAC_ACCEPTANCE_STATUS.md) for exact
+source and delivery boundaries. The dated v0.4.52 lead below is historical:
+non-sizing CLI/SSH viewers shipped in v0.4.53. Source through v0.4.56 additionally
+implements Claude Code image attachment, visible machine copying and Fedora/COPR
+package updates. Post-v0.4.56 source adds public viewer CI and older-daemon Claude
+paste fixes; source presence does not establish a later delivered release.
+
+Full controller-owned sizing, GTK viewer controls, pan/fit, generic cross-machine
+PRIMARY, physical/external/endurance and distribution/security qualification remain
+partial. The known RSA advisory is unsuppressed. Keep the settled application-mouse
+behavior and explicit Shift+drag override; no new selection-priority mode is planned.
+
 Review started: 2026-10-17; historical change review below covers v0.4.18.
 Current behavior was reconciled on 2026-10-20 against v0.4.31 and the
 stabilization candidate's explicit SSH review and update-readiness changes. This is a product requirements ledger and source review, not a claim
 that all supported environments have passed acceptance.
+
+Latest evidence reconciliation (2026-10-31): v0.4.52 is delivered with nineteen
+frozen categories, nine public assets and 25 actual-public runtime phases.
+The explicit non-sizing CLI/SSH viewer and dependency maintenance increment is
+an unreleased candidate; full controller-owned sizing and the remaining external,
+physical and endurance matrix are open. Follow the current acceptance status
+below before interpreting historical findings.
+
+Earlier evidence reconciliation (2026-10-25): v0.4.43 passed nineteen frozen
+categories, nine public-asset checks and twelve actual-public runtime phases.
+Native GNOME Shell 50 mouse-selection delivery is now implemented through an
+optional companion with explicit account permission and connection approval;
+isolated managed/Unicode/ownership/startup and package checks passed. Actual
+cross-machine application, physical input, Windows, endurance and broader
+distribution/security qualification remain partial. Specific owner confirmations
+and retained intermittent observations are recorded in the
+[current acceptance status](RUWAC_ACCEPTANCE_STATUS.md). Historical findings below
+remain evidence of their dated scope, not declarations that later fixes are absent
+or that every requirement is complete.
 
 ## Purpose
 
@@ -52,7 +86,7 @@ results are distinguished from tests re-executed for the current batch in the
 | Prevent spurious RDP resize/drag jumps | Partial | Overlay chrome and pointer-release/remapping fixes have fixture coverage; every external desktop/window-manager combination is not verified. |
 | RDP clipboard text and PNG/DIB | Partial | Real GDK/CLIPRDR, consecutive transfers, cancellation and focus epochs implemented; real Fedora journey recorded, broader Windows and mixed-external-host coverage remains open. |
 | Three RDP tabs plus terminals clipboard ownership | Partial | Loopback multi-tab ownership tests exist; three real external hosts and physical focus/clipboard-manager timing remain separate. |
-| Terminal desktop copy/paste | Implemented | Selection, Shift+drag, PRIMARY/middle paste and image staging; owner confirmed copy/paste including images, while physical-input coverage is still incomplete. |
+| Terminal desktop copy/paste | Implemented | Selection, Shift+drag, PRIMARY/middle paste and image staging; owner confirmed specific scrolling, tab-selection and fresh-shell image journeys. Optional native GNOME Shell 50 PRIMARY delivery requires desktop permission and per-connection approval; full physical/external coverage remains incomplete. |
 | GNOME service and Linux user credentials | Implemented | Distinct usernames/references, independent Set/Replace/Forget and compatible profile metadata. Passwords remain in Secret Service. |
 | Assisted and automatic GNOME sign-in | Partial | Explicit assisted input and opt-in recognized English GDM flow, input shielding and cancellation; not a general unattended-login protocol or system-wide autologin change. |
 | Machine/profile editor and Save & Connect | Implemented | Basic fields grouped first, advanced sections, endpoint identity, CRUD, favorites, search, groups and SQLite/JSON compatibility. |

@@ -139,6 +139,7 @@ def main():
         pane = rpc('pane.list', {'session': sid})[0]
         pid, pane_id = pane['pid'], pane['id']
         assert len((root / 'codex.starts').read_text().splitlines()) == 1
+        assert b'Remote RUWAC ' in drain(first) and b'Remote RUWAC ' in drain(second)
         case('SSH-CONCURRENT-LAUNCH-ONE-SESSION')
         os.write(first['fd'], b'FIRST')
         os.write(second['fd'], b'SECOND')

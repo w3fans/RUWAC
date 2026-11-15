@@ -4,46 +4,261 @@ A Rust remote workspace with persistent terminals: one daemon owns PTYs; replace
 
 Implemented: persistent daemon-owned children, independent attached-client focus, nested horizontal/vertical splits, zoom, paged scrollback, private Unix IPC and a separate compiled GTK desktop. The desktop supports keyboard marking/search, real GDK clipboard transport, private PNG staging and an embedded IronRDP client. Targeted real Windows authentication/framebuffer and Fedora GNOME service/login/display tests pass; saved mixed layouts can preserve a live Fedora RDP transport. Local and authenticated SSH Codex PNG draft attachment is implemented. Physical input, broader external clipboard, broader interoperability and qualified Fedora packaging remain open; see the completion matrix for exact acceptance scope. Private ended-history recovery after daemon loss is implemented with the limits below.
 
-Build with Rust/Cargo in your chosen build workspace. Keep build output and generated evidence outside the source tree:
+## Start here
+
+RUWAC combines a terminal multiplexer with a native Linux remote-work desktop.
+Use the CLI over SSH, the GTK desktop for saved machines and RDP, or both against
+one persistent terminal daemon. Closing a frontend detaches it; your terminal
+programs keep running until they exit or you explicitly stop them.
+
+- **Try it:** [download a release](https://github.com/w3fans/RUWAC/releases/latest),
+  then follow [Fedora testing RPMs](#fedora-testing-rpms),
+  [Ubuntu/Debian/Proxmox CLI packages](#ubuntudebianproxmox-cli), or the
+  [source installation](#install-and-open-the-workspace).
+- **Learn the controls:** [first terminal session](#first-terminal-session),
+  [desktop navigation](#desktop-navigation-and-diagnostics),
+  [RDP and saved machines](#native-machine-and-rdp-controls), and
+  [image paste](#pasting-images-into-ssh-terminals).
+- **Develop it:** [build and test](#build-and-test-from-source),
+  [repository map](#repository-map), [contribution guide](CONTRIBUTING.md), and
+  the [current development index](spec/RUWAC_CLOUD_INDEX_2026-11-04.md) (reading
+  order, source map and open work, usable with GitHub access alone).
+- **Get help:** [report a problem](#feedback-and-bug-reports), read the
+  [security policy](SECURITY.md), or [support development](https://idz.si/bs/ruwac-donate.html).
+
+### Release and support status
+
+RUWAC is an **engineering preview**. Release assets include upstream Fedora 44
+x86_64 testing packages and bundles; these are not official Fedora repository
+packages. Starting with v0.4.71, releases also include a headless Linux x86_64
+CLI archive and Debian package, tested in Ubuntu 22.04/24.04 and Debian 12/13
+userspaces. This does not qualify the GTK desktop or a physical Proxmox host. A version number or passing fixture is not a claim
+of production security or universal RDP interoperability.
+
+The desktop inherits the unresolved
+[RSA timing advisory RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html).
+The advisory check remains failing and unsuppressed; see
+[the dependency assessment](spec/RUWAC_DEPENDENCY_SECURITY.md).
+The headless workspace keeps its own lockfile and does not depend on IronRDP,
+GTK or RSA. Read [acceptance status](spec/RUWAC_ACCEPTANCE_STATUS.md) for the
+scope of tests and remaining limitations.
+
+Updates preserve terminal processes and saved configuration. Reopen the GUI to
+load updated code; RDP connections reconnect after reopening. Already running
+programs and daemons keep the code and environment they started with.
+
+To check which engine your terminals actually use, run `ruwac engine status`.
+It reports both the installed CLI and the running engine without starting or
+restarting anything. The GUI terminal footer also identifies a preserved older
+local engine. An installed update does not change existing terminal processes.
+
+After updating, open **Updates → Open updated engine**, or run `ruwac engine gui`. This opens a separate
+GUI window with its own socket, workspace and durable terminal history. Your
+original window and terminals keep running. Sessions are not migrated between
+engines. For terminal-only use, `ruwac engine new` returns argument arrays for
+launching a new session or GUI; retain the included `RUWAC_STATE_FILE` setting
+when reconnecting so engine restarts recover the same history. Checkpoint
+selection stays with that frontend/engine and is cleared from new PTY shells. A custom
+`RUWAC_STATE_FILE` must be unset before requesting a separate engine.
+
+To replace the **default** engine, deliberately close its terminal programs first,
+then use an external terminal (outside RUWAC):
+
+```sh
+ruwac engine status
+ruwac rpc daemon.stop --params '{}'
+# Wait until `ruwac engine status` reports running: false.
+ruwac start
+ruwac engine status
+```
+
+Stopping the engine ends any terminal programs it still owns. Closing a GUI only
+detaches it, so reopening the GUI or creating another tab can reuse that older
+engine. Existing plain-text recovery checkpoints cannot recover discarded colors;
+new styled history requires a matching updated engine and GUI.
+
+`ruwac --host HOST engine status` checks an updated remote CLI and its running
+engine through the existing verified SSH route. Older remote CLIs need updating
+before they can provide this report; no remote engine is restarted automatically.
+
+## Ubuntu/Debian/Proxmox CLI
+
+Starting with v0.4.71, each tagged release builds the portable **CLI only** in
+parallel with the Fedora packages. One x86_64 binary targets glibc 2.35 or newer.
+The same Debian package is installed and exercised in pinned Ubuntu 22.04,
+Ubuntu 24.04, Debian 12 and Debian 13 containers before publication. Tests cover
+Unicode PTY input, native terminal attach/detach, history recovery and package
+reinstallation without restarting the existing engine or shell. Debian userspace
+coverage is useful for Proxmox; actual hypervisor-host acceptance remains pending.
+
+Download the `.deb` and its checksum from the same
+[release](https://github.com/w3fans/RUWAC/releases). For example:
+
+```sh
+version=0.4.71
+package="ruwac_${version}-1_amd64.deb"
+base="https://github.com/w3fans/RUWAC/releases/download/v${version}"
+curl -fLO "$base/$package"
+curl -fLO "$base/$package.sha256"
+sha256sum -c "$package.sha256"
+sudo apt install "./$package"
+ruwac -v
+ruwac -S work
+```
+
+When logged in as root on Proxmox, omit `sudo`. No GUI, RDP client, kernel
+module or hypervisor service is installed. The package does not restart running
+RUWAC engines. Use `ruwac engine status` to distinguish installed and running
+versions. Follow the same download/install steps for subsequent releases: there
+is **no RUWAC APT repository yet**, so `apt upgrade` alone cannot fetch them.
+
+For an installation without root, download
+`ruwac-VERSION-linux-x86_64.tar.gz` and its `.sha256` companion, verify the checksum,
+extract it, and copy its `bin/ruwac` to a directory on your PATH such as
+`~/.local/bin`. The archive includes dependency license notices and a source
+manifest. Releases also include an OS test receipt and Sigstore provenance for
+the archive, Debian package and receipt. ARM binaries are not provided by this lane.
+
+## First terminal session
+
+After installation, start a named session:
+
+```sh
+ruwac -S demo
+```
+
+Run your normal shell commands. Press **Ctrl+A, then d** to detach, list sessions
+with `ruwac -ls`, and return with `ruwac -r demo`. Typing `exit` in the last shell
+ends the session. The GUI opens with `ruwac gui`; use **New term**, **Machines**
+(**Alt+M**) and **New RDP** to open your workspace. GUI prefix shortcuts use
+**Ctrl+Alt+A** by default; terminal applications keep ordinary Ctrl+A.
+
+### Attach from a smaller terminal without resizing shared work
+
+List sessions with `ruwac -ls`, then attach using its stable session ID:
+
+```sh
+ruwac attach --session session_ID --viewer
+ruwac --host SSH_HOST attach --session session_ID -O
+```
+
+`-O` is the short form of `--viewer`. A viewer keeps typing, window/pane navigation,
+copy mode and local zoom, while its terminal dimensions do not vote in shared PTY
+sizing. Its status bar says **Viewer** and shows the canonical size and any
+cropping. The first implementation crops to the local terminal; use **Ctrl+A, [**
+for history/copy mode. Local pan/fit and controller takeover remain future work.
+
+A viewer cannot create/close shared panes or windows or change split ratios,
+because those operations can resize other applications. Use an ordinary attachment
+for shared layout changes. Viewer exits retain shared ended history.
+
+Both local and SSH paths require a daemon advertising this capability. An older
+daemon is refused before attachment; there is no automatic ordinary-attach fallback.
+Updating installed files preserves existing daemons, so their running applications
+keep their original code. Ordinary attachments keep the existing minimum-size
+policy. See [viewer sizing](spec/RUWAC_VIEWER_SIZING.md) for scope and limits.
+
+## Build and test from source
+
+Clone the repository and work on a branch:
+
+```sh
+git clone https://github.com/w3fans/RUWAC.git
+cd RUWAC
+git switch -c my-change
+```
+
+Install a current Rust toolchain with Cargo, rustfmt and Clippy, plus Python 3.
+The Fedora desktop build also needs native development libraries. The following
+is the package set used by the Fedora quality workflow; skip desktop libraries
+when working only on the headless core:
+
+```sh
+sudo dnf install git cargo rust rustfmt clippy gcc gcc-c++ pkgconf-pkg-config \
+  gtk4-devel libadwaita-devel webkitgtk6.0-devel openssl-devel libssh2-devel \
+  sqlite-devel python3
+```
+
+Build output and test evidence should live outside the checkout. Start with the
+independent core (no graphical login is required):
 
 ```sh
 export CARGO_TARGET_DIR="$(mktemp -d)"
-cargo build --locked --release --manifest-path ruwac/Cargo.toml
-cargo test --locked --workspace --manifest-path ruwac/Cargo.toml
 export EVIDENCE_DIR="$(mktemp -d)"
-PYTHONDONTWRITEBYTECODE=1 python3 ruwac/tests/integration/spike.py \
-  --binary "$CARGO_TARGET_DIR/release/ruwac" --evidence "$EVIDENCE_DIR"
+cargo build --locked --manifest-path ruwac/Cargo.toml
+cargo test --locked --workspace --manifest-path ruwac/Cargo.toml
+python3 ruwac/tests/integration/spike.py \
+  --binary "$CARGO_TARGET_DIR/debug/ruwac" --evidence "$EVIDENCE_DIR"
 ```
 
-Create and enter a persistent named session with one command. The daemon starts automatically when needed:
+For the desktop, use the same target directory:
 
 ```sh
-R="$CARGO_TARGET_DIR/release/ruwac"
-"$R" -S development
+cargo build --locked --manifest-path ruwac/desktop/Cargo.toml
+cargo test --locked --manifest-path ruwac/desktop/Cargo.toml
+"$CARGO_TARGET_DIR/debug/ruwac" gui
 ```
 
-Use Ctrl-A then `d` to detach, `ruwac -r development` to reattach, and `ruwac -ls` to list sessions. `ruwac -dmS development` creates a detached session. Multiple connections can attach to the same session with independent window and pane focus.
+The GUI command locates the sibling `ruwac-desktop` binary. Run it from your
+actual graphical login for desktop clipboard access. Compilation and unit tests
+do not replace real RDP, clipboard or physical keyboard testing.
 
-Exiting an attached shell removes its completed window, including the final window and session. `ruwac -wipe` clears older dead windows and sessions; `ruwac -wipe NAME` limits cleanup to an exact session name or ID. Windows containing live processes remain intact. `-S` and `-R` start a fresh shell when the matching old session has ended; `-r` explains when a session is dead instead of opening an unusable terminal. Explicit `attach --session ID` can still inspect retained, unattached history before cleanup.
+To try terminal changes without attaching to your normal daemon, use a separate
+socket in a private runtime directory:
 
-New CLI sessions and TUI windows/splits explicitly load your selected login shell, including with a preserved older daemon. Existing shells retain their startup flags. For `--host` named creation, update the endpoint RUWAC CLI too: it resolves the remote shell over verified SSH, rather than using your local shell path. Raw `rpc` and JSON `request` parameters remain literal for custom commands and automation.
+```sh
+export RUWAC_SOCKET="$(mktemp -d)/demo.sock"
+"$CARGO_TARGET_DIR/debug/ruwac" -S development
+# After detaching, return to this same daemon:
+"$CARGO_TARGET_DIR/debug/ruwac" -r development
+```
 
-The default socket is beneath your private runtime directory. `RUWAC_SOCKET` or `--socket PATH` selects an explicit socket; its parent must be owned by you with mode 0700. Use the same socket in each terminal.
+Keep that directory while its daemon is in use. Save your work and end test
+shells before cleaning it up; do not remove another session's socket or kill
+unrelated RUWAC processes. See [CONTRIBUTING.md](CONTRIBUTING.md) for format,
+Clippy, integration and privacy checks. Public Cargo builds do not require the
+maintainer's private release tools.
 
-Ctrl-A then `c/n/p/d/a` creates/cycles/detaches/sends literal Ctrl-A. Double Ctrl-A forwards the literal prefix; Ctrl-A then o selects the previous window on a matching daemon. Ctrl-A `S` splits horizontally and `|` vertically; `Tab` changes pane; `0–9` selects windows. `[` opens interactive canonical keyboard copy/search in both clients; `]` pastes the independent internal buffer. `z` zooms, `"` opens the window chooser, `:` opens commands and `?` shows configured shortcuts. PTYs survive final-client detach. Each attached client keeps its own selected window, pane and zoom. Shared PTYs and split ratios remain canonical. The session uses the minimum attached rows and columns; each pane uses the minimum dimensions of its visible rectangles. Unattached explicit selection sets the default for future attachments without redirecting current clients. Existing daemons retain the behavior of their running version until deliberately replaced. `rpc daemon.stop` stops the selected daemon and its owned panes.
+## Repository map
 
-A pane reports its own process exit after draining ready final output. Background programs retaining the terminal cannot change its ended history afterward; continuous post-exit draining is capped at 8 MiB. Closing and reopening standard streams does not itself end a live program. The PTY regression tests require Python 3 as a test fixture; the installed headless engine does not.
+| Path | Purpose |
+| --- | --- |
+| `ruwac/crates/ruwac-core` | Session, window and pane state |
+| `ruwac/crates/ruwac-daemon` | Persistent daemon and request handling |
+| `ruwac/crates/ruwac-pty`, `ruwac-term` | PTYs and terminal emulation (both under `ruwac/crates/`) |
+| `ruwac/crates/ruwac-cli`, `ruwac-tui` | Commands and terminal frontend (both under `ruwac/crates/`) |
+| `ruwac/crates/ruwac-protocol`, `ruwac-clipboard` | Shared protocol and clipboard helpers (both under `ruwac/crates/`) |
+| `ruwac/desktop` | Separate GTK/libadwaita workspace, RDP, SSH and Files |
+| `ruwac/tests/integration` | PTY, remote connection and desktop acceptance drivers |
+| `scripts` | Source inventory, installation, package and verification tools |
+| `spec`, `docs` | Architecture, requirements, acceptance and development plans |
+| `.github/workflows` | Contributor checks and release automation |
 
-Unix PTYs are required. The tested toolchain is Fedora Rust 1.98.1. Cargo.lock pins registry checksums. Prereleases describe a prototype, not production or desktop acceptance. Tagged source prereleases preserve operational implementation and engineering history. RUWAC’s original source is licensed under Apache-2.0; see [LICENSE](LICENSE). Dependencies retain their own licenses. Binary packaging remains subject to dependency notice and packaging validation.
+## Feedback and bug reports
 
-See [architecture decisions](architecture/00-RUWAC-DECISION.md), [protocol](architecture/02-PROTOCOL-V0.md), [acceptance](architecture/03-ACCEPTANCE-MATRIX.md) and [benchmarks](architecture/04-BENCHMARKS.md).
+Open a [GitHub issue](https://github.com/w3fans/RUWAC/issues) with the version
+(`ruwac -v`), distribution, desktop/session type (Wayland or X11), steps to
+reproduce, expected behavior and actual behavior. For remote problems, include
+the client/server versions and whether the problem is in a terminal or RDP tab.
+Mention whether the GUI was reopened after updating. Sanitized screenshots and
+a small reproduction help; remove credentials, host details and clipboard data.
+Report security vulnerabilities through [SECURITY.md](SECURITY.md).
+
+For a contribution, fork the repository, create a focused branch, run the relevant
+checks and open a pull request explaining the change and test results. First-time
+contributors may need a maintainer to approve GitHub Actions. Maintainers review
+and release changes; contributors do not need production credentials or release
+access. See [CONTRIBUTING.md](CONTRIBUTING.md) and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
+The sections below provide the detailed feature and compatibility reference.
 
 ## Native engineering prerelease
 
-The retained headless core has named target-specific commands and an optional compiled Rust GTK4/libadwaita client, with real GDK text clipboard transport and private PNG staging. See [the implementation and evidence report](spec/RUWAC_INTEGRATION_SPIKE.md), [ADR-001](spec/RUWAC_ARCHITECTURE_ADR.md), and [acceptance limits](spec/RUWAC_ACCEPTANCE_STATUS.md). External-host RDP, physical PRIMARY acceptance, image attachment and RPM packaging remain open. The first machine sidebar and authenticated loopback RDP/CLIPRDR integration are implemented. This milestone is distributed as a source prerelease with the acceptance limits listed below.
+The retained headless core has named target-specific commands and an optional compiled Rust GTK4/libadwaita client, with real GDK text clipboard transport and private PNG staging. See [the implementation and evidence report](spec/RUWAC_INTEGRATION_SPIKE.md), [ADR-001](spec/RUWAC_ARCHITECTURE_ADR.md), and [acceptance limits](spec/RUWAC_ACCEPTANCE_STATUS.md). Targeted authenticated RDP, image attachment and upstream testing-package acceptance are implemented; broader external-host interoperability, physical PRIMARY testing and official Fedora packaging qualification remain open. See the linked acceptance records for the exact tested scope.
 
 
-The desktop is a separate Cargo workspace. Build it with `cargo build --locked --release --manifest-path ruwac/desktop/Cargo.toml`, using the same external CARGO_TARGET_DIR as the core. `ruwac gui` starts the sibling `ruwac-desktop`; Python GI is retained as a test oracle. Native dependencies are optional; only the desktop workspace includes IronRDP. See the current engineering reports before treating fixture success as desktop acceptance.
+The desktop is a separate Cargo workspace. Build it with `cargo build --locked --release --manifest-path ruwac/desktop/Cargo.toml`, using the same external CARGO_TARGET_DIR as the core. `ruwac gui` starts the sibling `ruwac-desktop`; Python GI is retained as a test oracle. Native dependencies are optional; only the desktop workspace includes IronRDP. After updating, close and reopen the desktop to load its new code: an already running GUI keeps its previous version. Daemon-owned terminal sessions remain available to reattach; RDP desktops reconnect after reopening. See the current engineering reports before treating fixture success as desktop acceptance.
 
 Optional automatic GNOME sign-in requires local `python3-pillow`, `tesseract` and `tesseract-langpack-eng`. Enable it under the saved profile’s GNOME User Login section. The supported English Fedora GDM flow is verified on an authorized host; unknown screens and changed focus stop input. See [GNOME login behavior](spec/RUWAC_GNOME_LOGIN.md).
 
@@ -61,11 +276,23 @@ Launch the desktop from the same external build directory and socket:
 
 Create windows with Ctrl-Alt-A c, split with Ctrl-Alt-A S or |, move between panes with Ctrl-Alt-A Tab, and zoom/restore with Ctrl-Alt-A z. Drag dividers to change persistent ratios. Ctrl-Alt-A [ opens canonical history: arrows/hjkl, Page Up/Down, g/G, Space to mark, Enter to save internally, / to search and Escape to return. Ctrl-Alt-A ] pastes that buffer. Ctrl-Shift-C/V use desktop CLIPBOARD separately. Ctrl-Alt-A d detaches; opening the same session again retains running programs and layout. Plain Ctrl-A is forwarded to the terminal application.
 
+Double-click a word in a GUI terminal to select it into the mouse-selection
+clipboard; hold Shift when an application handles mouse input. The terminal
+client also copies double-clicked words in ordinary shell panes into its session
+buffer and mouse selection. Applications that request mouse input keep their
+normal double-click behavior. Unicode graphemes and genuine soft wraps stay
+intact; Ctrl-Shift-C uses desktop CLIPBOARD separately.
+
 Private configuration may set RUWAC_SCROLLBACK_LINES (default 50000) and RUWAC_SCROLLBACK_MIB (default 256; approximate cell budget). Copy view has an 8 MiB cap with visible truncation. RUWAC_SHORTCUTS remaps GTK accelerators for prefix/copy/paste; RUWAC_KEYMAP remaps prefix commands. Both remapping variables contain JSON objects, for example `RUWAC_SHORTCUTS='{"prefix":"<Control>b"}'` and `RUWAC_KEYMAP='{"x":"z"}'` (x invokes zoom). The TUI supports Control prefixes and prefix-command remapping. `v` toggles rectangular selection, `w/b/e` move by Unicode words, and `n/N` repeat searches. Oversized selections and cancellation preserve the existing internal buffer. See client help for the current configuration.
 
 “New RDP tab” opens the in-process client. Supply an authorized host:port, username, a Secret Service profile reference and optional trusted CA PEM. The lookup uses attributes application=RUWAC and profile=the reference; secrets are not stored in the project. System certificate/hostname validation is mandatory. Fit/native/stretch/fullscreen and explicit send-key actions are implemented. Text and PNG CLIPRDR works in both directions with five clipboard policies, explicit send/receive and remote paste. Authenticated loopback sessions are tested; dynamic resizing is qualified against authenticated loopback sessions; external Windows/GNOME hosts remain unqualified.
 
-“Machines” toggles the sidebar; Ctrl+K searches names, full groups, endpoints and tags. Favorites and recent-use filters are available. All matching profiles appear in one scrollable list; group headings collapse or expand their machines. Choose a Remmina file explicitly to preview approved nonsecret metadata, then import it. The keyring checkbox copies available saved service passwords into RUWAC's Secret Service entries; existing RUWAC passwords are retained. Certificates and private key files are excluded. To update an existing endpoint's metadata, preview the file, explicitly select its endpoint identity, and use Review merge into selected endpoint. Review the field changes before Apply; local IDs, credential references, trust/key paths and preferences are preserved. Active endpoints and changes made after review require closing tabs or reviewing again. Cancel leaves metadata unchanged; Undo restores the previous private library. RDP entries open native tabs; SSH entries create daemon-owned SSH terminals. Native profile editing and Set/replace/forget credential controls are implemented.
+If the remote clipboard stops responding, RUWAC disables clipboard transfers for
+that connection while keeping the desktop and keyboard available. It reports
+this in the connection status. Use **Reconnect** to enable clipboard transfers
+again; late clipboard replies are ignored until then.
+
+“Machines” toggles the sidebar; Alt+M searches names, full groups, endpoints and tags. Favorites and recent-use filters are available. All matching profiles appear in one scrollable list; group headings collapse or expand their machines. Choose a Remmina file explicitly to preview approved nonsecret metadata, then import it. The keyring checkbox copies available saved service passwords into RUWAC's Secret Service entries; existing RUWAC passwords are retained. Certificates and private key files are excluded. To update an existing endpoint's metadata, preview the file, explicitly select its endpoint identity, and use Review merge into selected endpoint. Review the field changes before Apply; local IDs, credential references, trust/key paths and preferences are preserved. Active endpoints and changes made after review require closing tabs or reviewing again. Cancel leaves metadata unchanged; Undo restores the previous private library. RDP entries open native tabs; SSH entries create daemon-owned SSH terminals. Native profile editing and Set/replace/forget credential controls are implemented.
 
 ## Pasting images into SSH terminals
 
@@ -151,6 +378,10 @@ archives; the Cargo commands above do not require them.
 
 The per-user installer adds a RUWAC desktop launcher and commands in the standard user binary directory. `ruwac gui` starts or reuses the persistent daemon. Use New terminal for another session and Sessions to reopen a running one. Closing a terminal tab detaches it; automatic checkpoints and normal window close save terminal/RDP/Files tabs, split geometry and selected tab. RDP restores disconnected, and Files restores its directory without automatic authentication. `ruwac start` starts the daemon without a graphical client.
 
+Tab widths stay steady during title/status updates, hovering and switching. Short names use shorter tabs when the tab set changes; long titles ellipsize within the existing width. Inactive tabs have borders and visible close buttons. **Compact tabs** reduces padding while keeping text and status icons readable; **Two tab rows** is also available in Preferences. Hold **Alt** to show the first ten shortcuts (**1–9**, then **0**); Map keys mode continues to send them to the application.
+
+When the last local shell ends, its tab keeps the output and offers **Recreate**, **New terminal**, and **New & close**. Recreate starts a fresh local shell or uses the saved remote launch. New terminal keeps the ended tab; New & close creates a local terminal before closing it. If creation fails, the old tab remains open.
+
 The full headless suite and three genuine SSH remote-PTY detach/reattach cycles also pass on an authorized Fedora host. This does not establish external RDP login or physical-desktop acceptance. See [all remaining product gates](spec/RUWAC_PRODUCT_COMPLETION.md).
 
 Use **Split tabs…** to place existing terminal, RDP or Files views side by side or above/below each other. **Separate views** returns them to tabs while preserving connections. RDP reconnect/disconnect, fit, dynamic resolution, zoom and fullscreen are visible in the native toolbar. Additional connection, remote-key and clipboard actions are under **RDP controls**. Clipboard ownership follows the focused canvas; local controls and Files cannot let inactive RDP sessions take over CLIPBOARD.
@@ -177,6 +408,14 @@ ruwac --host SSH_HOST attach --session session_ID
 Global `--remote-binary PATH` and `--socket REMOTE_PATH` select an explicit executable/socket. Remote request content is literal JSON over stdin. Password prompting, agent forwarding and desktop forwarding are disabled. `describe` exposes actual endpoint capabilities and supports older live daemons through read-only aggregation; it does not upgrade or restart them.
 
 ## Desktop navigation and diagnostics
+
+Tabs shrink to fit the available header space. Under **Controls**, enable
+**Two rows of tabs** or **Compact tabs** to fit more sessions. The new-terminal
+**+** stays visible after the tabs. Full titles remain available in tooltips;
+very crowded rows can scroll horizontally and reveal the selected tab. These
+presentation settings also apply to detached windows and preserve running
+sessions. When a tab header has keyboard focus, arrow keys, Home and End move
+between headers; Space or Enter activates one. Shift+F10 opens its tab menu.
 
 Launch `ruwac gui`. By default, Alt+1–9 select workspace tabs 1–9 and Alt+0 selects tab 10; system shortcuts such as Alt+Tab stay on this computer. Tap AltGr (Right Alt) on its own to enable **Map keys**, shown in the header: those keys then go to the terminal program or remote desktop. A current RUWAC attached client receiving Alt+digits selects its own windows. Tap AltGr again to return to workspace tabs and local system shortcuts. AltGr held with another key always types keyboard-layout characters. The shortcuts work from terminal, RDP and Files views. Missing tabs are a no-op. Other unbound Ctrl+Alt and Shift+Alt shortcuts remain available to applications. Use `ruwac gui --theme system` to follow the desktop color preference, or `--theme light` / `--theme dark` explicitly.
 
@@ -234,11 +473,79 @@ Contribution and repository checks: see [CONTRIBUTING.md](CONTRIBUTING.md), [SEC
 
 Native windows, the overlay sidebar and GNOME dual-credential storage are documented in [GNOME login and desktop windows](spec/RUWAC_GNOME_LOGIN.md). GNOME modes support the non-AVC Graphics Pipeline and verified same-endpoint RDSTLS handover. Real Fedora GDM rendering is tested; Linux user sign-in remains a separate explicit action.
 
+RUWAC agent connections check and display the remote CLI version and executable path on every attachment. Enable “Check and update RUWAC on agent connection” in the machine properties to check verified published releases and update an existing per-user installation as well as installing a missing CLI. If an update check fails, the connection reports the failure and tries the installed CLI. Existing engines and sessions keep running; a newer CLI does not replace them. Per-user installations use `ruwac update --check` / `ruwac update --install`; `ruwac-rpm-update` belongs to system RPM installations.
+
+Terminal-only installations also support opt-in automatic updates:
+
+```sh
+ruwac update -a on       # enable verified automatic installation
+ruwac update -a status   # inspect the setting
+ruwac update -a off      # disable it
+```
+
+Run this on each machine. System RPM installations require administrator
+configuration; per-user installations use a user timer and retain their installed
+CLI/desktop components. Updating files preserves live daemons and programs, so a
+session can still be served by an older engine. It does not gain new engine
+features until its sessions have ended and that engine is replaced.
+
+Right-click **New term** or a terminal for **Add terminal machine…**; the Agents
+menu offers **Add agent machine…**. Enter an SSH alias such as `devbox` and save or
+connect. No RDP endpoint is required. OpenSSH supplies unspecified user, port and
+keys; configure them later in Machines → Edit. Category choices include existing
+group paths and allow a new path. **Copy machine…** is at the top of its editor.
+
 Fedora 44 updates: use Main menu → Updates or `ruwac update --check` and `ruwac update --install`. Automatic checks announce newer stable GitHub releases; per-user installations support source builds or explicitly selected testing bundles, retaining active sessions and the previous version. Bundle updates require `gh` to verify signed build provenance before installation. System installations use the release RPMs and DNF. See [prerequisites, bootstrap and rollback](spec/RUWAC_UPDATES.md).
 
 The native Files view supports SFTP and verified staged rsync copies of files and folders. See [SSH file transfers](spec/RUWAC_FILES.md) for authentication, replacement and cancellation behavior.
 
 ## Fedora testing RPMs
+
+### COPR repository
+
+For Fedora 43, 44, 45 and Rawhide on x86_64, enable the repository once and install
+both the CLI and GUI:
+
+```sh
+sudo dnf copr enable zvegelj/ruwac
+sudo dnf config-manager setopt \
+  'copr:copr.fedorainfracloud.org:zvegelj:ruwac.metadata_expire=300'
+sudo dnf install --refresh ruwac ruwac-desktop
+```
+
+Install only `ruwac` for a headless machine. COPR lists one source package named
+`ruwac`; it produces both binary packages. Later updates use normal DNF:
+
+```sh
+sudo dnf upgrade --refresh ruwac ruwac-desktop
+```
+
+The enable command permanently adds COPR on this host. The repository-specific
+`metadata_expire=300` override persists across reboots and checks metadata after
+five minutes; repeat these onboarding commands on each client. It is a cache
+expiry, not a network timeout. `--refresh` forces an immediate check after a new
+release. Ordinary system updates retain their existing unavailable-repository
+policy; targeted RUWAC remote checks fail visibly when COPR cannot be queried. Reopen
+the GUI to load its new executable. Package installation preserves running
+terminal engines and their programs; the installed CLI, running GUI and running
+engine can therefore have different versions. Use `ruwac engine status` to inspect
+the engine without replacing it. An attached CLI frontend also keeps its old code:
+detach with Ctrl+A then `d`, then run `ruwac -r SESSION` to load the updated
+frontend while keeping its engine and programs alive.
+
+For PNG paste into a local nested RUWAC terminal, update both frontends: reopen
+the GUI and detach/reattach the nested CLI. The GUI hands its staged PNG to that
+specific terminal, which checks its selected Codex/Claude pane before attaching
+the image to the draft. A displayless agent does not need `DISPLAY` or X11 access,
+and no Enter is sent. Typing, switching pane/view or losing GUI focus cancels an
+unfinished handoff. An older nested CLI retains its native Ctrl+V behavior; it
+cannot use this explicit local image handoff until reattached.
+
+COPR packages use DNF for updates and do not ship
+the upstream testing-update timer. These community packages are separate from
+inclusion in the official Fedora repositories.
+
+### Upstream testing RPM downloads
 
 Tagged releases provide upstream Fedora 44 x86_64 testing RPMs: `ruwac` contains
 only the daemon/CLI; `ruwac-desktop` adds GTK/RDP and depends on the matching core
@@ -261,8 +568,8 @@ installation and explicit opt-in to a system update timer. It refuses per-user
 installation or rollback that would shadow the system package.
 Per-user source/testing-bundle updates remain available for separately installed
 per-user builds. System updates remain disabled until an administrator enables them;
-see [setup and opt-out](spec/RUWAC_UPDATES.md). A signed Fedora package repository
-remains unfinished. The desktop RSA advisory remains unsuppressed.
+see [setup and opt-out](spec/RUWAC_UPDATES.md). Official Fedora repository inclusion remains a separate goal. The desktop RSA
+advisory remains unsuppressed.
 
 A fresh GTK workspace creates its own terminal session instead of borrowing an unrelated CLI session. Explicitly attaching the same session shares its PTY size: the smallest attached viewport governs it, and the status bar shows the shared size. Closing or detaching the smaller view allows it to expand. Remmina import discovers native, legacy and Flatpak profile directories, previews the selected metadata, and requires an explicit import; custom file selection remains available. [Remmina documents its profile locations](https://remmina.org/how-to-install-remmina/).
 
@@ -276,6 +583,13 @@ To retain the legacy Screen double-prefix previous-window action, set `RUWAC_SHO
 and `-x work` attach to it without creating a missing session. `-R work` attaches
 or creates it; `-dmS work` creates it detached. Concurrent attachments retain their
 own selected window and use the canonical shared PTY size.
+
+The next isolated command-compatibility candidate is tracked in the
+[complete Screen/tmux command review](spec/RUWAC_MULTIPLEXER_COMMANDS.md). It adds
+explicit-target window/pane controls, literal text input and session-buffer
+access. This is a bounded RUWAC command dialect with JSON replies, not a tmux
+configuration interpreter. Candidate changes need qualification and release
+before they are available in installed packages.
 
 `ruwac -S work -X screen [NAME]`, `title NAME`, `windows`, `next`, `prev`,
 `other`, and `select N` control an existing exact named session. Explicit `-X kill`
@@ -303,7 +617,7 @@ read-only; selecting a profile previews metadata, then **Import selected profile
 imports it explicitly. Passwords are never imported.
 
 
-The single-row header keeps tabs beside collapsible actions. **Controls** (F10 or
+The default single-row header keeps tabs beside collapsible actions. **Controls** (F10 or
 Ctrl+.) opens the selected session's actions without changing its viewport. An
 optional dock occupies a normal row. Appearance offers six palettes, terminal fonts,
 size and line spacing. See [desktop controls and remote shortcuts](spec/RUWAC_DESKTOP_CHROME.md).
@@ -378,7 +692,7 @@ Repeated `Terminal` names are independent persistent sessions created by GUI ter
 
 Product purpose, requested capabilities, realized scope and recent code-review findings: [functionality audit](spec/RUWAC_FUNCTIONALITY_AUDIT.md).
 
-After installation, `man ruwac` documents session commands, keyboard controls and updates. Machines: Alt+M; Agents: Alt+A. Preferences → Tight line spacing reduces vertical spacing; existing saved appearance settings are preserved.
+After installation, `man ruwac` documents session commands, keyboard controls and updates. Machines: Alt+M; other Alt letters go to applications. Preferences → Tight line spacing reduces vertical spacing; existing saved appearance settings are preserved.
 
 ### Mouse selection across Linux RDP desktops
 
@@ -388,21 +702,38 @@ under Advanced. Enter its Linux SSH account, SSH port (0 keeps SSH configuration
 and the exact remote Wayland session, such as `wayland-0`. The SSH account must
 be the account owning that desktop, with an existing trusted host key and key
 authentication. The configured SSH identity, known-hosts file and jump route apply;
-the RDP service password is never reused. The remote desktop needs Python3, GTK4
-PyGObject and Xwayland (Fedora: `python3-gobject gtk4 xorg-x11-server-Xwayland`).
+the RDP service password is never reused. Receiving remote selections needs Python3,
+GTK4 PyGObject and Xwayland on that desktop (Fedora:
+`python3-gobject gtk4 xorg-x11-server-Xwayland`). Native publication through the
+GNOME companion does not require Xwayland.
 
 This optional helper receives remote text into local PRIMARY separately from the
 Ctrl+C clipboard. It follows the RDP tab’s receive clipboard policy and operates
 while its canvas has focus. Inactive remote selections are ignored. The focused
 native GUI publishes the selection, including on Wayland; a background Xwayland
-client cannot reliably do this. General local PRIMARY sharing into arbitrary remote native Wayland apps is not
-implemented; the confirmed remote RUWAC terminal path below is available.
+client cannot reliably do this. Native PRIMARY delivery to GNOME Shell 50
+applications is available through the optional [desktop companion](ruwac/desktop/primary-companion/README.md).
+Install it on the receiving desktop with `ruwac-desktop -G install`, open
+`ruwac-desktop -G preferences` to enable desktop publication permission, and
+authorize each selection connection from the source RDP controls. If status
+requires a new login, sign out and back in when convenient; setup never restarts
+your desktop. Other desktops retain their available compatibility routes,
+including the confirmed remote RUWAC terminal path below.
+
+The standalone companion archive can be checked without installing it or opening
+a desktop. Under a bounded test runner, run
+`python3 ruwac/tests/integration/primary_companion_package.py --evidence /path/to/new/evidence`.
+This checks exact archive inventory/bytes, the project license and schema
+compilation with GNOME tools; desktop login, authorization, transport and physical
+input require separate acceptance.
 Ctrl+C/V continues to work in both directions.
 CLIPBOARD, images and saved credentials are unchanged. It stops on tab disconnect
-or GUI exit; no remote service or clipboard-history file is installed. A missing
+or GUI exit; no background clipboard service or clipboard-history file is installed.
+The optional companion remains installed until explicitly removed. A missing
 SSH key, unavailable Xwayland, mismatched desktop or missing dependency leaves
-normal RDP/Ctrl+C usable and shows a selection-sharing error. Reconnect after
-correcting the settings. This helper supports Linux desktops with a working
+normal RDP/Ctrl+C usable and shows a selection-sharing error. Use **Retry selection
+connection** after correcting the settings; RDP stays connected and the new native
+helper needs fresh approval. Receiving selections supports Linux desktops with a working
 Xwayland PRIMARY bridge; it does not add PRIMARY support to Windows.
 
 Headless setup for an existing RDP endpoint is also available (no graphical
@@ -413,28 +744,45 @@ ruwac-desktop --receive-primary ENDPOINT_ID LINUX_SSH_USER wayland-0 0
 ruwac-desktop --disable-primary ENDPOINT_ID
 ```
 
-Reopen the RDP tab after enabling it. Disabling or changing the saved route stops
-its existing selection helper; running terminal processes remain independent.
+Reconnect the RDP tab after enabling it to load the saved options. If its saved
+host, user, credential reference or certificate trust changed, reopen it from
+Machines instead. Disabling or changing the saved route stops its existing
+selection helper; running terminal processes remain independent.
 
 ### Terminal menus and selection paste into remote RUWAC
 
 Terminal tabs have **Copy**, **Paste**, **Paste selection**, **Select text…** and
-**Close tab** actions. RDP tabs retain their connection/display actions. Copying
+**Close tab** actions. RDP tabs retain their connection/display actions and
+**Retry automatic sign-in**, available for a stopped attempt on a verified
+connected GNOME greeter. Copying
 retained text is also available after a terminal session ends; pasting into an
 ended session is disabled. The terminal's own context menu includes these actions
 above the saved hosts. Applications using mouse input keep their right-click;
 use the tab menu or Shift+right-click for RUWAC's menu. **Select text…** opens
 native scrollback, where ordinary mouse selection works without holding Shift.
 SSH terminal output is selected in exactly the same way as local output.
+In a GUI terminal, drag the selection toward the first or last visible text row
+and hold there to scroll through history. The mouse wheel also scrolls while you hold the selection.
+
+When running a nested `ruwac -r` or `ruwac -S` session, use **Ctrl+A, then [**
+to open that session's history, then select with the mouse **without Shift**.
+Hold the pointer at the top or bottom edge to extend the selection through
+history; the wheel also scrolls while selecting. Shift+drag instead selects the
+outer terminal's screen, which cannot provide the nested session's history.
+Escape leaves the inner copy view. For a terminal opened directly in the GUI,
+use **Ctrl+Alt+A, then [** or **Select text…** to open its history.
 
 To middle-click a local RUWAC terminal selection into a remote RUWAC terminal,
 configure the Linux selection-sharing route above and enable **Middle-click
 pastes local terminal selections into remote RUWAC** on its RDP endpoint. In the
 receiving GUI's Controls menu enable **Receive mouse selections from another
 RUWAC desktop**. Both GUIs must support this feature, and the receiving RUWAC
-window must already have focus on its desktop. Select the source text, switch
+window must already have focus on its desktop. With mouse-selection sharing enabled, disabling local selection paste causes a clear refusal for selections from outside that remote desktop. Native selections within the same desktop keep their normal mouse path. Select the source text, switch
 to the RDP tab and middle-click the remote terminal. Programs handling the mouse
 can use **Select text…** or Shift+drag for the source selection.
+
+A selection belonging to the same RDP connection keeps its native middle-click
+path within that desktop, including when cross-desktop selection paste is off.
 
 The existing trusted SSH peer asks the foreground native GUI to publish PRIMARY,
 confirms the complete selection through the compositor, and only then forwards
@@ -464,3 +812,53 @@ older running clients keep their existing rendering until reattached.
 New terminals advertise `xterm-256color` and true colour, and clear a launcher-inherited `NO_COLOR` setting. New GUI and CLI login shells also do this when reusing an older engine. Existing shells retain their environment: run `unset NO_COLOR` and restart the affected application to restore its colours. To deliberately disable colours for one application, run `env NO_COLOR=1 application` or configure that application directly.
 
 Terminal status labels and window titles show the foreground command, refreshing quiet commands twice per second when the engine provides job metadata. Custom window names remain visible alongside the command; arguments are excluded. Exiting a shell removes its completed window when another live window remains. Exiting the last live window detaches the client and retains final history for explicit reattachment.
+
+## Short command options
+
+Every public long option on the CLI, desktop launcher and installed update tools
+has a short spelling. Short options are scoped to their command; option values
+remain literal. Existing Screen-style `-S`, `-r`, `-x`, `-ls` and `-wipe` commands
+retain their meanings. Combined short-option bundles are not supported.
+
+Examples: `ruwac update -i -p -H` installs the verified headless prebuilt update;
+`ruwac -H HOST pane send-text -i PANE_ID -t TEXT -j` addresses an explicit SSH
+endpoint; `ruwac gui -S SESSION_ID` opens a terminal tab. Use `ruwac -h`,
+`ruwac gui -h` and `ruwac update -h` for their full short/long option pairs.
+
+Desktop terminal shortcuts default to selection-aware Ctrl+C and clipboard
+Ctrl+V. With no terminal selection Ctrl+C still interrupts the application.
+Preferences can restore traditional Ctrl+C/V control bytes. Ctrl+Shift+C/V remain
+available, and protected image-only SSH paste keeps its original destination
+checks. Mouse selection publishes PRIMARY; separately opt in to also copy a
+terminal selection to CLIPBOARD. No desktop-wide PRIMARY mirroring is enabled.
+
+## Web Preview
+
+New Web Preview opens an ephemeral native WebKitGTK browser in the normal mixed
+workspace. It supports back/forward/reload, Ctrl+L, browser copy/paste, inspector,
+and the existing tab/split/move actions. Ctrl+click an HTTP/HTTPS terminal URL, or
+use its context menu, to open it. Terminal mouse-reporting programs retain their
+clicks; use Shift+Ctrl+click to deliberately override that routing.
+
+An SSH terminal's localhost link requires its original bound pane, process,
+saved endpoint and verified SSH master. The preview forwards only that explicit
+remote loopback port to a local loopback listener. It never substitutes the
+workstation's server, re-resolves the SSH alias or creates a fallback connection.
+Closing the preview cancels its own forward and preserves the terminal process.
+Other processes on the same workstation can access a loopback listener; this is
+not isolation from hostile local processes. Remote navigation stays on the
+approved origin/port. Relative WebSocket/HMR URLs use that same forward; absolute
+development-server URLs must use the approved origin. TLS verification stays on.
+
+At most eight browser views may exist. Remote previews restore disconnected;
+enter their original URL and explicitly choose a current verified SSH terminal
+to reconnect. Workspace files contain endpoint identities, not browser URLs,
+queries, fragments, cookies, tunnel ports or control sockets. Downloads and file
+uploads are disabled in Preview; use the external-browser action when needed.
+Headless RUWAC does not depend on WebKitGTK. Fedora desktop builds additionally
+need `webkitgtk6.0-devel`; installed desktops require `webkitgtk6.0`.
+
+Remote previews close active page networking when the source connection changes.
+A changed host/account/trust binding requires a fresh Web Preview, so an old
+ephemeral browser session is never reused for a different SSH identity. Reload
+and history navigation stay blocked while a remote preview is disconnected.

@@ -1,8 +1,363 @@
 # RUWAC acceptance status
 
+## Published reconciliation — v0.4.81, 2026-11-15
+
+[v0.4.81](https://github.com/w3fans/RUWAC/releases/tag/v0.4.81), commit
+`b4a64eb048c396268a3fb535345c8b880b63e8cf`, is delivered. The normal release
+workflow passed all 19 required source gates, verified 18 published assets and
+qualified the CLI/desktop pair and repository metadata on Fedora 43, 44, 45 and
+Rawhide. An authorized Fedora 45 desktop update preserved active GUI, engine
+and agent process identities; post-install verification checked 1,117 pinned
+proofs. Installed files and running GUI/engine versions can still differ.
+
+The tab-row fill, structural scanner correction and successful SFTP fixture
+cleanup described below as the next batch shipped in v0.4.79. v0.4.80 added
+checkpoint row reuse for the measured busy-history typing workload. v0.4.81
+prevents wide Unicode output in one-column views from stopping the engine and
+clips GTK painting and pointer hits to each pane's visible rectangle.
+
+The actual published Fedora CLI and portable CLI each passed 40 narrow/wide
+real-PTY cycles with the same child process. Isolated GTK controls verify the
+divider paint/hit correction. Published portable packages also passed install,
+PTY, persistence, reinstall and removal checks in Debian 12/13 and Ubuntu
+22.04/24.04 userspaces. The 2,400-key frontend and busy-history comparisons
+passed their recorded latency, CPU and memory gates; these are generated local
+measurements, not physical GTK, RDP or WAN latency claims.
+
+The headless advisory check is clean. The desktop RSA finding
+`RUSTSEC-2023-0071` and three maintenance warnings remain unsuppressed; the
+advisory job is not green. Physical clipboard/input, real GNOME handover,
+Windows acceptance on the established validation path and an actual Proxmox
+host remain unqualified. These outstanding acceptance scopes do not impose a
+blanket development-release freeze. The dated historical sections below are
+retained unchanged.
+
+## Published reconciliation and next maintenance — 2026-11-15
+
+v0.4.78, commit `b5474d26913aba3380feddef36724453894a57a4`, is delivered.
+All 19 source gates, 18 published assets, 24 runtime/native phases, four COPR
+targets and four portable CLI userspaces passed. The 2,400-key comparison
+passed latency, CPU and memory limits. A verified Fedora desktop update
+preserved nine existing process identities; 947 pinned proofs verified after
+installation. The rustix warning is resolved; RSA and maintenance findings
+remain unsuppressed. Physical clipboard, GNOME handover, Windows and Proxmox
+acceptance remain separate open requirements.
+
+The next maintenance batch addresses the owner's unused tab-row space,
+publishes the qualified structural scanner correction used to distinguish
+0.4.78's numeric-address false positive, and removes successful SFTP fixtures'
+repeatable bulk data. The published 0.4.78 GUI reproduces the unused-row case
+in an isolated native compositor. Candidate native, source, package and
+published-artifact checks are required before claiming these changes delivered.
+Historical sections below retain their original evidence and limitations.
+
+## Published reconciliation and dependency maintenance — 2026-11-14
+
+v0.4.77, commit `11eee6fa0d1570106da4f73424418067ba106321`, is delivered.
+All 19 frozen source gates, 18 downloaded assets with six attestations,
+24 published-artifact acceptance phases, four COPR repositories and four
+portable CLI userspaces passed. The 2,400-key comparison passed latency,
+CPU and memory budgets. The verified Fedora desktop update preserved all
+nine existing application process identities. These remain isolated fixture
+results, not physical clipboard, GNOME handover, Windows or Proxmox acceptance.
+
+Current maintenance updates rustix 1.1.5 to the upstream patched 1.1.6 for
+RUSTSEC-2026-0486. The isolated lockfile audit against the recorded advisory
+database removes that warning; fresh build, runtime, audit and publication
+checks are still required. Cargo reselects existing Windows-only dependency
+edges in errno, gio-sys and tempfile within their declared ranges, without
+changing those packages' versions or checksums. Windows runtime validation
+remains pending on the established R7 path. The separate RSA finding and
+maintenance warnings remain unsuppressed.
+
+The dated sections below retain their original evidence and limitations.
+
+## Published reconciliation — 2026-11-14
+
+v0.4.76, commit `2d75780cb26d979067ef24bcaca477824285d807`, is delivered.
+The dated candidate sections below retain their original scope and are not
+current publication blockers. All 19 frozen source gates, 18 downloaded assets
+with checksums/provenance, 24 actual-public acceptance phases, four COPR targets
+and four portable CLI userspaces passed. An authorized Fedora desktop update
+preserved active GUI, engine and agent process identities.
+
+The published RDP client passed the generated clipboard-timeout case for
+61 seconds, including native keyboard input, framebuffer change, stale reply
+rejection and saved-profile reconnect with restored transfers. The published
+frontend also passed the 2,400-key latency/CPU/memory regression comparison.
+These do not certify physical Claude selection, a GNOME greeter, external
+Windows interoperability, physical Proxmox or busy-history latency.
+
+Publication verification exposed a binary-scanner false positive in a duplicate
+LLVM fallback-address word. A reviewed structural check qualified the exact
+published artifacts without suppressing a policy term. The current maintenance change integrates that check
+in the public scanner; private literals and unknown instruction/table forms
+must continue to fail. Its source and publication gates remain required. Known dependency
+advisories remain open and unsuppressed.
+
+## RDP clipboard timeout candidate — 2026-11-14
+
+Baseline: v0.4.75, `90841a300e5e13b86909c412deb6ab056b4505a0`.
+An isolated authenticated RDP peer reproduced a healthy desktop closing when
+its clipboard data response arrived after the ten-second deadline. The
+candidate disables CLIPRDR transfers until explicit reconnect, invalidates
+pending callbacks and ignores late responses without closing display/input.
+A generated saved-profile regression passed a 61-second connection check,
+changed framebuffer, native keyboard delivery, local clipboard preservation,
+stale-offer rejection and reconnect with restored clipboard transfers.
+All 277 desktop unit tests and ten selected native RDP regression groups pass.
+
+These are isolated Mutter input and generated loopback-peer results. They do
+not reproduce a physical GNOME greeter or certify external Windows/Fedora
+interoperability. Other handover/network failures remain unqualified. Normal
+release gates and actual published-artifact checks are still required; this
+section records candidate evidence and does not claim published delivery.
+Owner GUI processes, engines, terminal programs and RDP sessions were preserved.
+
+## Input regression investigation — 2026-11-13
+
+Baseline: v0.4.74, `2da3e92368578017251ba40440842810ddbae93f`.
+An isolated native Wayland/real-PTY test reproduced an application-owned
+PRIMARY selection that could be pasted with the mouse but could not be copied
+with Ctrl+Shift+C. The candidate lets explicit keyboard copy promote that
+view's approved selection while retaining focus, pane, serial and ownership
+checks. New input, a new selection, focus loss and ownership changes invalidate
+it; Ctrl+C without a current selection remains an application interrupt.
+A delayed-IPC native negative control also reproduced an interrupt while an
+approved selection was loading; the candidate queues explicit copy until that
+bounded, same-pane response arrives.
+
+The candidate reserves Alt+M for Machines and Alt+digits for workspace tabs;
+other plain Alt letters pass to the application. Agents remains available from
+its button. Native input checks cover exact Alt+A/X/S bytes, keyboard copy,
+interrupt restoration and stale-selection refusal. Existing native word and
+Shift-selection coverage remains separate from physical hardware acceptance.
+
+Repeated GNOME RDP handovers remain under investigation. Read-only live
+metadata showed “GNOME handover limit reached”; corresponding server logs
+recorded transport failures and aborted handovers. This is not a verified
+inactivity timeout diagnosis. Keep bounded handover-loop protection and
+one-use redirect tokens; do not increase retries, restart live desktops or
+claim this input patch fixes the disconnections. The recovery counter may
+retain an earlier attempt after a view reconnects.
+
+These are candidate results, not a new publication or physical acceptance.
+The normal release controller and full exact-source gates still apply.
+
+## Source reconciliation — 2026-11-08
+
+Published baseline: v0.4.72, `da6b856b56b700157ad70c12d0dc422053200631`.
+Releases v0.4.57–v0.4.72 delivered remote Web Preview, palette frames,
+event-driven terminal wakeups, bounded clipboard/image paths, selection
+autoscroll and word selection, stable tabs, terminal recovery controls,
+source COPR packages and a portable CLI/DEB lane. The dated v0.4.56 assessment
+below is historical; its unshipped-feature statements are not the current backlog.
+
+The independent 2026-11-08 audit was source-only. Physical input, multi-host
+clipboard/RDP, endurance, a real Proxmox host and controller-owned GTK sizing
+remain separate acceptance work. The RSA advisory remains unsuppressed.
+Development patch releases continue through the existing controller and gates;
+remaining milestone acceptance is not a release freeze. Each candidate needs
+its own exact-source receipts and publication checks.
+
+Future shortcut evaluation: consider a short second-digit window for Alt+11,
+Alt+22 and similar access beyond ten tabs, while ordinary Alt+3 acts immediately.
+The precise mapping and accidental-repeat behavior need evaluation before coding.
+
+## Current source reconciliation — 2026-11-04
+
+Reviewed source: `338c53e40ae0ce12b530d8d64dc54eecd9638f58`. The tagged source baseline is
+v0.4.56, commit `a4be3f60dc12667e2e3bf5c727ba1b8b0ae7de7c`.
+This update reconciles source and retained evidence; it runs no new runtime,
+physical-device or external-host acceptance. Later release candidates require
+separate acceptance and publication checks.
+
+| Increment | Implemented / source evidence | Qualification boundary |
+| --- | --- | --- |
+| v0.4.53 | Non-sizing CLI/SSH viewer (`--viewer` / `-O`), canonical PTY preservation and older-daemon refusal; dependency maintenance. | Retained delivery at `9a8553788a1a683bab61e4dda28f251af5cd30ae`: 19 frozen categories, nine public assets, 28 actual-public runtime phases, nine selection cases, two offline Codex drafts and four companion suites. This supersedes the *unreleased candidate* wording in the dated v0.4.52 entry below. |
+| v0.4.54 | Claude Code image draft attachment; source-built Fedora/COPR packaging; retirement of competing per-user command links while keeping running engines. | Source changes exist. This reconciliation does not certify every provider, package upgrade or live installation. |
+| v0.4.55 | Copy machine action beside Save, opening the new copy for editing; remote Fedora installation/update through COPR. | Source behavior is documented in the changelog; real distribution and session-preserving upgrade acceptance remains distinct. |
+| v0.4.56 | DNF metadata refresh and repository restriction for remote package checks/updates. | The pinned cloud audit records published source and exact-commit quality/privacy success with the RSA advisory job failing separately. No fleet-wide or clean-security qualification follows. |
+| After v0.4.56 | Public CI invokes real-PTY viewer and older-daemon refusal fixtures; ordinary untagged pushes skip source publication; Claude paste supports older daemons and shortened ready footers. | Source at the reviewed commit contains these changes. Their presence is not a completed v0.4.57 release or a new public-artifact acceptance receipt. |
+
+The [viewer contract](RUWAC_VIEWER_SIZING.md) distinguishes hosted real-PTY gates
+from the separately qualified authenticated SSH fixture. A viewer accepts input:
+it excludes sizing votes and is not an authorization barrier. Desktop viewer
+controls, controller takeover/release and pan/fit remain open.
+
+Remaining work is ordered in the [cloud work plan](RUWAC_CLOUD_WORK_PLAN_2026-11-04.md).
+Remote-service dialog and typing instrumentation have separate maintainer branches;
+do not duplicate them or describe them as shipped. Generic cross-machine Wayland
+PRIMARY, physical/external clipboard and input, endurance, complete distribution
+qualification and the unsuppressed RSA finding remain open. Preserve the dated
+receipts below; their candidate statements describe their original checkpoints.
+
+## Released v0.4.52 — reconciled 2026-10-31
+
+Commit `fca85c5ec0bc5a22a1895d363458fc9e025bb940` completed all 19 frozen
+categories, nine public-asset checks, 25 actual-public runtime phases, nine
+selection-delay/cancellation cases, two offline Codex draft-image cases and four
+companion suites. Six guarded installations preserved configurations and live
+process identities; final fixture and bounded-unit checks on seven hosts passed.
+See the [v0.4.52 release](https://github.com/w3fans/RUWAC/releases/tag/v0.4.52).
+
+This release includes queued RDP wheel impulses, asynchronous history-copy
+intents with context/timeout/size refusal, healthy-terminal advisory indicators
+and exact-version release-note guards. Physical-device, external Windows,
+busy-output/target-change and endurance qualification remain separate. The known
+RSA advisory remains unsuppressed; this is not a clean security qualification.
+
+The next unreleased candidate adds explicit non-sizing CLI/SSH viewers and
+updates crypto-bigint/ctutils. Sixteen real PTY/TUI cases, three authenticated SSH
+cases, published-v0.4.52 compatibility refusal, headless/desktop units and focused
+focus/style/recovery/nesting/projection regressions pass. Its complete frozen
+gate, public artifacts and installation qualification have not run. These
+candidate results do not establish a new delivered release or full controller
+sizing. See [viewer scope](RUWAC_VIEWER_SIZING.md).
+
+## Released v0.4.51 — reconciled 2026-10-29
+
+Exact commit `dba654e86a738299e51f26a6f32d37ea8e787012` completed all
+19 frozen acceptance categories. Nine downloaded public assets passed checksum,
+provenance and packaging qualification. The downloaded binaries passed 24 runtime
+phases, two actual offline Codex draft-image cases and four companion suites.
+Six scoped installations preserved configurations and then-current live process
+identities. Final fixture and bounded-unit scans on seven hosts were clear.
+
+The new projection regression covers seven cases, including hidden-pane output,
+visible output and explicit/stale refresh. The same hidden-output assertion fails
+against released v0.4.50. A controlled 19-pane/four-client workload measured quiet
+render traffic falling from 4.65 MB/s to 3.4 KB/s; checkpoint writes did not improve.
+Generated Mutter tests additionally exercised held-Shift drag with smooth and
+discrete wheel events in both directions on the released v0.4.50 GUI. This is
+isolated native input, not an owner physical-device or fast-release-delay pass.
+Older canonical history still contains text/wrap metadata rather than full styles.
+
+Hosted [quality/privacy](https://github.com/w3fans/RUWAC/actions/runs/40955489364)
+and [tagged build](https://github.com/w3fans/RUWAC/actions/runs/40955489060)
+passed for this commit. The advisory job failed separately on known RSA0071;
+maintenance and yanked-version warnings remain recorded. libz-sys 1.1.31 fixes
+the newly detected RUSTSEC-2026-0418. No RSA reachability proof, clean security
+qualification, physical gesture matrix, external Windows pass or endurance pass
+is implied. See the [v0.4.51 release](https://github.com/w3fans/RUWAC/releases/tag/v0.4.51).
+
+The [2026-10-29 audit response](RUWAC_AUDIT_RESPONSE_2026-10-29.md)
+tracks remaining findings. Later code changes require their own qualification;
+this receipt does not qualify an unreleased candidate.
+
+
 Public results summarize qualification without publishing host identities, accounts,
 network topology, credential references or operational troubleshooting. Detailed
 receipts and original reports are archived privately outside Git.
+
+## Delivered v0.4.43 — reconciled 2026-10-25
+
+Commit `1d49ae20a1e0b42be3312171fe9ee50da513c012` passed all nineteen
+required frozen categories, integrity/provenance checks for all nine public assets,
+and twelve runtime phases on actual published binaries. The runtime phases cover
+headless operation, sessions, native clipboard/tab/reconnect behavior, PRIMARY
+epochs, original-endpoint routing, packaging reproducibility, terminal ergonomics,
+Web Preview, SSH Web Preview, RDP clipboard ordering, new-terminal desktop
+environment and image paste. Qualified installations preserved configurations and
+existing GUI, daemon and terminal process identities; GUIs need reopening to load
+the installed update. These results qualify the scoped release, not the whole
+product requirements ledger.
+
+The optional native GNOME Shell 50 selection companion additionally passed managed
+installation (28 checks), Unicode (21), ownership guards (33), startup failures
+(11) and standalone package/schema checks against the final local and actual
+published binaries. Counts overlap. This uses isolated compositors, generated
+peers, authenticated loopback SSH/RDP and explicit remote GTK input relays. It does
+not prove the physical or external-host clipboard matrix. Account publication
+permission and per-connection approval remain explicit; installation does not
+enable them automatically.
+
+Owner feedback confirms scrolling, terminal-tab selection paste and automatic
+GNOME sign-in after reopening v0.4.40, and screenshot paste into Codex in a fresh
+desktop-launched v0.4.42 shell. These are specific journeys, not blanket acceptance.
+One isolated native Ctrl+V run received no payload; the unchanged focused retry and
+actual-public suite passed. The original failure remains retained with cause
+unresolved. An earlier prototype SessionMode restoration refusal also remains
+tracked; later successful isolated cycles do not establish its cause.
+
+Physical input/clipboard-manager timing, actual cross-machine application PRIMARY,
+external Windows interoperability, controlled recovery cycles, the segmented
+one-hour soak and the observed development workflow remain open. The RSA advisory
+is unsuppressed. Hosted quality, privacy and release-build jobs passed for this
+commit; the advisory job failed separately. See the
+[v0.4.43 release](https://github.com/w3fans/RUWAC/releases/tag/v0.4.43).
+
+The older sections below retain their original evidence scope. References to an
+unreleased epoch or native-selection candidate are historical and do not undo
+later release receipts; they also cannot qualify later changed code.
+
+## Released v0.4.40 baseline — reconciled 2026-10-24
+
+Commit `5b62c3404397bd7591e5f5c9351a77ff96178619` completed all nineteen
+required frozen acceptance categories. All nine published assets passed integrity,
+provenance and installation qualification; nine actual-public runtime phases
+passed, including terminal ergonomics, RDP clipboard ordering and native Web Preview
+with original-SSH routing. The eight terminal ergonomics cases cover full-screen
+wheel up/down, click-only mouse mode and offset splits as well as clipboard/SIGINT
+and inline history. These are generated native input and authenticated fixtures,
+not a physical keyboard/touchpad or external-provider conversation pass.
+
+Actual owner external GNOME sign-in, Windows interoperability, physical Wayland
+input, clipboard-manager persistence and generic cross-host Wayland PRIMARY
+injection remain unqualified. The RSA advisory remains unresolved; see
+[dependency security](RUWAC_DEPENDENCY_SECURITY.md). Reopening after installation
+loads the new GUI while preserving daemon-owned terminal processes; reconnecting
+RDP after reopening is an accepted boundary.
+
+New changes after this baseline require their own frozen acceptance and public
+artifact qualification. In particular, the current remote-selection epoch fix is
+development work, not part of the v0.4.40 receipt.
+
+## Historical prepublication notes and earlier evidence
+
+The notes below retain what was known before v0.4.40's final release. References
+to a changed candidate or a run still required are historical and do not undo the
+completed baseline above. They also cannot qualify a later changed candidate.
+
+Prior published baseline (2026-10-23): v0.4.39, commit
+`8e792df38731a1b6c11a9896f965ca33de4023b2`, completed all 16 required frozen
+local gate categories, retained 72 runtime/artifact groups, and verified all nine
+published assets and their install/runtime qualification. This is scoped operational
+qualification, including generated/authenticated loopback input. Physical cross-host
+selection paste, real clipboard-manager persistence and the reported external GNOME
+login remain unconfirmed. The advisory job reported three vulnerabilities on that
+release; see the dependency security ledger. Its source and installed artifacts are
+available on the [v0.4.39 release page](https://github.com/w3fans/RUWAC/releases/tag/v0.4.39).
+
+The terminal/clipboard/Web Preview development candidate has changed beyond that
+release. Historical evidence below does not qualify it: a new complete frozen run
+and the additional interaction/browser checks are required before publication.
+The current gate adds `terminal-desktop-ergonomics`, `rdp-clipboard-ordering`
+and `web-preview` to the historical requirements. These require executed
+keyboard/inline-scroll, clipboard event-order/backpressure, and native browser
+plus original-SSH preview evidence. Current preflight includes 194 desktop
+unit/transport tests, native terminal key/scroll checks, and real WebKit/OpenSSH
+HTTP/WebSocket lifecycle checks. A complete source/binary-frozen run remains
+mandatory; passing preflight or older GNOME reconnection checks cannot substitute
+for that run. The release adapter refuses publication without all nineteen gates.
+
+Native terminal preflight also reproduces and fixes dropped wheel events in a
+full-screen mouse-reporting PTY application: wheel up/down, click-only mouse mode
+and a right-hand mixed split require exact widget-local coordinates. The failing
+baseline received pointer motion but no wheel input. The corrected eight-check
+terminal suite passes; this is generated application input, not an authenticated
+provider conversation or physical touchpad acceptance.
+
+The Web fixtures use an owned Mutter compositor, native GDK keyboard/pointer
+callbacks, real WebKit pages and generated OpenSSH identities. Two generated SSH
+servers on one fixture host advertise the same loopback port through a test-only
+process-local port translation. This proves connection/origin isolation, not a
+separate-machine or physical-input result. Checks cover browser/terminal
+clipboard and Ctrl+L isolation, mixed splits, ephemeral storage, explicit
+restoration, changed-profile cancellation and stale-forward refusal. Closing a
+preview preserves its original SSH PTY. Physical clipboard-manager persistence,
+external HTTPS development servers and the complete physical-input matrix remain
+separate qualification limits.
 
 Stabilization reconciliation (2026-10-20): this table retains historical evidence
 through v0.4.31; historical PASS rows do not qualify the changed candidate.

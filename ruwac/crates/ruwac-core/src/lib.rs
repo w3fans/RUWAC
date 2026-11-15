@@ -3,6 +3,7 @@ mod jobs;
 mod layout;
 mod paste;
 mod recovery;
+mod viewer;
 use layout::{Layout, Rect};
 pub use recovery::Store;
 use ruwac_protocol::{Error, Request, Result, checked_text, id, target, text};
@@ -17,6 +18,7 @@ struct Pane {
     pty: Option<Pty>,
     exit_code: Option<u32>,
     term: Terminal,
+    checkpoint: Option<(u64, std::sync::Arc<ruwac_term::Archive>)>,
     ended: bool,
     foreground: Option<i32>,
     job: Option<jobs::Job>,
@@ -68,8 +70,12 @@ impl Session {
     }
 }
 struct Client {
+    // Last full projection, excluding the daemon-wide output revision. Other
+    // sessions can advance that revision without changing this client's view.
+    render_stamp: Option<(u64, Value)>,
     paste: Option<paste::Upload>,
     scope: String,
+    non_sizing: bool,
     session: String,
     rows: u16,
     cols: u16,
@@ -166,13 +172,26 @@ pub fn start_with_store(store: Option<Store>) -> std::io::Result<Handle> {
             };
             match m {
                 Message::Call(r, c, reply) => {
-                    let answer = if matches!(r.method.as_str(), "daemon.checkpoint" | "daemon.stop")
-                        && r.version == 0
+                    let control = r.version == 0
                         && (r.params.is_object() || r.params.is_null())
-                        && r.idempotency_key.is_none()
+                        && r.idempotency_key.is_none();
+                    // Safe retirement is decided inside this serialized actor, so no
+                    // session/window/pane creation can interleave with the check.
+                    let busy = (r.method == "daemon.stopIfIdle" && control)
+                        .then(|| s.busy_for_stop(&c))
+                        .flatten();
+                    let answer = if let Some(busy) = busy {
+                        Err(busy)
+                    } else if matches!(
+                        r.method.as_str(),
+                        "daemon.checkpoint" | "daemon.stop" | "daemon.stopIfIdle"
+                    ) && control
                     {
+                        let ended = s.panes.len();
                         match s.checkpoint().await {
-                            Ok(()) => Ok(if r.method == "daemon.stop" {
+                            Ok(()) => Ok(if r.method == "daemon.stopIfIdle" {
+                                json!({"stopped":true,"live_panes":0,"ended_panes":ended,"attached_clients":0,"checkpoint_revision":s.checkpoint_revision})
+                            } else if r.method == "daemon.stop" {
                                 json!({"stopped":true})
                             } else {
                                 json!({"checkpointed":true,"revision":s.checkpoint_revision})
@@ -182,7 +201,8 @@ pub fn start_with_store(store: Option<Store>) -> std::io::Result<Handle> {
                     } else {
                         s.call(&r, &c)
                     };
-                    let stop = r.method == "daemon.stop" && answer.is_ok();
+                    let stop = matches!(r.method.as_str(), "daemon.stop" | "daemon.stopIfIdle")
+                        && answer.is_ok();
                     let _ = reply.send(answer);
                     if !matches!(
                         r.method.as_str(),
@@ -204,6 +224,7 @@ pub fn start_with_store(store: Option<Store>) -> std::io::Result<Handle> {
                             | "pane.capture"
                             | "pane.wait"
                             | "buffer.get"
+                            | "pane.selection"
                             | "client.render"
                     ) {
                         s.revision += 1;
@@ -253,7 +274,9 @@ pub fn start_with_store(store: Option<Store>) -> std::io::Result<Handle> {
                 Message::Disconnect(c) => {
                     s.histories.retain(|_, pin| pin.owner != c);
                     if let Some(c) = s.clients.remove(&c) {
-                        s.layout(&c.session);
+                        if !c.non_sizing {
+                            s.layout(&c.session);
+                        }
                         s.revision += 1;
                         let _ = rev.send(s.revision);
                     }
@@ -311,6 +334,16 @@ impl State {
         if !r.params.is_object() && !r.params.is_null() {
             return Err(Error::new("INVALID_PARAMS", "params must be an object"));
         }
+        if r.idempotency_key
+            .as_ref()
+            .is_some_and(|k| k.is_empty() || k.len() > 128)
+        {
+            return Err(Error::new(
+                "INVALID_PARAMS",
+                "idempotency key must be 1..128 bytes",
+            ));
+        }
+        self.check_viewer(&r.method, &r.params, client)?;
         if let Some(k) = &r.idempotency_key {
             if k.is_empty() || k.len() > 128 {
                 return Err(Error::new(
@@ -331,6 +364,7 @@ impl State {
                     | "pane.history.freeze"
                     | "pane.history.release"
                     | "daemon.stop"
+                    | "daemon.stopIfIdle"
                     | "daemon.checkpoint"
             ) || (r.method == "pane.history" && r.params.get("snapshot").is_some())
             {
@@ -403,6 +437,7 @@ impl State {
                 pty: Some(pty),
                 exit_code: None,
                 term: Terminal::new(rows, cols),
+                checkpoint: None,
                 ended: false,
             },
         );
@@ -459,10 +494,12 @@ impl State {
             .unwrap_or(window.zoom)
     }
     fn select_client_window(&mut self, client: &str, session: &str, window: &str) {
-        self.sessions
-            .get_mut(session)
-            .unwrap()
-            .select_window(window.into());
+        if !self.is_viewer(client, session) {
+            self.sessions
+                .get_mut(session)
+                .unwrap()
+                .select_window(window.into());
+        }
         if let Some(c) = self
             .clients
             .get_mut(client)
@@ -510,9 +547,19 @@ impl State {
         let sizes: Vec<_> = self
             .clients
             .values()
-            .filter(|c| c.session == s)
+            .filter(|c| c.session == s && !c.non_sizing)
             .map(|c| (c.rows, c.cols))
             .collect();
+        // With only viewers, preserve the last per-pane size, including a
+        // former sizing client's local zoom. Viewers cannot restore defaults.
+        if sizes.is_empty()
+            && self
+                .clients
+                .values()
+                .any(|c| c.session == s && c.non_sizing)
+        {
+            return;
+        }
         let Some(session) = self.sessions.get_mut(s) else {
             return;
         };
@@ -537,7 +584,7 @@ impl State {
             let viewers: Vec<_> = self
                 .clients
                 .values()
-                .filter(|c| c.session == s && c.window == w.id)
+                .filter(|c| c.session == s && c.window == w.id && !c.non_sizing)
                 .collect();
             if viewers.is_empty() {
                 if w.zoom {
@@ -566,11 +613,15 @@ impl State {
             }
             for (id, r) in minimum {
                 if let Some(p) = self.panes.get_mut(&id) {
-                    if p.term.rows != r.rows || p.term.cols != r.cols {
+                    // Split rectangles may be one column wide. Keep the PTY and
+                    // emulator in agreement at the library's Unicode minimum;
+                    // clients clip the larger grid to the visible rectangle.
+                    let cols = r.cols.max(ruwac_term::MIN_COLUMNS);
+                    if p.term.rows != r.rows || p.term.cols != cols {
                         if let Some(pty) = &p.pty {
-                            let _ = pty.resize(r.rows, r.cols);
+                            let _ = pty.resize(r.rows, cols);
                         }
-                        p.term.resize(r.rows, r.cols);
+                        p.term.resize(r.rows, cols);
                     }
                 }
             }
@@ -656,19 +707,19 @@ impl State {
     fn dispatch(&mut self, m: &str, v: &Value, client: &str) -> Result<Value> {
         match m {
             "health" => Ok(
-                json!({"ok":true,"panes":self.panes.len(),"clients":self.clients.len(),"revision":self.revision,"history_snapshots":self.histories.len(),"history_snapshot_text_bytes":self.histories.values().map(|p|p.data.bytes).sum::<usize>(),"persistence":{"enabled":self.store.is_some(),"checkpoint_revision":self.checkpoint_revision,"pending":self.checkpoint_pending,"error":self.checkpoint_error,"interval_ms":2000}}),
+                json!({"ok":true,"pid":std::process::id(),"panes":self.panes.len(),"live_panes":self.live_panes(),"ended_panes":self.panes.len()-self.live_panes(),"clients":self.clients.len(),"safe_stop":true,"revision":self.revision,"history_snapshots":self.histories.len(),"history_snapshot_text_bytes":self.histories.values().map(|p|p.data.bytes).sum::<usize>(),"persistence":{"enabled":self.store.is_some(),"checkpoint_revision":self.checkpoint_revision,"pending":self.checkpoint_pending,"error":self.checkpoint_error,"interval_ms":2000}}),
             ),
             "version" => Ok(
                 json!({"name":"ruwac","implementation":"spike","package":env!("CARGO_PKG_VERSION"),"protocol":0}),
             ),
             "capabilities" => Ok(
-                json!({"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"job_metadata":true,"job_metadata_no_argv":true,"structured_agent_state":false,"recovery":self.store.is_some(),"primary_buffer_history":true,"extended_terminal_styles":true,"kitty_keyboard_input":false,"history_checkpoints":"private canonical active and hidden primary tail, 50000 lines or 512 KiB per pane; processes restore ended","desktop_clipboard":false,"primary":false,"graphics":false,"image_attachment":true,"image_attachment_adapters":["codex draft path"],"image_attachment_submits":false,"ssh_transport":"authenticated OpenSSH through CLI --host","shared_focus":false,"independent_client_focus":true,"pane_divider_cells":true,"client_zoom":true,"atomic_paste":true,"max_paste_bytes":paste::MAX_BYTES,"pty_sizing":"minimum session dimensions and minimum visible pane size across attached clients","split":"persistent horizontal/vertical tree, sixteen panes","capture_limit":2000,"history_page_limit":500,"scrollback_default":50000,"max_text_bytes":ruwac_protocol::MAX_TEXT}),
+                json!({"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"render_cell_encodings":["palette-v1"],"job_metadata":true,"job_metadata_no_argv":true,"structured_agent_state":false,"recovery":self.store.is_some(),"primary_buffer_history":true,"extended_terminal_styles":true,"kitty_keyboard_input":false,"history_checkpoints":"private canonical active and hidden primary tail, 50000 lines or 512 KiB per pane; processes restore ended","desktop_clipboard":false,"primary":false,"graphics":false,"image_attachment":true,"image_attachment_adapters":["codex draft path"],"image_attachment_submits":false,"ssh_transport":"authenticated OpenSSH through CLI --host","shared_focus":false,"independent_client_focus":true,"non_sizing_viewer":1,"pane_divider_cells":true,"client_zoom":true,"atomic_paste":true,"safe_stop":"daemon.stopIfIdle","max_paste_bytes":paste::MAX_BYTES,"pty_sizing":"minimum sizing-client dimensions and visible pane sizes; explicit non-sizing viewers never vote","split":"persistent horizontal/vertical tree, sixteen panes","capture_limit":2000,"capture_formats":["plain","ansi"],"ansi_capture_max_bytes":65536,"history_page_limit":500,"history_style_encoding":"runs-v1","scrollback_default":50000,"max_text_bytes":ruwac_protocol::MAX_TEXT}),
             ),
             "schema" => Ok(schema()),
             "describe" => Ok(
                 json!({"protocol":0,"native_describe":true,"schema":schema(),"capabilities":self.dispatch("capabilities",v,client)?,"version":self.dispatch("version",v,client)?,"transport":{"local":"same-UID authenticated Unix socket","remote":"OpenSSH --host, explicit targets, verified host key","gui":"independent optional service; not owned by the headless daemon"}}),
             ),
-            "daemon.stop" | "daemon.checkpoint" => Err(Error::new(
+            "daemon.stop" | "daemon.stopIfIdle" | "daemon.checkpoint" => Err(Error::new(
                 "INVALID_PARAMS",
                 "checkpoint/stop do not accept idempotency keys",
             )),
@@ -714,12 +765,20 @@ impl State {
                     return Err(Error::new("STALE_ID", "session does not exist"));
                 }
                 let (rows, cols) = terminal_dimensions(v)?;
-                if let Some(old) = self.clients.remove(client) {
-                    self.layout(&old.session);
+                let non_sizing = viewer::role(v)?;
+                // Replace atomically: removing the sole old attachment first
+                // must not transiently restore a zoomed pane's shared defaults.
+                let old = self.clients.remove(client);
+                if let Some(old) = &old {
+                    if old.session != s && !old.non_sizing {
+                        self.layout(&old.session);
+                    }
                 }
                 self.clients.insert(
                     client.into(),
                     Client {
+                        render_stamp: None,
+                        non_sizing,
                         paste: None,
                         scope: id("display"),
                         session: s.clone(),
@@ -740,12 +799,16 @@ impl State {
                     },
                 );
                 self.layout(&s);
-                Ok(json!({"client":client,"session":s}))
+                Ok(
+                    json!({"client":client,"session":s,"size_role":if non_sizing {"viewer"} else {"legacy"},"canonical_rows":self.sessions[&s].rows,"canonical_cols":self.sessions[&s].cols}),
+                )
             }
             "session.detach" => {
                 self.histories.retain(|_, pin| pin.owner != client);
                 if let Some(c) = self.clients.remove(client) {
-                    self.layout(&c.session);
+                    if !c.non_sizing {
+                        self.layout(&c.session);
+                    }
                 }
                 Ok(json!({"detached":true}))
             }
@@ -924,8 +987,10 @@ impl State {
                 let p = self.pane(v)?;
                 let id = p.id.clone();
                 let w = p.window.clone();
-                self.windows.get_mut(&w).unwrap().active = id.clone();
                 let session = self.windows[&w].session.clone();
+                if !self.is_viewer(client, &session) {
+                    self.windows.get_mut(&w).unwrap().active = id.clone();
+                }
                 if let Some(c) = self
                     .clients
                     .get_mut(client)
@@ -943,7 +1008,13 @@ impl State {
                     .get_mut(&id)
                     .ok_or_else(|| Error::new("STALE_ID", "window does not exist"))?;
                 if let Some(zoom) = v.get("zoom").and_then(Value::as_bool) {
-                    w.zoom = zoom;
+                    if !self
+                        .clients
+                        .get(client)
+                        .is_some_and(|c| c.non_sizing && c.session == w.session)
+                    {
+                        w.zoom = zoom;
+                    }
                     if let Some(c) = self
                         .clients
                         .get_mut(client)
@@ -978,7 +1049,24 @@ impl State {
                 }
                 let p = self.pane(v)?;
                 let pane = p.id.clone();
-                let data = if primary_buffer(v)? {
+                let styled = v
+                    .get("styles")
+                    .map(|v| {
+                        v.as_bool()
+                            .ok_or_else(|| Error::new("INVALID_PARAMS", "styles must be a boolean"))
+                    })
+                    .transpose()?
+                    .unwrap_or(false);
+                let data = if styled {
+                    p.term
+                        .freeze_styled_history(primary_buffer(v)?)
+                        .ok_or_else(|| {
+                            Error::new(
+                                "BUFFER_UNAVAILABLE",
+                                "Legacy checkpoint has no primary buffer",
+                            )
+                        })?
+                } else if primary_buffer(v)? {
                     p.term.freeze_primary_history().ok_or_else(|| {
                         Error::new(
                             "BUFFER_UNAVAILABLE",
@@ -1094,12 +1182,35 @@ impl State {
                 } else {
                     p.term.capture(n as usize)
                 };
+                let format = match v.get("format") {
+                    None => "plain",
+                    Some(Value::String(s)) => s.as_str(),
+                    _ => {
+                        return Err(Error::new(
+                            "INVALID_PARAMS",
+                            "Capture format must be a string",
+                        ));
+                    }
+                };
+                if format != "plain" && (format != "ansi" || m != "pane.capture") {
+                    return Err(Error::new(
+                        "INVALID_PARAMS",
+                        "Capture format must be plain or ansi; pane.wait remains plain",
+                    ));
+                }
                 let matched = v
                     .get("contains")
                     .and_then(Value::as_str)
                     .map(|s| t.contains(s));
+                let t = if format == "ansi" {
+                    p.term.capture_ansi(n as usize, primary).ok_or_else(|| {
+                        Error::new("BUFFER_UNAVAILABLE", "Primary buffer is unavailable")
+                    })?
+                } else {
+                    t
+                };
                 Ok(
-                    json!({"pane":p.id,"text":t,"lines":t.lines().count(),"matched":matched,"ended":p.ended,"buffer":if primary {"primary"}else{"active"}}),
+                    json!({"pane":p.id,"text":t,"lines":t.lines().count(),"matched":matched,"ended":p.ended,"buffer":if primary {"primary"}else{"active"},"format":format}),
                 )
             }
             "pane.sendText" => {
@@ -1159,6 +1270,44 @@ impl State {
                     .ok_or_else(|| Error::new("STALE_ID", "session does not exist"))?;
                 Ok(json!({"text":s.buffer}))
             }
+            // OSC 52 PRIMARY from a program (e.g. a nested RUWAC client's mouse
+            // selection). The desktop fetches/answers only behind a user gesture.
+            "pane.selection" => {
+                let p = self.pane(v)?;
+                let serial = v["serial"]
+                    .as_u64()
+                    .ok_or_else(|| Error::new("INVALID_PARAMS", "serial must be an integer"))?;
+                let text = p
+                    .term
+                    .selection_offer(serial)
+                    .ok_or_else(|| Error::new("STALE_ID", "selection offer replaced"))?;
+                Ok(json!({"text":text}))
+            }
+            "pane.selectionReply" => {
+                let id = target(v, "pane", "pane")?;
+                let serial = v["serial"]
+                    .as_u64()
+                    .ok_or_else(|| Error::new("INVALID_PARAMS", "serial must be an integer"))?;
+                let t = text(v, "text")?;
+                if t.len() > ruwac_term::MAX_SELECTION || t.contains('\0') {
+                    return Err(Error::new(
+                        "LIMIT",
+                        "selection exceeds 128 KiB or contains NUL",
+                    ));
+                }
+                let p = self
+                    .panes
+                    .get_mut(&id)
+                    .ok_or_else(|| Error::new("STALE_ID", "pane does not exist"))?;
+                let reply = p
+                    .term
+                    .selection_reply(serial, &t)
+                    .ok_or_else(|| Error::new("STALE_ID", "selection request replaced"))?;
+                p.live_pty()?
+                    .send(reply.into_bytes())
+                    .map_err(|e| Error::new("BACKPRESSURE", e))?;
+                Ok(json!({"queued":true}))
+            }
             "buffer.paste" => {
                 let p = self.pane(v)?;
                 let w = &self.windows[&p.window];
@@ -1184,10 +1333,18 @@ impl State {
                 c.rows = rows;
                 c.cols = cols;
                 let s = c.session.clone();
-                self.layout(&s);
-                Ok(json!({"resized":true}))
+                let non_sizing = c.non_sizing;
+                if !non_sizing {
+                    self.layout(&s);
+                }
+                Ok(json!({"resized":!non_sizing,"viewport_resized":non_sizing}))
             }
             "client.render" => {
+                let compact = match v.get("cell_encoding") {
+                    None => false,
+                    Some(Value::String(s)) if s == "palette-v1" => true,
+                    _ => return Err(Error::new("INVALID_PARAMS", "Unknown render cell encoding")),
+                };
                 for p in self.panes.values_mut() {
                     let group = p.pty.as_ref().and_then(Pty::foreground_group);
                     if group != p.foreground {
@@ -1204,7 +1361,11 @@ impl State {
                 let w = &self.windows[&c.window];
                 let active = self.focused_pane(client, w);
                 let zoom = self.focused_zoom(client, w);
-                if v.get("revision").and_then(Value::as_u64) == Some(self.revision) {
+                if v.get("revision").and_then(Value::as_u64) == Some(self.revision)
+                    && c.render_stamp
+                        .as_ref()
+                        .is_some_and(|(_, stamp)| stamp["compact_cells"] == compact)
+                {
                     return Ok(json!({"revision":self.revision,"unchanged":true}));
                 }
                 let mut rects = Vec::new();
@@ -1229,10 +1390,48 @@ impl State {
                         &mut rects,
                     );
                 }
-                let panes=rects.iter().filter_map(|(id,r)|self.panes.get(id).map(|p|json!({"id":p.id,"grid":p.term.snapshot(),"ended":p.ended,"restored":p.pty.is_none(),"exit_code":p.exit_code.or_else(||p.pty.as_ref().and_then(Pty::exit_code)),"rect":{"x":r.x,"y":r.y,"rows":r.rows,"cols":r.cols}}))).collect::<Vec<_>>();
-                Ok(
-                    json!({"revision":self.revision,"session":s.id,"session_name":s.name,"window":w.id,"window_index":s.windows.iter().position(|id|id==&w.id),"windows":s.windows.iter().filter_map(|id|self.windows.get(id)).enumerate().map(|(index,w)|json!({"id":w.id,"index":index,"name":w.name})).collect::<Vec<_>>(),"name":w.name,"rows":s.rows,"cols":s.cols,"active_pane":active,"layout":w.layout.json(),"zoom":zoom,"panes":panes}),
-                )
+                // Independent zoomers can leave several canonical grids at full
+                // size. A non-sizing projection may show all of them. Keep the
+                // established plain response rather than exceeding the shared
+                // palette decoder's aggregate expansion budget.
+                let compact = compact
+                    && rects
+                        .iter()
+                        .filter_map(|(id, _)| self.panes.get(id))
+                        .map(|p| p.term.rows as usize * p.term.cols as usize)
+                        .sum::<usize>()
+                        <= ruwac_protocol::TerminalLimits::CURRENT.cells;
+                // This is deliberately metadata-only: no cell matrix is built
+                // or retained for a quiet view when a hidden pane emits output.
+                // Include every field of the projected frame and each visible
+                // terminal's epoch, foreground identity and selection serials.
+                let stamp = json!({
+                    "compact_cells":compact,
+                    "session":s.id,"session_name":s.name,"window":w.id,
+                    "window_index":s.windows.iter().position(|id|id==&w.id),
+                    "windows":s.windows.iter().filter_map(|id|self.windows.get(id)).enumerate().map(|(index,w)|json!({"id":w.id,"index":index,"name":w.name})).collect::<Vec<_>>(),
+                    "name":w.name,"rows":s.rows,"cols":s.cols,"active_pane":active,
+                    "layout":w.layout.json(),"zoom":zoom,"size_role":if c.non_sizing {"viewer"} else {"legacy"},"viewport":{"rows":c.rows,"cols":c.cols},
+                    "panes":rects.iter().filter_map(|(id,r)|self.panes.get(id).map(|p|json!({
+                        "id":p.id,"epoch":p.term.history_epoch,"foreground":p.foreground,
+                        "selection":p.term.selection_serials(),"ended":p.ended,
+                        "restored":p.pty.is_none(),"exit_code":p.exit_code.or_else(||p.pty.as_ref().and_then(Pty::exit_code)),
+                        "rect":{"x":r.x,"y":r.y,"rows":r.rows,"cols":r.cols}
+                    }))).collect::<Vec<_>>()
+                });
+                if c.render_stamp.as_ref().is_some_and(|(base, previous)| {
+                    v.get("revision")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|requested| {
+                            requested >= *base && requested <= self.revision && previous == &stamp
+                        })
+                }) {
+                    return Ok(json!({"revision":self.revision,"unchanged":true}));
+                }
+                let panes=rects.iter().filter_map(|(id,r)|self.panes.get(id).map(|p|json!({"id":p.id,"grid":p.term.render_snapshot(compact),"selection_offer":p.term.selection_serials().0,"selection_request":p.term.selection_serials().1,"ended":p.ended,"restored":p.pty.is_none(),"exit_code":p.exit_code.or_else(||p.pty.as_ref().and_then(Pty::exit_code)),"rect":{"x":r.x,"y":r.y,"rows":r.rows,"cols":r.cols}}))).collect::<Vec<_>>();
+                let frame = json!({"revision":self.revision,"session":s.id,"session_name":s.name,"window":w.id,"window_index":s.windows.iter().position(|id|id==&w.id),"windows":s.windows.iter().filter_map(|id|self.windows.get(id)).enumerate().map(|(index,w)|json!({"id":w.id,"index":index,"name":w.name})).collect::<Vec<_>>(),"name":w.name,"rows":s.rows,"cols":s.cols,"active_pane":active,"layout":w.layout.json(),"zoom":zoom,"size_role":if c.non_sizing {"viewer"} else {"legacy"},"viewport":{"rows":c.rows,"cols":c.cols},"panes":panes});
+                self.clients.get_mut(client).unwrap().render_stamp = Some((self.revision, stamp));
+                Ok(frame)
             }
 
             "client.paste" => self.paste(v, client),
@@ -1313,7 +1512,7 @@ impl State {
     }
 }
 pub fn schema() -> Value {
-    json!({"protocol":0,"framing":"u32 big-endian byte length + UTF-8 JSON","max_frame_bytes":ruwac_protocol::MAX_FRAME,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"methods":["job.list","job.query","agent.probe","health","version","capabilities","schema","describe","session.create","session.list","session.attach","session.detach","window.create","window.list","window.rename","window.select","window.cycle","window.previous","pane.create","pane.layout","pane.history","pane.history.freeze","pane.history.release","pane.close","pane.list","pane.select","pane.attachImage","pane.sendText","pane.sendKey","pane.capture","pane.wait","buffer.set","buffer.get","buffer.paste","client.resize","client.render","client.input","client.paste","events.subscribe","daemon.checkpoint","daemon.stop"],"targets":{"session":"session_ + 32 hex","window":"window_ + 32 hex","pane":"pane_ + 32 hex"},"request":{"version":0,"id":"JSON request correlation value","method":"method name","params":"object","idempotency_key":"optional 1..128 byte daemon-lifetime key"}})
+    json!({"protocol":0,"framing":"u32 big-endian byte length + UTF-8 JSON","max_frame_bytes":ruwac_protocol::MAX_FRAME,"max_render_response_bytes":ruwac_protocol::MAX_RENDER_FRAME,"terminal_size_limits":ruwac_protocol::TerminalLimits::CURRENT,"methods":["job.list","job.query","agent.probe","health","version","capabilities","schema","describe","session.create","session.list","session.attach","session.detach","window.create","window.list","window.rename","window.select","window.cycle","window.previous","pane.create","pane.layout","pane.history","pane.history.freeze","pane.history.release","pane.close","pane.list","pane.select","pane.attachImage","pane.sendText","pane.sendKey","pane.capture","pane.wait","pane.selection","pane.selectionReply","buffer.set","buffer.get","buffer.paste","client.resize","client.render","client.input","client.paste","events.subscribe","daemon.checkpoint","daemon.stop","daemon.stopIfIdle"],"targets":{"session":"session_ + 32 hex","window":"window_ + 32 hex","pane":"pane_ + 32 hex"},"request":{"version":0,"id":"JSON request correlation value","method":"method name","params":"object","idempotency_key":"optional 1..128 byte daemon-lifetime key"}})
 }
 
 fn primary_buffer(v: &Value) -> std::result::Result<bool, Error> {
@@ -1325,5 +1524,29 @@ fn primary_buffer(v: &Value) -> std::result::Result<bool, Error> {
             "INVALID_PARAMS",
             "buffer must be active or primary",
         )),
+    }
+}
+
+impl State {
+    /// A pane is live while it owns a PTY whose exit has not been processed.
+    fn live_panes(&self) -> usize {
+        self.panes
+            .values()
+            .filter(|p| !p.ended && p.pty.is_some())
+            .count()
+    }
+    /// Why `daemon.stopIfIdle` must refuse, if it must. Live PTYs always block
+    /// retirement; so does any attached client other than the requester.
+    fn busy_for_stop(&self, caller: &str) -> Option<Error> {
+        let live = self.live_panes();
+        let attached = self.clients.keys().filter(|c| c.as_str() != caller).count();
+        (live > 0 || attached > 0).then(|| {
+            Error::new(
+                "ENGINE_BUSY",
+                &format!(
+                    "engine not stopped: {live} live terminal(s), {attached} attached client(s)"
+                ),
+            )
+        })
     }
 }

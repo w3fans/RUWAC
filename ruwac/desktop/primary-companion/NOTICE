@@ -1,0 +1,7 @@
+RUWAC mouse selection companion
+Part of RUWAC: https://github.com/w3fans/RUWAC
+
+Distributed under the Apache License, Version 2.0. See LICENSE.
+
+GNOME Shell, GJS, GLib and GTK are runtime dependencies. Their implementations
+are not bundled in this companion archive.

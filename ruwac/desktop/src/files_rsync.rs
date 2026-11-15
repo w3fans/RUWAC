@@ -888,6 +888,9 @@ fn progress_line(line: &[u8], progress: &AtomicU64) {
         let mut fields = text.split_whitespace();
         if let (Some(count), Some(percent)) = (fields.next(), fields.next()) {
             if percent.ends_with('%') {
+                // rsync 3.5.2 appends "B" to the byte count ("32,768B  0%");
+                // earlier releases print the bare number.
+                let count = count.strip_suffix('B').unwrap_or(count);
                 if let Ok(n) = count.replace(',', "").parse::<u64>() {
                     progress.fetch_max(n.min(MAX_BYTES), Ordering::Relaxed);
                 }
@@ -1511,6 +1514,19 @@ mod tests {
         assert_eq!(n.load(Ordering::Relaxed), 1234);
         progress_line(b"999 filename", &n);
         assert_eq!(n.load(Ordering::Relaxed), 1234);
+        // rsync 3.5.2 progress2 suffixes the byte count with "B".
+        progress_line(b"    446,791,680B  41%  447MB/s    0:00:01", &n);
+        assert_eq!(n.load(Ordering::Relaxed), 446_791_680);
+        progress_line(
+            b"  1,073,741,824B 100%  593MB/s    0:00:01 (xfr#1, to-chk=0/1)",
+            &n,
+        );
+        assert_eq!(n.load(Ordering::Relaxed), 1_073_741_824);
+        // Human-readable units are not byte counts and are ignored.
+        let h = AtomicU64::new(0);
+        progress_line(b"  1.07G 100%  593MB/s", &h);
+        progress_line(b"  12kB  0%", &h);
+        assert_eq!(h.load(Ordering::Relaxed), 0);
         assert_eq!(rsh_quote("a'b c"), "'a'\"'\"'b c'");
         assert!(version(b"rsync  version 3.5.1-g123 protocol version 33").is_ok());
         assert!(version(b"rsync  version 2.6.9").is_err());

@@ -188,7 +188,7 @@ try:
  keys((56,True),(50,True),(50,False),(56,False)) # Alt+M
  eventually(lambda:command('sidebar-shell')['shown'])
  command('sidebar-shell',shown=False);command('focus-view')
- keys((56,True),(30,True),(30,False),(56,False)) # Alt+A
+ command('host-shortcuts',operation='header') # Agents stays available from its button
  eventually(lambda:'Saved agent hosts' in command('host-shortcuts')['sections'])
  keys((1,True),(1,False));command('host-shortcuts',close=True);time.sleep(.35)
  tabs=command('tab-status')['tabs']
@@ -197,9 +197,9 @@ try:
  command('focus-view');time.sleep(.2);eventually(lambda:command('inspect')['active']);keys((100,True),(100,False));time.sleep(.2)
  keys((56,True),(50,True),(50,False),(56,False));eventually(lambda:command('sidebar-shell')['shown'])
  command('sidebar-shell',shown=False);command('focus-view')
- keys((56,True),(30,True),(30,False),(56,False));eventually(lambda:'Saved agent hosts' in command('host-shortcuts')['sections'])
+ command('host-shortcuts',operation='header');eventually(lambda:'Saved agent hosts' in command('host-shortcuts')['sections'])
  keys((1,True),(1,False));command('host-shortcuts',close=True);time.sleep(.35);command('focus-view');keys((100,True),(100,False))
- checks.append('real-GDK-Alt-M-and-Alt-A-work-with-collapsed-actions-and-Map-keys-host-title-colour-status')
+ checks.append('real-GDK-Alt-M-and-Agents-button-with-collapsed-actions-and-Map-keys-host-title-colour-status')
 
  command('focus-view');time.sleep(.5)
  before_draw=command('inspect')['drawn'][0]
@@ -254,6 +254,54 @@ try:
  x=round(info['area_origin'][0]+(info['grid_size'][0]+1)*info['cell_metrics'][0]);y=round(info['area_origin'][1]+3*info['cell_metrics'][1])
  assert any(all(abs(pixel[i]-[120,171,204][i])<=3 for i in range(3))for pixel in [image.getpixel((x+dx,y))for dx in [-1,0,1]]),'split separator was painted over'
  checks.append('real-GTK-split-separator-survives-both-pane-background-repaints')
+ # The earlier seat was deliberately stopped before close/reopen checks.
+ # Start a fresh owned seat for these real modal-dialog key events.
+ path=bus.call_sync(dest,'/org/gnome/Mutter/RemoteDesktop',dest,'CreateSession',None,None,Gio.DBusCallFlags.NONE,5000,None).unpack()[0]
+ call('Start');keys((194,True),(194,False));time.sleep(.15)
+ # Machine editing: arrows belong to the focused dropdown, not spatial focus.
+ command('profile-editor',operation='edit',response='keep')
+ def widget(name):return next(x for x in command('host-shortcuts')['widgets']if x['name']==name)
+ assert widget('machine-copy')['visible']
+ command('host-shortcuts',focus='machine-field-13');keys((108,True),(108,False))
+ eventually(lambda:widget('machine-field-13')['selected']==1)
+ keys((103,True),(103,False));eventually(lambda:widget('machine-field-13')['selected']==0)
+ command('host-shortcuts',fields={'machine-field-1':'New/Typed-category'})
+ eventually(lambda:widget('machine-category-choice')['selected']==0 and widget('machine-field-1')['entry']=='New/Typed-category')
+ command('host-shortcuts',fields={'machine-category-choice':2})
+ eventually(lambda:widget('machine-field-1')['entry']=='Generated')
+ command('host-shortcuts',focus='machine-category-choice');keys((103,True),(103,False))
+ eventually(lambda:widget('machine-field-1')['entry']=='')
+ before_copy=json.loads(profile.read_text())['items']
+ command('host-shortcuts',click='machine-copy')
+ eventually(lambda:len(json.loads(profile.read_text())['items'])>len(before_copy))
+ after_copy=json.loads(profile.read_text())['items'];old_ids={x['id']for x in before_copy};old_machines={x['machine_id']for x in before_copy}
+ copied=[x for x in after_copy if x['id']not in old_ids]
+ assert copied and all(x['machine_id']not in old_machines and x['name'].endswith(' (copy)')for x in copied)
+ assert all(x['secret_reference']==x['id']and x['group']==''for x in copied)
+ # The editor stays open on the copy (Copy machine is a dialog action now).
+ # The copy's editor opens once the original has closed; poll until it exists.
+ def present(name):return next((x for x in command('host-shortcuts')['widgets']if x['name']==name),{})
+ eventually(lambda:str(present('machine-field-0').get('entry','')).endswith(' (copy)')and present('machine-copy').get('visible'))
+ checks.append('visible-copy-machine-new-identities-editable-category-and-real-Up-Down-dropdown-selection')
+ # Both context routes create SSH-only bookmarks; no installer/network is run.
+ before_trace=trace.read_bytes()if trace.exists()else b''
+ for agents,alias,kind in [(False,'quick-terminal.generated',0),(True,'quick-agent.generated',1)]:
+  command('host-shortcuts',close=True)
+  command('host-shortcuts',operation='header'if agents else'context')
+  command('host-shortcuts',click='saved-host-add')
+  eventually(lambda:('Add agent machine'if agents else'Add terminal machine') in command('host-shortcuts')['dialogs'])
+  command('host-shortcuts',fields={'quick-ssh-host':'-oBad'})
+  command('host-shortcuts',quick_response='save')
+  assert not any(x['server']=='-oBad'for x in json.loads(profile.read_text())['items'])
+  command('host-shortcuts',fields={'quick-ssh-host':alias})
+  command('host-shortcuts',quick_response='save')
+  saved=eventually(lambda:next((x for x in json.loads(profile.read_text())['items']if x['server']==alias),None))
+  assert saved['protocol']=='SSH'and saved['username']==''
+  assert sum(x['machine_id']==saved['machine_id']for x in json.loads(profile.read_text())['items'])==1
+  assert bool(saved.get('preferences',{}).get('codex_command'))==agents
+ assert (trace.read_bytes()if trace.exists()else b'')==before_trace
+ checks.append('terminal-context-and-agent-menu-host-only-SSH-bookmarks-invalid-option-refused-zero-network')
+ call('Stop')
  receipt={'status':'PASS','checks':checks,'scope':'Actual GTK/Wayland, synthetic Mutter seat events, generated profiles. No external login, installer or key authorization executed.'}
  (root/'acceptance.json').write_text(json.dumps(receipt,indent=2)+'\n');print('Native host shortcuts PASS',len(checks),'groups; evidence',root)
 finally:

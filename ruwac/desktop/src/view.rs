@@ -1,3 +1,6 @@
+#[path = "../../crates/ruwac-tui/src/word_boundary.rs"]
+mod word;
+use crate::terminal_history::History;
 use crate::{
     clipboard::{self, Broker},
     worker::{Command, Worker},
@@ -13,6 +16,143 @@ use std::{
 thread_local! {
     static HISTORY_STYLE: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
 }
+fn engine_version_notice(version: Option<&str>) -> String {
+    let frontend = env!("CARGO_PKG_VERSION");
+    match version {
+        Some(engine) if engine == frontend => format!("Engine {engine}"),
+        Some(engine) => format!("GUI {frontend} · local engine {engine} (preserved)"),
+        None => format!("GUI {frontend} · local engine version unavailable"),
+    }
+}
+fn terminal_tab_status(frame: bool, offline: bool, warning: bool) -> crate::tiles::TabStatus {
+    use crate::tiles::TabStatus;
+    if offline {
+        TabStatus::Offline
+    } else if !frame {
+        TabStatus::Busy
+    } else if warning {
+        TabStatus::ReadyWithWarning
+    } else {
+        TabStatus::Ready
+    }
+}
+#[cfg(test)]
+mod tab_health_tests {
+    use super::terminal_tab_status;
+    use crate::tiles::TabStatus;
+    #[test]
+    fn installed_gui_is_never_mistaken_for_running_engine() {
+        let current = env!("CARGO_PKG_VERSION");
+        assert_eq!(
+            super::engine_version_notice(Some(current)),
+            format!("Engine {current}")
+        );
+        assert!(
+            super::engine_version_notice(Some("0.1.9")).contains("local engine 0.1.9 (preserved)")
+        );
+        assert!(super::engine_version_notice(None).contains("unavailable"));
+    }
+    #[test]
+    fn retained_warning_does_not_mark_live_terminal_failed() {
+        assert_eq!(
+            terminal_tab_status(true, false, true),
+            TabStatus::ReadyWithWarning
+        );
+    }
+    #[test]
+    fn disconnected_terminal_stays_offline_even_with_old_warning() {
+        assert_eq!(terminal_tab_status(true, true, true), TabStatus::Offline);
+    }
+    #[test]
+    fn connecting_terminal_stays_busy_even_with_old_warning() {
+        assert_eq!(terminal_tab_status(false, false, true), TabStatus::Busy);
+    }
+    #[test]
+    fn healthy_terminal_without_warning_is_ready() {
+        assert_eq!(terminal_tab_status(true, false, false), TabStatus::Ready);
+    }
+}
+fn copy_link_style(cell: &Value) -> Option<(&Value, &str, Option<&Value>)> {
+    let extra = cell.get(6)?;
+    let underline = extra.get("underline")?.as_str()?;
+    if !matches!(
+        underline,
+        "single" | "double" | "curly" | "dotted" | "dashed"
+    ) {
+        return None;
+    }
+    Some((cell.get(2)?, underline, extra.get("underline_color")))
+}
+// A TUI may render a hyperlink with an explicit newline and its own left
+// margin, losing terminal soft-wrap metadata. Repair only a matching styled
+// URL at the right edge; ordinary text/code continues to keep hard newlines.
+pub(crate) fn styled_url_continuation(
+    previous: &Value,
+    next: &Value,
+    copied: &str,
+    next_end: usize,
+) -> Option<usize> {
+    let previous = previous.as_array()?;
+    let next = next.as_array()?;
+    let nonblank = |c: &Value| {
+        c[1] != true
+            && c[0]
+                .as_str()
+                .is_some_and(|t| !t.is_empty() && !t.chars().all(char::is_whitespace))
+    };
+    let last = previous.iter().rposition(nonblank)?;
+    if previous.len().saturating_sub(last + 1) > 3 {
+        return None;
+    }
+    let style = copy_link_style(&previous[last])?;
+    for cell in previous[..=last].iter().rev() {
+        if cell[1] == true {
+            continue;
+        }
+        let text = cell[0].as_str()?;
+        if text.is_empty() || text.chars().any(char::is_whitespace) {
+            break;
+        }
+        if copy_link_style(cell)? != style {
+            return None;
+        }
+    }
+    let token = copied.split_whitespace().next_back()?;
+    if !token.starts_with("https://") && !token.starts_with("http://") {
+        return None;
+    }
+    let first = next.iter().position(nonblank)?;
+    if first > 4 || first >= next_end {
+        return None;
+    }
+    let mut suffix = String::new();
+    for cell in next.iter().take(next_end).skip(first) {
+        if cell[1] == true {
+            continue;
+        }
+        let text = cell[0].as_str()?;
+        if text.is_empty() || text.chars().any(char::is_whitespace) {
+            break;
+        }
+        if copy_link_style(cell)? != style {
+            return None;
+        }
+        suffix.push_str(text);
+    }
+    if suffix.is_empty()
+        || suffix.starts_with("https:")
+        || suffix.starts_with("http:")
+        || suffix == "&"
+        || suffix
+            .chars()
+            .any(|c| matches!(c, '\\' | '\'' | '"' | '`' | '$' | ';' | '|' | '<' | '>'))
+        || token.len() + suffix.len() > crate::web_route::MAX_URL
+    {
+        return None;
+    }
+    crate::web_route::parse(&format!("{token}{suffix}")).ok()?;
+    Some(first)
+}
 fn selection_text(grid: &Value, mut a: (usize, usize), mut z: (usize, usize)) -> String {
     if a > z {
         std::mem::swap(&mut a, &mut z);
@@ -21,32 +161,106 @@ fn selection_text(grid: &Value, mut a: (usize, usize), mut z: (usize, usize)) ->
         return String::new();
     };
     let mut result = String::new();
+    let mut skip_indent = 0;
     for r in a.0..=z.0.min(rows.len().saturating_sub(1)) {
         let Some(cells) = rows.get(r).and_then(Value::as_array) else {
             break;
         };
-        let start = if r == a.0 { a.1 } else { 0 };
+        let start = if r == a.0 { a.1 } else { skip_indent };
         let end = if r == z.0 {
             z.1.saturating_add(1)
         } else {
             cells.len()
         };
-        let mut line = String::new();
+        skip_indent = 0;
         for cell in cells.iter().take(end).skip(start) {
             if cell[1] != true {
-                line.push_str(cell[0].as_str().unwrap_or(""));
+                result.push_str(cell[0].as_str().unwrap_or(""));
             }
         }
         let wrapped = grid["wrapped"][r].as_bool().unwrap_or(false);
         if r != z.0 && !wrapped {
-            // Grid padding after a shell continuation must not become text.
-            result.push_str(line.trim_end_matches(' '));
-            result.push('\n');
-        } else {
-            result.push_str(&line);
+            let next_end = if r + 1 == z.0 {
+                z.1.saturating_add(1)
+            } else {
+                usize::MAX
+            };
+            let continuation = rows
+                .get(r + 1)
+                .and_then(|next| styled_url_continuation(&rows[r], next, &result, next_end));
+            result.truncate(result.trim_end_matches(' ').len());
+            if let Some(indent) = continuation {
+                skip_indent = indent;
+            } else {
+                result.push('\n');
+            }
         }
     }
     result
+}
+fn selected_word(grid: &Value, at: (usize, usize)) -> Option<(word::Point, word::Point)> {
+    let rows = grid["cells"].as_array()?;
+    rows.get(at.0)?.as_array()?.get(at.1)?;
+    let mut first = at.0;
+    while first > 0 && grid["wrapped"][first - 1] == true {
+        first -= 1;
+    }
+    let mut last = at.0;
+    while grid["wrapped"][last] == true && last + 1 < rows.len() {
+        last += 1;
+    }
+    let mut text = String::new();
+    let mut spans = Vec::new();
+    let mut clicked = None;
+    for (row, cells) in rows.iter().enumerate().take(last + 1).skip(first) {
+        let cells = cells.as_array()?;
+        for (col, cell) in cells.iter().enumerate() {
+            if cell[1] == true {
+                continue;
+            }
+            let start = text.len();
+            text.push_str(cell[0].as_str()?);
+            let mut end_col = col;
+            while end_col + 1 < cells.len() && cells[end_col + 1][1] == true {
+                end_col += 1;
+            }
+            if row == at.0 && (col..=end_col).contains(&at.1) {
+                clicked = Some(start);
+            }
+            spans.push((start, text.len(), (row, col), (row, end_col)));
+        }
+    }
+    let (start, end) = word::byte_span(&text, clicked?)?;
+    let first = spans
+        .iter()
+        .find(|(a, z, _, _)| *a <= start && start < *z)?
+        .2;
+    let last = spans
+        .iter()
+        .rev()
+        .find(|(a, z, _, _)| *a < end && end <= *z)?
+        .3;
+    Some((first, last))
+}
+#[cfg(test)]
+mod word_cell_tests {
+    use super::*;
+    #[test]
+    fn joined_emoji_uses_actual_terminal_cells_instead_of_estimated_width() {
+        let grid = json!({"cells":[[["👩‍",false],["",true],["💻",false],["",true],[" ",false]]],"wrapped":[false]});
+        for col in 0..4 {
+            let (a, z) = selected_word(&grid, (0, col)).unwrap();
+            assert_eq!((a, z), ((0, 0), (0, 3)));
+            assert_eq!(selection_text(&grid, a, z), "👩‍💻");
+        }
+    }
+    #[test]
+    fn wide_word_wraps_only_where_the_terminal_says_it_wrapped() {
+        let mut grid = json!({"cells":[[["a",false],["b",false]],[["c",false],["d",false]]],"wrapped":[true,false]});
+        assert_eq!(selected_word(&grid, (1, 0)), Some(((0, 0), (1, 1))));
+        grid["wrapped"][0] = json!(false);
+        assert_eq!(selected_word(&grid, (1, 0)), Some(((1, 0), (1, 1))));
+    }
 }
 fn selection_changed(old: &Value, new: &Value, a: (usize, usize), z: (usize, usize)) -> bool {
     old["rows"] != new["rows"]
@@ -54,11 +268,140 @@ fn selection_changed(old: &Value, new: &Value, a: (usize, usize), z: (usize, usi
         || old["alternate_screen"] != new["alternate_screen"]
         || selection_text(old, a, z) != selection_text(new, a, z)
 }
+fn pinned_selection_changed(
+    old: &Value,
+    new: &Value,
+    a: (usize, usize),
+    z: (usize, usize),
+    dragging: bool,
+    offset: usize,
+) -> bool {
+    old["rows"] != new["rows"]
+        || old["cols"] != new["cols"]
+        || old["alternate_screen"] != new["alternate_screen"]
+        // A completed live-screen selection follows the existing replacement
+        // rule. Only an active drag or a deliberately scrolled history view
+        // retains its frozen snapshot while the application changes beneath it.
+        || (!dragging && offset == 0 && selection_changed(old, new, a, z))
+}
 #[cfg(test)]
 mod selection_tests {
     use super::*;
     fn grid(lines: &[&str], wrapped: &[bool]) -> Value {
         json!({"cells":lines.iter().map(|s|s.chars().map(|c|json!([c.to_string(),false])).collect::<Vec<_>>()).collect::<Vec<_>>(),"wrapped":wrapped})
+    }
+    #[test]
+    fn pinned_drag_and_history_survive_output_but_completed_live_selection_expires() {
+        let mut old = grid(&["selected", "tail"], &[false, false]);
+        old["rows"] = json!(2);
+        old["cols"] = json!(8);
+        let mut newer = old.clone();
+        newer["cells"][0][0][0] = json!("X");
+        let a = (0, 0);
+        let z = (0, 7);
+        assert!(!pinned_selection_changed(&old, &newer, a, z, true, 0));
+        assert!(!pinned_selection_changed(&old, &newer, a, z, false, 10));
+        assert!(pinned_selection_changed(&old, &newer, a, z, false, 0));
+        newer["cols"] = json!(9);
+        assert!(pinned_selection_changed(&old, &newer, a, z, true, 10));
+    }
+    #[test]
+    fn inline_history_preserves_live_geometry_and_unicode_without_mutating_daemon_grid() {
+        let live =
+            json!({"rows":2,"cols":6,"cells":[[["live"]]],"cursor":{"visible":true},"mouse":false});
+        let mut history = History::default();
+        history.set("old\n界e\u{301}\nnew");
+        assert_eq!(history.grid(&live, 0).0, live);
+        let g = history.grid(&live, 1).0;
+        assert_eq!(g["rows"], 2);
+        assert_eq!(g["cols"], 6);
+        assert_eq!(g["cursor"]["visible"], false);
+        assert_eq!(g["cells"][1][0][0], "界");
+        assert_eq!(g["cells"][1][1][1], true);
+        assert_eq!(g["cells"][1][2][0], "e\u{301}");
+        assert_eq!(live["cursor"]["visible"], true);
+    }
+    fn styled_url_grid() -> (Value, (usize, usize), (usize, usize)) {
+        let prefix = "A long question filling the terminal row: from ";
+        let url = "https://github.com/w3fans/dPDF/";
+        let tail = "actions/runs/41968233752";
+        let first = format!("{prefix}{url}  ");
+        let second = format!("  {tail} (the message above the jobs).");
+        let width = first.len().max(second.len());
+        let lines = [format!("{first:width$}"), format!("{second:width$}")];
+        let mut g = grid(&[&lines[0], &lines[1]], &[false, false]);
+        for (row, start, end) in [
+            (0, prefix.len(), prefix.len() + url.len()),
+            (1, 2, 2 + tail.len()),
+        ] {
+            for cell in g["cells"][row]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .take(end)
+                .skip(start)
+            {
+                let values = cell.as_array_mut().unwrap();
+                values.resize(7, Value::Null);
+                values[2] = json!({"rgb":[80,180,240]});
+                values[6] = json!({"underline":"single"});
+            }
+        }
+        (g, (0, prefix.find("from ").unwrap()), (1, second.len() - 1))
+    }
+    #[test]
+    fn copied_wrapped_codex_url_has_no_padding_or_indent() {
+        let (g, a, z) = styled_url_grid();
+        let expected = "from https://github.com/w3fans/dPDF/actions/runs/41968233752 (the message above the jobs).";
+        assert_eq!(selection_text(&g, a, z), expected);
+        assert_eq!(selection_text(&g, z, a), expected);
+    }
+    #[test]
+    fn ordinary_hard_lines_and_non_link_indentation_are_preserved() {
+        let (mut g, a, z) = styled_url_grid();
+        for cells in g["cells"].as_array_mut().unwrap() {
+            for cell in cells.as_array_mut().unwrap() {
+                cell.as_array_mut().unwrap().truncate(2);
+            }
+        }
+        assert!(selection_text(&g, a, z).contains("dPDF/\n  actions/"));
+        let (mut g, a, z) = styled_url_grid();
+        for cell in g["cells"][1].as_array_mut().unwrap() {
+            cell.as_array_mut().unwrap().truncate(2);
+        }
+        assert!(selection_text(&g, a, z).contains("dPDF/\n  actions/"));
+    }
+    #[test]
+    fn separated_links_and_different_styles_are_not_reflowed() {
+        let (mut g, a, z) = styled_url_grid();
+        g["cells"][1][2][2] = json!({"rgb":[255,0,0]});
+        assert!(selection_text(&g, a, z).contains("dPDF/\n  actions/"));
+        let (mut g, a, z) = styled_url_grid();
+        for (i, c) in "https://".chars().enumerate() {
+            g["cells"][1][2 + i][0] = json!(c.to_string());
+        }
+        assert!(selection_text(&g, a, z).contains("dPDF/\n  https://"));
+    }
+    #[test]
+    fn links_away_from_row_edge_keep_their_real_newline() {
+        let (mut g, a, z) = styled_url_grid();
+        for _ in 0..8 {
+            g["cells"][0]
+                .as_array_mut()
+                .unwrap()
+                .push(json!([" ", false]));
+        }
+        assert!(selection_text(&g, a, z).contains("dPDF/\n  actions/"));
+    }
+    #[test]
+    fn link_copy_does_not_join_shell_syntax_or_unselected_continuations() {
+        for bad in [";", "|", "$", "\\", "`", "'", "\""] {
+            let (mut g, a, z) = styled_url_grid();
+            g["cells"][1][2][0] = json!(bad);
+            assert!(selection_text(&g, a, z).contains("dPDF/\n  "));
+        }
+        let (g, a, _) = styled_url_grid();
+        assert!(selection_text(&g, a, (1, 1)).ends_with("\n  "));
     }
     #[test]
     fn selected_wrapped_install_command_keeps_one_logical_line_in_both_directions() {
@@ -151,9 +494,12 @@ pub struct View {
     dead_reason: gtk::Label,
     /// The card offers to reopen an ended remote session rather than reattach.
     ended: Cell<bool>,
+    reconnect_button: gtk::Button,
     pub frame: RefCell<Option<Value>>,
     pub target: RefCell<String>,
     pub drawn: Cell<u64>,
+    glyphs: RefCell<crate::terminal_style::GlyphCache>,
+    wake_task: RefCell<Option<glib::JoinHandle<()>>>,
     pub prefix: Cell<bool>,
     pub detached: Cell<bool>,
     pub finished: Cell<bool>,
@@ -166,7 +512,25 @@ pub struct View {
     window_index: Cell<Option<usize>>,
     pub warning: RefCell<Option<String>>,
     selection: RefCell<Option<((usize, usize), (usize, usize))>>,
+    history_selection: RefCell<Option<((usize, usize), (usize, usize))>>,
+    selection_dragging: Cell<bool>,
+    word_click: Cell<bool>,
+    selection_seed: RefCell<Option<Value>>,
+    /// Mouse-up may precede the canonical snapshot. Keep only one bounded
+    /// copy intent; generation/target checks also guard the snapshot reply.
+    selection_copy_pending: Cell<Option<(u64, bool)>>,
+    selection_scroll_at: Cell<std::time::Instant>,
+    selection_motion_at: Cell<std::time::Instant>,
     primary_provider: RefCell<Option<gdk::ContentProvider>>,
+    /// Approved nested selection, valid only while this focused view owns PRIMARY.
+    program_selection_text: RefCell<Option<String>>,
+    program_selection_pending: RefCell<Option<(String, u64, u64, bool)>>,
+    link_click: Cell<bool>,
+    /// Last handled OSC 52 PRIMARY (offer, request) serials of the target pane.
+    selection_serials: Cell<(u64, u64)>,
+    /// The user's last forwarded left release (0) or middle press (1).
+    mouse_gesture: Cell<Option<(u32, std::time::Instant)>>,
+    selection_middle: Cell<bool>,
     primary_handler: RefCell<Option<glib::SignalHandlerId>>,
     drag_start: Cell<(f64, f64)>,
     pressed: Cell<Option<u32>>,
@@ -183,6 +547,14 @@ pub struct View {
     shortcuts: std::collections::HashMap<String, String>,
     wheel_delta: Cell<(f64, f64)>,
     stack: gtk::Stack,
+    desktop_shortcuts: Cell<bool>,
+    copy_on_select: Cell<bool>,
+    history_pending: Cell<bool>,
+    history_request: Cell<u64>,
+    history_inline: Cell<bool>,
+    history_offset: Cell<usize>,
+    history_lines: RefCell<History>,
+    history_pane: RefCell<String>,
 }
 impl View {
     pub fn new(socket: PathBuf, session: String, broker: Broker) -> Rc<Self> {
@@ -266,12 +638,18 @@ impl View {
         reconnect.add_css_class("suggested-action");
         reconnect.add_css_class("pill");
         reconnect.set_halign(gtk::Align::Center);
+        let new_terminal = gtk::Button::with_label("New terminal");
+        new_terminal.set_widget_name("terminal-new-ended");
+        let replace_terminal = gtk::Button::with_label("New & close");
+        replace_terminal.set_widget_name("terminal-replace-ended");
         let close_tab = gtk::Button::with_label("Close tab");
         close_tab.set_widget_name("terminal-close-ended");
         close_tab.add_css_class("pill");
         let dead_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         dead_actions.set_halign(gtk::Align::Center);
         dead_actions.append(&reconnect);
+        dead_actions.append(&new_terminal);
+        dead_actions.append(&replace_terminal);
         dead_actions.append(&close_tab);
         dead.append(&dead_title);
         dead.append(&dead_reason);
@@ -283,6 +661,17 @@ impl View {
         root.append(&overlay);
         let worker = RefCell::new(Worker::start(socket.clone(), session.clone()));
         let v = Rc::new(Self {
+            glyphs: RefCell::new(crate::terminal_style::GlyphCache::default()),
+            wake_task: RefCell::new(None),
+            desktop_shortcuts: Cell::new(true),
+            copy_on_select: Cell::new(false),
+            history_pending: Cell::new(false),
+            selection_copy_pending: Cell::new(None),
+            history_request: Cell::new(0),
+            history_inline: Cell::new(false),
+            history_offset: Cell::new(0),
+            history_lines: RefCell::new(History::default()),
+            history_pane: RefCell::new(String::new()),
             session,
             root,
             area,
@@ -299,6 +688,7 @@ impl View {
             dead_title,
             dead_reason,
             ended: Cell::new(false),
+            reconnect_button: reconnect.clone(),
             frame: RefCell::new(None),
             target: RefCell::new(String::new()),
             drawn: Cell::new(0),
@@ -313,7 +703,19 @@ impl View {
             window_index: Cell::new(None),
             warning: RefCell::new(None),
             selection: RefCell::new(None),
+            history_selection: RefCell::new(None),
+            selection_dragging: Cell::new(false),
+            word_click: Cell::new(false),
+            selection_seed: RefCell::new(None),
+            selection_scroll_at: Cell::new(std::time::Instant::now()),
+            selection_motion_at: Cell::new(std::time::Instant::now()),
             primary_provider: RefCell::new(None),
+            program_selection_text: RefCell::new(None),
+            program_selection_pending: RefCell::new(None),
+            link_click: Cell::new(false),
+            selection_serials: Cell::new((0, 0)),
+            mouse_gesture: Cell::new(None),
+            selection_middle: Cell::new(false),
             primary_handler: RefCell::new(None),
             drag_start: Cell::new((0.0, 0.0)),
             pressed: Cell::new(None),
@@ -350,7 +752,7 @@ impl View {
                 .is_some_and(|ours| clipboard.content().as_ref() != Some(ours));
             if lost {
                 v.primary_provider.borrow_mut().take();
-                v.selection.borrow_mut().take();
+                v.clear_selection();
                 let buffer = v.copy.buffer();
                 buffer.place_cursor(&buffer.end_iter());
                 v.area.queue_draw();
@@ -388,7 +790,11 @@ impl View {
         reconnect.connect_clicked(move |_| {
             if let Some(v) = weak.upgrade() {
                 if v.ended.get() {
-                    if !crate::launches::reopen(&v.session, &v.target.borrow()) {
+                    if !crate::launches::is_remote(&v.session, &v.target.borrow()) {
+                        let _ = v
+                            .root
+                            .activate_action("terminal.replace", Some(&v.session.to_variant()));
+                    } else if !crate::launches::reopen(&v.session, &v.target.borrow()) {
                         v.status
                             .set_text("This session cannot be reopened; use New term");
                     }
@@ -397,6 +803,22 @@ impl View {
                 }
             }
         });
+        for (button, action) in [
+            (new_terminal, "terminal.new"),
+            (replace_terminal, "terminal.replace"),
+        ] {
+            let weak = Rc::downgrade(&v);
+            button.connect_clicked(move |_| {
+                if let Some(v) = weak.upgrade() {
+                    if let Err(error) = v
+                        .root
+                        .activate_action(action, Some(&v.session.to_variant()))
+                    {
+                        v.warn(&format!("New terminal unavailable: {error}"));
+                    }
+                }
+            });
+        }
         let weak = Rc::downgrade(&v);
         close_tab.connect_clicked(move |_| {
             if let Some(v) = weak.upgrade() {
@@ -447,14 +869,40 @@ impl View {
         let click = gtk::GestureClick::new();
         click.set_button(0);
         let w = Rc::downgrade(&v);
-        click.connect_pressed(move |g, _, x, y| {
+        click.connect_pressed(move |g, count, x, y| {
             if let Some(v) = w.upgrade() {
-                v.click(x, y, g.current_button(), g.current_event_state(), false)
+                let mods = g.current_event_state();
+                if count == 2
+                    && g.current_button() == 1
+                    && !mods.contains(gdk::ModifierType::CONTROL_MASK)
+                    && (!v.mouse_enabled() || mods.contains(gdk::ModifierType::SHIFT_MASK))
+                    && v.select_word(x, y)
+                {
+                    return;
+                }
+                v.click(x, y, g.current_button(), mods, false)
             }
         });
         let w = Rc::downgrade(&v);
         click.connect_released(move |g, _, x, y| {
             if let Some(v) = w.upgrade() {
+                if g.current_button() == 1 && v.word_click.get() {
+                    if v.area.has_focus() {
+                        v.copy_clipboard(true);
+                        if v.copy_on_select.get() {
+                            v.copy_clipboard(false);
+                        }
+                    }
+                    // Both gestures see this release. Preserve the completed
+                    // word until GestureDrag's end callback has also run.
+                    let weak = Rc::downgrade(&v);
+                    glib::idle_add_local_once(move || {
+                        if let Some(v) = weak.upgrade() {
+                            v.word_click.set(false);
+                        }
+                    });
+                    return;
+                }
                 v.click(x, y, g.current_button(), g.current_event_state(), true)
             }
         });
@@ -463,7 +911,17 @@ impl View {
         let w = Rc::downgrade(&v);
         drag.connect_drag_begin(move |g, x, y| {
             if let Some(v) = w.upgrade() {
+                if v.word_click.get() {
+                    return;
+                }
+                if g.current_event_state()
+                    .contains(gdk::ModifierType::CONTROL_MASK)
+                    && v.url_at(x, y).is_some()
+                {
+                    return;
+                }
                 v.drag_start.set((x, y));
+                v.selection_motion_at.set(std::time::Instant::now());
                 if let Some(divider) = v.find_divider(x, y) {
                     *v.divider.borrow_mut() = Some(divider);
                     return;
@@ -477,7 +935,23 @@ impl View {
                 }
                 v.focus_at(x, y);
                 if let Some((_, r, c)) = v.point(x, y) {
+                    v.clear_selection();
                     *v.selection.borrow_mut() = Some(((r, c), (r, c)));
+                    v.selection_dragging.set(true);
+                    v.mouse_position.set((x, y));
+                    if let Some(grid) = v.grid() {
+                        if v.history_lines.borrow().is_empty() {
+                            *v.selection_seed.borrow_mut() = Some(grid);
+                            v.history_inline.set(true);
+                            v.request_history(false);
+                        } else {
+                            let height = grid["rows"].as_u64().unwrap_or(24) as usize;
+                            let mut history = v.history_lines.borrow_mut();
+                            history.pin();
+                            let a = history.point(height, v.history_offset.get(), r, c);
+                            *v.history_selection.borrow_mut() = Some((a, a));
+                        }
+                    }
                     v.area.queue_draw();
                 }
             }
@@ -485,11 +959,17 @@ impl View {
         let w = Rc::downgrade(&v);
         drag.connect_drag_update(move |g, dx, dy| {
             if let Some(v) = w.upgrade() {
+                if v.word_click.get() {
+                    return;
+                }
                 let (x, y) = v.drag_start.get();
+                v.mouse_position.set((x + dx, y + dy));
+                v.selection_motion_at.set(std::time::Instant::now());
                 if v.divider.borrow().is_some() {
                     return;
                 }
-                if v.mouse_enabled()
+                if !v.selection_dragging.get()
+                    && v.mouse_enabled()
                     && !g
                         .current_event_state()
                         .contains(gdk::ModifierType::SHIFT_MASK)
@@ -497,19 +977,15 @@ impl View {
                     // Motion reports are emitted once by the motion controller.
                     return;
                 }
-                if let Some((pane, r, c)) = v.point(x + dx, y + dy) {
-                    if pane == *v.target.borrow() {
-                        if let Some(selection) = v.selection.borrow_mut().as_mut() {
-                            selection.1 = (r, c);
-                        }
-                        v.area.queue_draw();
-                    }
-                }
+                v.extend_selection();
             }
         });
         let w = Rc::downgrade(&v);
         drag.connect_drag_end(move |g, dx, dy| {
             if let Some(v) = w.upgrade() {
+                if v.word_click.get() {
+                    return;
+                }
                 if let Some((id, vertical, start, size, initial)) = v.divider.borrow_mut().take() {
                     let movement = if vertical { dx } else { dy };
                     let ratio =
@@ -522,21 +998,72 @@ impl View {
                     }
                     return;
                 }
-                if !v.mouse_enabled()
+                let (x, y) = v.drag_start.get();
+                v.mouse_position.set((x + dx, y + dy));
+                v.extend_selection();
+                let local_drag = v.selection_dragging.replace(false);
+                if local_drag && v.selection_seed.borrow().is_some() && !v.history_pending.get() {
+                    v.clear_selection();
+                    v.cancel_inline_history();
+                    v.warn("Selection history unavailable; nothing was copied. Select again");
+                    v.area.queue_draw();
+                    return;
+                }
+                if local_drag && v.history_pending.get() && v.selection_seed.borrow().is_some() {
+                    let generation = v.history_request.get();
+                    v.selection_copy_pending
+                        .set(Some((generation, v.copy_on_select.get())));
+                    v.status.set_text("Loading selection history…");
+                    let weak = Rc::downgrade(&v);
+                    glib::timeout_add_local_once(std::time::Duration::from_secs(5), move || {
+                        if let Some(v) = weak.upgrade() {
+                            if v.selection_copy_pending
+                                .get()
+                                .is_some_and(|p| p.0 == generation)
+                            {
+                                v.clear_selection();
+                                v.cancel_inline_history();
+                                v.warn(
+                                    "Selection history timed out; nothing was copied. Select again",
+                                );
+                                v.area.queue_draw();
+                            }
+                        }
+                    });
+                    return;
+                }
+                if local_drag
+                    || !v.mouse_enabled()
                     || g.current_event_state()
                         .contains(gdk::ModifierType::SHIFT_MASK)
                 {
                     v.copy_clipboard(true);
+                    if v.copy_on_select.get() {
+                        v.copy_clipboard(false);
+                    }
+                }
+                if v.selection_seed.borrow_mut().take().is_some() {
+                    v.history_request
+                        .set(v.history_request.get().saturating_add(1));
+                    v.history_pending.set(false);
+                    v.history_inline.set(false);
                 }
             }
         });
         v.area.add_controller(drag);
         let motion = gtk::EventControllerMotion::new();
         let w = Rc::downgrade(&v);
+        motion.connect_enter(move |_, x, y| {
+            if let Some(v) = w.upgrade() {
+                v.mouse_position.set((x, y));
+            }
+        });
+        let w = Rc::downgrade(&v);
         motion.connect_motion(move |g, x, y| {
             if let Some(v) = w.upgrade() {
+                v.mouse_position.set((x, y));
                 let mods = g.current_event_state();
-                if mods.contains(gdk::ModifierType::SHIFT_MASK) {
+                if mods.contains(gdk::ModifierType::SHIFT_MASK) || v.selection_dragging.get() {
                     return;
                 }
                 if let Some(grid) = v.grid() {
@@ -554,6 +1081,14 @@ impl View {
         focus.connect_leave(move |_| {
             if let Some(v) = w.upgrade() {
                 v.cancel_image_paste();
+                v.program_selection_text.borrow_mut().take();
+                v.program_selection_pending.borrow_mut().take();
+                v.word_click.set(false);
+                if v.selection_copy_pending.get().is_some() {
+                    v.clear_selection();
+                    v.cancel_inline_history();
+                }
+                v.selection_dragging.set(false);
                 v.release_mouse();
                 if v.prefix.replace(false) {
                     v.input(&v.literal_prefix());
@@ -565,12 +1100,17 @@ impl View {
         let w = Rc::downgrade(&v);
         wheel.connect_scroll(move |g, dx, dy| {
             if let Some(v) = w.upgrade() {
-                if v.mouse_enabled()
+                if !v.selection_dragging.get()
+                    && v.mouse_enabled()
                     && !g
                         .current_event_state()
                         .contains(gdk::ModifierType::SHIFT_MASK)
                 {
-                    if let Some((x, y)) = g.current_event().and_then(|e| e.position()) {
+                    // Wayland scroll events need not contain a position. The
+                    // motion controller supplies widget-local coordinates;
+                    // event surface coordinates would also misroute split views.
+                    {
+                        let (x, y) = v.mouse_position.get();
                         let (ax, ay) = v.wheel_delta.get();
                         let (mut ax, mut ay) = (ax + dx.clamp(-8.0, 8.0), ay + dy.clamp(-8.0, 8.0));
                         while ay.abs() >= 1.0 {
@@ -595,8 +1135,21 @@ impl View {
                         }
                         v.wheel_delta.set((ax, ay));
                     }
+                } else if !v.selection_dragging.get()
+                    && v.grid().is_some_and(|g| g["alternate_screen"] == true)
+                    && !g
+                        .current_event_state()
+                        .contains(gdk::ModifierType::SHIFT_MASK)
+                {
+                    let (_, old) = v.wheel_delta.get();
+                    let mut delta = old + dy.clamp(-8.0, 8.0);
+                    while delta.abs() >= 1.0 {
+                        v.input(if delta < 0.0 { "\x1b[A" } else { "\x1b[B" });
+                        delta -= delta.signum();
+                    }
+                    v.wheel_delta.set((0.0, delta));
                 } else {
-                    v.open_history();
+                    v.scroll_history(dy);
                 }
             }
             glib::Propagation::Stop
@@ -604,7 +1157,228 @@ impl View {
         v.area.add_controller(wheel);
         let w = Rc::downgrade(&v);
         v.area.connect_resize(move|_,width,height|if let Some(v)=w.upgrade(){if width>0&&height>0{v.command("client.resize",json!({"rows":((height as f64/v.cell_height.get())as i32).clamp(4,u16::MAX as i32),"cols":((width as f64/v.cell_width.get())as i32).clamp(10,u16::MAX as i32)}));}});
+        v.bind_worker_wake();
         v
+    }
+    fn bind_worker_wake(self: &Rc<Self>) {
+        if let Some(task) = self.wake_task.borrow_mut().take() {
+            task.abort();
+        }
+        let Some(reader) = self.worker.borrow_mut().take_wake_reader() else {
+            return;
+        };
+        let Ok(socket) = gtk::gio::Socket::from_fd(reader.into()) else {
+            return; // Existing periodic update remains a fallback.
+        };
+        socket.set_blocking(false);
+        let weak = Rc::downgrade(self);
+        let task = glib::MainContext::default().spawn_local(async move {
+            loop {
+                let condition = gtk::gio::prelude::SocketExtManual::create_source_future(
+                    &socket,
+                    glib::IOCondition::IN | glib::IOCondition::HUP | glib::IOCondition::ERR,
+                    None::<&gtk::gio::Cancellable>,
+                    glib::Priority::DEFAULT,
+                )
+                .await;
+                let mut ended =
+                    condition.intersects(glib::IOCondition::HUP | glib::IOCondition::ERR);
+                for _ in 0..16 {
+                    let mut bytes = [0u8; 256];
+                    match socket.receive(&mut bytes, None::<&gtk::gio::Cancellable>) {
+                        Ok(0) => {
+                            ended = true;
+                            break;
+                        }
+                        Ok(_) => (),
+                        Err(error) if error.matches(gtk::gio::IOErrorEnum::WouldBlock) => break,
+                        Err(_) => {
+                            ended = true;
+                            break;
+                        }
+                    }
+                }
+                let Some(view) = weak.upgrade() else {
+                    break;
+                };
+                view.update();
+                if ended {
+                    view.wake_task.borrow_mut().take();
+                    break;
+                }
+            }
+        });
+        *self.wake_task.borrow_mut() = Some(task);
+    }
+    fn clear_selection(&self) {
+        self.program_selection_text.borrow_mut().take();
+        self.program_selection_pending.borrow_mut().take();
+        if self.selection_copy_pending.take().is_some() {
+            self.history_request
+                .set(self.history_request.get().saturating_add(1));
+            self.history_pending.set(false);
+            self.history_inline.set(false);
+        }
+        self.selection.borrow_mut().take();
+        self.history_selection.borrow_mut().take();
+        self.selection_seed.borrow_mut().take();
+        self.selection_dragging.set(false);
+        let mut history = self.history_lines.borrow_mut();
+        if history.is_frozen() && self.history_offset.get() == 0 {
+            history.clear();
+        } else {
+            history.unfreeze();
+        }
+    }
+    fn selection_geometry(&self) -> Option<(f64, f64, usize, usize)> {
+        let frame = self.frame.borrow();
+        let pane = frame.as_ref()?["panes"]
+            .as_array()?
+            .iter()
+            .find(|p| p["id"].as_str() == Some(self.target.borrow().as_str()))?;
+        Some((
+            pane["rect"]["x"].as_f64()? * self.cell_width.get(),
+            pane["rect"]["y"].as_f64()? * self.cell_height.get(),
+            pane["grid"]["rows"].as_u64()? as usize,
+            pane["grid"]["cols"].as_u64()? as usize,
+        ))
+    }
+    fn extend_selection(&self) {
+        if !self.selection_dragging.get() {
+            return;
+        }
+        let Some((x, y, rows, cols)) = self.selection_geometry() else {
+            return;
+        };
+        let (px, py) = self.mouse_position.get();
+        let row = ((py - y) / self.cell_height.get()).floor().max(0.0) as usize;
+        let col = ((px - x) / self.cell_width.get()).floor().max(0.0) as usize;
+        let (row, col) = (
+            row.min(rows.saturating_sub(1)),
+            col.min(cols.saturating_sub(1)),
+        );
+        if let Some(selection) = self.history_selection.borrow_mut().as_mut() {
+            selection.1 =
+                self.history_lines
+                    .borrow()
+                    .point(rows, self.history_offset.get(), row, col);
+        }
+        if let Some(selection) = self.selection.borrow_mut().as_mut() {
+            selection.1 = (row, col);
+        }
+        self.area.queue_draw();
+    }
+    fn selection_autoscroll(&self) {
+        if !self.selection_dragging.get()
+            || self.history_selection.borrow().is_none()
+            || self.selection_scroll_at.get().elapsed() < std::time::Duration::from_millis(35)
+        {
+            return;
+        }
+        let Some((_, y, rows, _)) = self.selection_geometry() else {
+            return;
+        };
+        let (_, py) = self.mouse_position.get();
+        let bottom = y + rows as f64 * self.cell_height.get();
+        // Moving across the first row is an ordinary text selection. Only a
+        // stationary hold inside the pane requests edge scrolling.
+        if py >= y
+            && py < bottom
+            && self.selection_motion_at.get().elapsed() < std::time::Duration::from_millis(150)
+        {
+            return;
+        }
+        // Start in the visible edge row: a maximized terminal or a split pane
+        // need not leave space for dragging beyond its drawing area.
+        let edge = self.cell_height.get().min((bottom - y) / 2.0);
+        let delta = if py < y + edge {
+            // A selection that starts in this row may be horizontal. Require
+            // movement toward the edge before interpreting it as a scroll.
+            if py >= y && py >= self.drag_start.get().1 - self.cell_height.get() / 4.0 {
+                return;
+            }
+            ((y - py) / self.cell_height.get()).ceil().clamp(1.0, 8.0) as isize
+        } else if py >= bottom - edge {
+            if py < bottom && py <= self.drag_start.get().1 + self.cell_height.get() / 4.0 {
+                return;
+            }
+            -((py - bottom) / self.cell_height.get())
+                .ceil()
+                .clamp(1.0, 8.0) as isize
+        } else {
+            return;
+        };
+        self.selection_scroll_at.set(std::time::Instant::now());
+        self.shift_history(delta);
+        self.extend_selection();
+    }
+    fn scroll_history(&self, dy: f64) {
+        let (_, previous) = self.wheel_delta.get();
+        let delta = previous + dy.clamp(-8.0, 8.0) * 3.0;
+        let lines = delta.trunc() as isize;
+        self.wheel_delta.set((0.0, delta - delta.trunc()));
+        if lines == 0 {
+            return;
+        }
+        self.shift_history(-lines);
+        self.extend_selection();
+    }
+    fn shift_history(&self, lines: isize) {
+        let mut offset = self.history_offset.get().saturating_add_signed(lines);
+        if let Some((_, _, height, _)) = self.selection_geometry() {
+            let history = self.history_lines.borrow();
+            if history.len() > 0 {
+                offset = offset.min(history.len().saturating_sub(height));
+            }
+        }
+        if offset == self.history_offset.get() {
+            return;
+        }
+        self.history_offset.set(offset);
+        if !self.selection_dragging.get() && self.history_selection.borrow().is_none() {
+            self.clear_selection();
+        }
+        if offset > 0 && self.history_lines.borrow().is_empty() && !self.history_pending.get() {
+            self.history_inline.set(true);
+            self.request_history(false);
+        }
+        if offset == 0
+            && !self.selection_dragging.get()
+            && self.history_selection.borrow().is_none()
+        {
+            self.cancel_inline_history();
+        }
+        let _ = self.grid();
+        self.area.queue_draw();
+    }
+    fn request_history(&self, primary: bool) {
+        if self.history_pending.replace(true) {
+            return;
+        }
+        let Some(generation) = self.history_request.get().checked_add(1) else {
+            self.history_pending.set(false);
+            return;
+        };
+        self.history_request.set(generation);
+        *self.history_pane.borrow_mut() = self.target.borrow().clone();
+        if let Err(e) = self.worker.borrow().send(Command::History(
+            self.target.borrow().clone(),
+            primary,
+            generation,
+        )) {
+            self.history_pending.set(false);
+            self.warn(&e);
+        }
+    }
+    fn cancel_inline_history(&self) {
+        let inline = self.history_inline.replace(false);
+        let pending = self.history_pending.replace(false);
+        if inline || pending {
+            self.history_request
+                .set(self.history_request.get().saturating_add(1));
+            self.history_pending.set(false);
+        }
+        self.history_lines.borrow_mut().clear();
     }
     pub fn show_terminal(&self) {
         self.stack.set_visible_child_name("terminal");
@@ -612,6 +1386,9 @@ impl View {
     }
     pub fn open_history(&self) {
         self.open_history_buffer(false);
+    }
+    pub fn fixture_history_viewport(&self) -> Value {
+        json!({"offset":self.history_offset.get(),"pending":self.history_pending.get(),"lines":self.history_lines.borrow().len(),"terminal_canvas":self.stack.visible_child_name().as_deref()==Some("terminal"),"focus":self.area.has_focus(),"cells":self.grid().map(|g|g["cells"].clone())})
     }
     pub fn fixture_history_buffer(&self, primary: bool) -> bool {
         fn find(w: &gtk::Widget, name: &str) -> Option<gtk::Button> {
@@ -644,13 +1421,11 @@ impl View {
         self.open_history_buffer(true);
     }
     fn open_history_buffer(&self, primary: bool) {
-        if let Err(e) = self
-            .worker
-            .borrow()
-            .send(Command::History(self.target.borrow().clone(), primary))
-        {
-            self.warn(&e);
+        if self.history_pending.get() {
+            return;
         }
+        self.history_inline.set(false);
+        self.request_history(primary);
         self.status.set_text(if primary {
             "Loading canonical primary-screen history…"
         } else {
@@ -664,7 +1439,7 @@ impl View {
         }
         self.release_mouse();
         self.navigation.set(true);
-        *self.selection.borrow_mut() = None;
+        self.clear_selection();
         self.command(method, params);
     }
     fn split(&self, vertical: bool) {
@@ -1096,6 +1871,12 @@ impl View {
     }
     fn set_target(&self, target: String) {
         if *self.target.borrow() != target {
+            self.clear_selection();
+            self.history_request
+                .set(self.history_request.get().saturating_add(1));
+            self.history_pending.set(false);
+            self.history_offset.set(0);
+            self.cancel_inline_history();
             self.cancel_image_paste();
         }
         *self.target.borrow_mut() = target;
@@ -1202,6 +1983,11 @@ impl View {
         }
     }
     pub fn input(&self, text: &str) {
+        self.clear_selection();
+        self.cancel_inline_history();
+        if self.history_offset.replace(0) > 0 {
+            self.area.queue_draw();
+        }
         self.typed.set(true);
         if self.target.borrow().is_empty() || self.navigation.get() {
             let mut pending = self.early.borrow_mut();
@@ -1218,6 +2004,10 @@ impl View {
         );
     }
     pub fn paste(&self, text: String) {
+        self.clear_selection();
+        self.history_offset.set(0);
+        self.cancel_inline_history();
+        self.area.queue_draw();
         self.cancel_image_paste();
         if text.len() > ruwac_clipboard::MAX_DESKTOP_TEXT
             || text.contains('\0')
@@ -1237,7 +2027,7 @@ impl View {
         }
     }
     /// Replace a disconnected worker, starting the daemon when it is absent.
-    pub fn reconnect(&self) {
+    pub fn reconnect(self: &Rc<Self>) {
         self.cancel_image_paste();
         if self.detached.get() || self.finished.get() {
             return;
@@ -1254,29 +2044,32 @@ impl View {
             .worker
             .replace(Worker::restart(self.socket.clone(), self.session.clone()));
         old.close();
+        self.bind_worker_wake();
         if self.area.width() > 0 && self.area.height() > 0 {
             self.command("client.resize",json!({"rows":((self.area.height()as f64/self.cell_height.get())as i32).clamp(4,u16::MAX as i32),"cols":((self.area.width()as f64/self.cell_width.get())as i32).clamp(10,u16::MAX as i32)}));
         }
         self.focus();
     }
     pub fn tab_status(&self) -> crate::tiles::TabStatus {
-        use crate::tiles::TabStatus;
-        if self.warning.borrow().is_some() {
-            TabStatus::Error
-        } else if self.ended.get() || self.finished.get() || self.dead.is_visible() {
-            TabStatus::Offline
-        } else if self.frame.borrow().is_none() {
-            TabStatus::Busy
-        } else {
-            TabStatus::Ready
-        }
+        terminal_tab_status(
+            self.frame.borrow().is_some(),
+            self.ended.get() || self.finished.get() || self.dead.is_visible(),
+            self.warning.borrow().is_some(),
+        )
     }
     pub fn update(self: &Rc<Self>) {
+        self.selection_autoscroll();
         let worker = self.worker.borrow();
         worker.set_visible(self.area.is_mapped());
         let mut s = worker.state.lock().unwrap();
         if let Some(error) = s.error.take() {
+            self.program_selection_pending.borrow_mut().take();
+            self.history_pending.set(false);
+            self.history_inline.set(false);
             self.warn(&error);
+        }
+        if s.disconnected || s.session_gone {
+            self.program_selection_pending.borrow_mut().take();
         }
         if s.session_gone {
             // Removed by exit, kill-session or another client: same as exit.
@@ -1286,6 +2079,7 @@ impl View {
         if s.disconnected && !self.detached.get() && !self.dead.is_visible() {
             self.ended.set(false);
             self.dead_title.set_text("Terminal disconnected");
+            self.reconnect_button.set_label("Reconnect");
             self.dead.set_valign(gtk::Align::Center);
             self.dead_reason.set_text(&format!(
                 "{}\nThe session may still be running. Reconnect starts the daemon if needed and reattaches; closing this tab does not end the session.",
@@ -1318,6 +2112,11 @@ impl View {
                 if self.seen_running.get()
                     && self.typed.get()
                     && !crate::launches::is_remote(&self.session, &self.target.borrow())
+                    && self
+                        .root
+                        .ancestor(adw::TabView::static_type())
+                        .and_then(|w| w.downcast::<adw::TabView>().ok())
+                        .is_some_and(|tabs| tabs.n_pages() > 1)
                 {
                     let ids: Vec<_> = panes
                         .iter()
@@ -1338,10 +2137,11 @@ impl View {
                 } else if !self.dead.is_visible() {
                     self.ended.set(true);
                     self.dead_title.set_text("Session ended");
+                    self.reconnect_button.set_label("Recreate");
                     self.dead_reason.set_text(if crate::launches::is_remote(&self.session,&self.target.borrow()) {
-                        "The remote program or SSH connection ended. Reconnect opens it again in a new tab."
+                        "The remote program or SSH connection ended. Recreate opens its saved launch again; New terminal opens a local shell."
                     } else {
-                        "The program ended. Its output stays readable above this card."
+                        "The program ended. Recreate starts a fresh local shell. New terminal keeps this output; New & close replaces this tab."
                     });
                     self.dead.set_valign(gtk::Align::End);
                     self.dead.set_margin_bottom(24);
@@ -1384,11 +2184,16 @@ impl View {
                     }
                 };
                 self.status.set_text(&format!(
-                    "{} · {}:{} — {state}{shared}",
+                    "{} · {}:{} — {state}{shared} · {}",
                     frame["session_name"].as_str().unwrap_or("Terminal"),
                     frame["window_index"].as_u64().unwrap_or(0),
-                    frame["name"].as_str().unwrap_or("shell")
+                    frame["name"].as_str().unwrap_or("shell"),
+                    engine_version_notice(s.engine_version.as_deref())
                 ));
+                self.status.set_tooltip_text(Some(&format!(
+                    "{}\nUpdates preserve running terminals. For new work on an independent updated engine, run: ruwac engine gui. Existing sessions stay on their current engine.",
+                    engine_version_notice(s.engine_version.as_deref())
+                )));
             }
             if self.navigation.get() {
                 if self.expected_window.borrow().as_deref() == frame["window"].as_str() {
@@ -1404,15 +2209,45 @@ impl View {
                 let incoming = panes
                     .iter()
                     .find(|p| p["id"].as_str() == Some(target.as_str()));
-                let stale = self
-                    .grid()
-                    .zip(incoming)
-                    .is_none_or(|(old, new)| selection_changed(&old, &new["grid"], a, z));
+                let pinned = self.history_selection.borrow().is_some();
+                let stale = self.grid().zip(incoming).is_none_or(|(old, new)| {
+                    if pinned {
+                        pinned_selection_changed(
+                            &old,
+                            &new["grid"],
+                            a,
+                            z,
+                            self.selection_dragging.get(),
+                            self.history_offset.get(),
+                        )
+                    } else {
+                        selection_changed(&old, &self.viewport_grid(&new["grid"]), a, z)
+                    }
+                });
                 if stale {
-                    self.selection.borrow_mut().take();
+                    let deferred = self.selection_copy_pending.get().is_some();
+                    self.clear_selection();
+                    if deferred {
+                        self.warn("Output changed before selection loaded; nothing was copied. Select again");
+                    }
                 }
             }
+            let serials = {
+                let target = self.target.borrow();
+                panes
+                    .iter()
+                    .find(|p| p["id"].as_str() == Some(target.as_str()))
+                    .map(|p| {
+                        (
+                            p["selection_offer"].as_u64().unwrap_or(0),
+                            p["selection_request"].as_u64().unwrap_or(0),
+                        )
+                    })
+            };
             *self.frame.borrow_mut() = Some(frame);
+            if let Some(serials) = serials {
+                self.program_selection(serials);
+            }
             if !self.navigation.get() && !self.target.borrow().is_empty() {
                 let pending = std::mem::take(&mut *self.early.borrow_mut());
                 for text in pending {
@@ -1424,6 +2259,34 @@ impl View {
             }
         }
         if let Some((method, v)) = s.reply.pop_front() {
+            if method == "pane.selection" {
+                let matches = self
+                    .program_selection_pending
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|(pane, _, serial, _)| {
+                        v["request_pane"].as_str() == Some(pane.as_str())
+                            && v["request_serial"].as_u64() == Some(*serial)
+                    });
+                let pending = if matches {
+                    self.program_selection_pending.borrow_mut().take()
+                } else {
+                    None
+                };
+                if let Some((pane, epoch, _, copy)) = pending {
+                    if pane == *self.target.borrow()
+                        && epoch == self.broker.borrow().epoch()
+                        && self.area.has_focus()
+                        && self.broker.borrow().desktop_enabled()
+                    {
+                        if let Some(text) = v["text"].as_str() {
+                            if self.offer_program_selection(text) && copy {
+                                self.copy_clipboard(false);
+                            }
+                        }
+                    }
+                }
+            }
             if method == "client.retireEnded" && v["closed"] == true && self.retiring.get() {
                 self.finished.set(true);
             }
@@ -1473,6 +2336,92 @@ impl View {
                 }
             }
             if method == "pane.history" || method == "pane.capture" {
+                if !self.history_pending.get()
+                    || v["generation"].as_u64() != Some(self.history_request.get())
+                    || v["pane"].as_str() != Some(self.target.borrow().as_str())
+                {
+                    return;
+                }
+                self.history_pending.set(false);
+                if let Some(error) = v["error"].as_str() {
+                    self.clear_selection();
+                    self.history_inline.set(false);
+                    self.warn(error);
+                    return;
+                }
+                if self.history_inline.replace(false) {
+                    if v["truncated"] == true {
+                        // Paging stopped before the active tail. A prefix cannot
+                        // be anchored to the screen where this drag started.
+                        self.clear_selection();
+                        self.history_lines.borrow_mut().clear();
+                        self.history_offset.set(0);
+                        self.warn("Selection history reached its 8 MiB limit; nothing was copied. Use the copy view to inspect the loaded history");
+                        self.area.queue_draw();
+                        return;
+                    }
+                    let pending_copy = self.selection_copy_pending.take();
+                    let seed = self.selection_seed.borrow_mut().take();
+                    let selection = *self.selection.borrow();
+                    if let (true, Some(seed), Some((a, _))) = (
+                        self.selection_dragging.get() || pending_copy.is_some(),
+                        seed,
+                        selection,
+                    ) {
+                        let text = v["text"].as_str().unwrap_or("");
+                        let height = seed["rows"].as_u64().unwrap_or(24) as usize;
+                        self.history_lines.borrow_mut().freeze(text, &seed);
+                        self.history_lines
+                            .borrow_mut()
+                            .set_styles(text, &v["styles"]);
+                        let frozen = self.history_lines.borrow_mut().grid(&seed, 0).0;
+                        // A common anchor character (for example a space) is
+                        // insufficient to bind a delayed snapshot to its starting
+                        // screen. Reject a changed viewport instead of selecting
+                        // unrelated history at a coincidentally matching cell.
+                        let end = (
+                            height.saturating_sub(1),
+                            seed["cols"].as_u64().unwrap_or(80).saturating_sub(1) as usize,
+                        );
+                        if selection_changed(&seed, &frozen, (0, 0), end) {
+                            self.clear_selection();
+                            self.history_lines.borrow_mut().clear();
+                            self.history_offset.set(0);
+                            self.warn(
+                                "Output changed before selection loaded; try selecting again",
+                            );
+                            return;
+                        }
+                        let anchor = self.history_lines.borrow().point(height, 0, a.0, a.1);
+                        *self.history_selection.borrow_mut() = Some((anchor, anchor));
+                        // Complete the mouse-up extent once, without continuing
+                        // edge autoscroll after the button has been released.
+                        let dragging = self.selection_dragging.replace(true);
+                        self.extend_selection();
+                        self.selection_dragging.set(dragging);
+                        if let Some((generation, clipboard)) = pending_copy {
+                            if generation == self.history_request.get() && self.area.has_focus() {
+                                self.copy_clipboard(true);
+                                if clipboard {
+                                    self.copy_clipboard(false);
+                                }
+                            }
+                        }
+                    } else {
+                        self.history_lines
+                            .borrow_mut()
+                            .set(v["text"].as_str().unwrap_or(""));
+                        self.history_lines
+                            .borrow_mut()
+                            .set_styles(v["text"].as_str().unwrap_or(""), &v["styles"]);
+                    }
+                    let _ = self.grid();
+                    if v["truncated"] == true {
+                        self.warn("Selection reached its 8 MiB limit; only the loaded history can be selected");
+                    }
+                    self.area.queue_draw();
+                    return;
+                }
                 if v["truncated"] == true {
                     self.warn("Copy view reached its 8 MiB limit; only the loaded history can be selected");
                 }
@@ -1496,7 +2445,7 @@ impl View {
                     let pending = Rc::new(Cell::new(true));
                     let weak = adjustment.downgrade();
                     let p = pending.clone();
-                    adjustment.connect_changed(move |a| {
+                    let handler = adjustment.connect_changed(move |a| {
                         if p.get() {
                             a.set_value(a.upper() - a.page_size());
                         }
@@ -1506,6 +2455,7 @@ impl View {
                         move || {
                             pending.set(false);
                             if let Some(a) = weak.upgrade() {
+                                a.disconnect(handler);
                                 a.set_value(a.upper() - a.page_size());
                             }
                         },
@@ -1555,7 +2505,7 @@ impl View {
 
             if p != *self.target.borrow() {
                 self.release_mouse();
-                *self.selection.borrow_mut() = None;
+                self.clear_selection();
             }
             self.set_target(p.clone());
             self.command("pane.select", json!({"pane":p}));
@@ -1566,8 +2516,8 @@ impl View {
         let frame = self.frame.borrow();
         let frame = frame.as_ref()?;
         for p in frame["panes"].as_array()? {
-            let rows = p["grid"]["rows"].as_u64()? as usize;
-            let cols = p["grid"]["cols"].as_u64()? as usize;
+            let rows = p["grid"]["rows"].as_u64()?.min(p["rect"]["rows"].as_u64()?) as usize;
+            let cols = p["grid"]["cols"].as_u64()?.min(p["rect"]["cols"].as_u64()?) as usize;
             let px = p["rect"]["x"].as_f64().unwrap_or(0.0) * self.cell_width.get();
             let py = p["rect"]["y"].as_f64().unwrap_or(0.0) * self.cell_height.get();
             if y >= py
@@ -1592,10 +2542,33 @@ impl View {
             .as_array()?
             .iter()
             .find(|p| p["id"].as_str() == Some(self.target.borrow().as_str()))
-            .map(|p| p["grid"].clone())
+            .map(|p| self.viewport_grid(&p["grid"]))
+    }
+    fn viewport_grid(&self, live: &Value) -> Value {
+        if self.history_lines.borrow().is_empty() {
+            return live.clone();
+        }
+        let (grid, offset) = self
+            .history_lines
+            .borrow_mut()
+            .grid(live, self.history_offset.get());
+        self.history_offset.set(offset);
+        grid
+    }
+    fn grid_flag(&self, name: &str) -> bool {
+        self.frame
+            .borrow()
+            .as_ref()
+            .and_then(|frame| frame["panes"].as_array())
+            .and_then(|panes| {
+                panes
+                    .iter()
+                    .find(|pane| pane["id"].as_str() == Some(self.target.borrow().as_str()))
+            })
+            .is_some_and(|pane| pane["grid"][name] == true)
     }
     fn mouse_enabled(&self) -> bool {
-        self.grid().is_some_and(|g| g["mouse"] == true)
+        self.grid_flag("mouse")
     }
     pub fn mouse(&self, button: u32, x: f64, y: f64, release: bool) {
         self.mouse_with_mods(button, x, y, release, gdk::ModifierType::empty());
@@ -1632,6 +2605,12 @@ impl View {
                 } else {
                     0
                 };
+            match (button & !28, release) {
+                (0, true) | (1, false) => self
+                    .mouse_gesture
+                    .set(Some((button & !28, std::time::Instant::now()))),
+                _ => (),
+            }
             self.command("client.input",json!({"pane":pane,"kind":"mouse","text":"","mouse_event":{"button":button,"x":c+1,"y":r+1,"release":release}}));
         }
     }
@@ -1643,10 +2622,63 @@ impl View {
         mods: gdk::ModifierType,
         release: bool,
     ) {
+        if button == 1 && !release {
+            self.program_selection_text.borrow_mut().take();
+            self.program_selection_pending.borrow_mut().take();
+        }
+        if button == 1 && release && self.link_click.replace(false) {
+            return;
+        }
+        if button == 1
+            && !release
+            && mods.contains(gdk::ModifierType::CONTROL_MASK)
+            && (!self.mouse_enabled() || mods.contains(gdk::ModifierType::SHIFT_MASK))
+        {
+            if let Some(url) = self.url_at(x, y) {
+                self.link_click.set(true);
+                self.open_url(&url);
+                return;
+            }
+        }
         if !release {
             self.focus_at(x, y);
         }
-        if self.mouse_enabled() && !mods.contains(gdk::ModifierType::SHIFT_MASK) {
+        if button == 2 {
+            if release && self.selection_middle.replace(false) {
+                return;
+            }
+            if !release {
+                self.selection_middle.set(false);
+                // A deliberate selection from another RUWAC tab already has
+                // a compositor-owned provider. Deliver it as a normal paste,
+                // including through a nested TUI on an older preserved engine
+                // that cannot answer OSC 52 PRIMARY. Other application mouse
+                // events and external PRIMARY owners keep their usual routing.
+                if self.clipboard_action_enabled("paste")
+                    && self.area.has_focus()
+                    && self
+                        .root
+                        .root()
+                        .and_downcast::<gtk::Window>()
+                        .is_some_and(|w| w.is_active())
+                {
+                    if let Some(text) =
+                        crate::terminal_primary::selected(&self.area.display().primary_clipboard())
+                    {
+                        self.selection_middle.set(true);
+                        self.paste(text);
+                        return;
+                    }
+                }
+            }
+        }
+        if self.mouse_enabled()
+            && !self.selection_dragging.get()
+            && !mods.contains(gdk::ModifierType::SHIFT_MASK)
+        {
+            if release && self.pressed.get() != Some(button.saturating_sub(1)) {
+                return; // A canceled local selection never pressed the app button.
+            }
             self.pressed.set(if release {
                 None
             } else {
@@ -1668,6 +2700,153 @@ impl View {
             crate::host_shortcuts::popup(self, x, y);
         } else if button == 2 && !release {
             self.paste_clipboard(true);
+        }
+    }
+    fn url_at(&self, x: f64, y: f64) -> Option<String> {
+        let (pane, row, column) = self.point(x, y)?;
+        if pane != *self.target.borrow() {
+            return None;
+        }
+        let grid = self.grid()?;
+        let rows = grid["cells"].as_array()?;
+        let mut first = row;
+        while first > 0 && grid["wrapped"][first - 1] == true {
+            first -= 1;
+        }
+        let mut last = row;
+        while last + 1 < rows.len() && grid["wrapped"][last] == true {
+            last += 1;
+        }
+        let mut line = String::new();
+        let mut index = 0;
+        for (r, cells) in rows.iter().enumerate().take(last + 1).skip(first) {
+            for (c, cell) in cells.as_array()?.iter().enumerate() {
+                if r < row || (r == row && c < column) {
+                    if cell[1] != true {
+                        index += cell[0].as_str().unwrap_or("").chars().count();
+                    }
+                }
+                if cell[1] != true {
+                    line.push_str(cell[0].as_str().unwrap_or(""));
+                }
+            }
+        }
+        crate::web_route::link_at(&line, index)
+    }
+    pub fn link_menu(self: &Rc<Self>, x: f64, y: f64) -> Option<gtk::Box> {
+        let url = self.url_at(x, y)?;
+        let source = crate::web::Source::capture(self);
+        let remote = crate::launches::is_remote(&self.session, &self.target.borrow());
+        let tabs = self
+            .root
+            .ancestor(adw::TabView::static_type())
+            .and_downcast::<adw::TabView>()?
+            .downgrade();
+        let body = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        let preview = gtk::Button::with_label("Open in Web Preview");
+        preview.add_css_class("flat");
+        let u = url.clone();
+        let weak = Rc::downgrade(self);
+        let route = source.clone();
+        preview.connect_clicked(move |_| {
+            if let Some(view) = weak.upgrade() {
+                let local = crate::web_route::parse(&u)
+                    .ok()
+                    .and_then(|u| crate::web_route::destination(&u).ok())
+                    .is_some_and(|d| matches!(d, crate::web_route::Destination::Loopback { .. }));
+                if route.is_none() && remote && local {
+                    view.status
+                        .set_text("Remote loopback preview requires the original bound SSH pane");
+                    return;
+                }
+                if let Some(t) = tabs.upgrade() {
+                    if let Err(e) = crate::web::open(&t, Some(&u), route.clone()) {
+                        view.status.set_text(&e);
+                    }
+                }
+            }
+        });
+        body.append(&preview);
+        let external = gtk::Button::with_label("Open in external browser");
+        external.add_css_class("flat");
+        external.set_sensitive(
+            !remote
+                || crate::web_route::parse(&url)
+                    .ok()
+                    .and_then(|u| crate::web_route::destination(&u).ok())
+                    == Some(crate::web_route::Destination::Public),
+        );
+        external.set_tooltip_text(Some("For remote loopback, open Web Preview first, then use its external-browser button to keep the verified tunnel"));
+        let u = url.clone();
+        external.connect_clicked(move |_| {
+            gtk::gio::AppInfo::launch_default_for_uri_async(
+                &u,
+                None::<&gtk::gio::AppLaunchContext>,
+                None::<&gtk::gio::Cancellable>,
+                move |_| {},
+            )
+        });
+        body.append(&external);
+        let copy = gtk::Button::with_label("Copy URL");
+        copy.add_css_class("flat");
+        let weak = Rc::downgrade(self);
+        copy.connect_clicked(move |_| {
+            if let Some(v) = weak.upgrade() {
+                if v.broker.borrow().desktop_enabled() {
+                    v.broker.borrow_mut().local_copy();
+                    v.area.display().clipboard().set_text(&url);
+                }
+            }
+        });
+        body.append(&copy);
+        Some(body)
+    }
+    /// "Open remote web service…" appears only on a pane that was launched
+    /// through a saved, verified SSH machine and is still bound to it.
+    pub fn remote_service_button(self: &Rc<Self>) -> Option<gtk::Button> {
+        crate::web::Source::capture(self)?;
+        let button = gtk::Button::with_label("Open remote web service…");
+        button.add_css_class("flat");
+        button.set_widget_name("remote-service-open");
+        button.set_tooltip_text(Some(
+            "Preview a web app listening on this SSH machine's localhost, through this terminal's SSH connection",
+        ));
+        let weak = Rc::downgrade(self);
+        button.connect_clicked(move |button| {
+            if let Some(pop) = button
+                .ancestor(gtk::Popover::static_type())
+                .and_downcast::<gtk::Popover>()
+            {
+                pop.popdown();
+            }
+            if let Some(view) = weak.upgrade() {
+                crate::web::service_dialog(&view);
+            }
+        });
+        Some(button)
+    }
+    fn open_url(self: &Rc<Self>, url: &str) {
+        let source = crate::web::Source::capture(self);
+        if source.is_none()
+            && crate::launches::is_remote(&self.session, &self.target.borrow())
+            && crate::web_route::parse(url)
+                .ok()
+                .and_then(|u| crate::web_route::destination(&u).ok())
+                .is_some_and(|d| matches!(d, crate::web_route::Destination::Loopback { .. }))
+        {
+            self.status.set_text("Remote loopback preview needs this pane's original verified SSH launch; no local URL was opened");
+            return;
+        }
+        if let Some(tabs) = self
+            .root
+            .ancestor(adw::TabView::static_type())
+            .and_downcast::<adw::TabView>()
+        {
+            if let Err(e) = crate::web::open(&tabs, Some(url), source) {
+                self.status.set_text(&e);
+            }
+        } else {
+            self.status.set_text("Web Preview requires a workspace tab");
         }
     }
     pub fn paste_desktop(self: &Rc<Self>) {
@@ -1719,7 +2898,43 @@ impl View {
         }
         body
     }
+    fn select_word(&self, x: f64, y: f64) -> bool {
+        let Some((pane, row, col)) = self.point(x, y) else {
+            return false;
+        };
+        if pane != *self.target.borrow() {
+            return false;
+        }
+        let Some(grid) = self.grid() else {
+            return false;
+        };
+        let Some((a, z)) = selected_word(&grid, (row, col)) else {
+            return false;
+        };
+        self.clear_selection();
+        // A click may have started an asynchronous drag snapshot. The word
+        // is bound to this already displayed frame, not a later history reply.
+        if self.history_inline.get() && self.history_pending.get() {
+            self.cancel_inline_history();
+        }
+        *self.selection.borrow_mut() = Some((a, z));
+        if !self.history_lines.borrow().is_empty() {
+            let height = grid["rows"].as_u64().unwrap_or(24) as usize;
+            let mut history = self.history_lines.borrow_mut();
+            history.pin();
+            *self.history_selection.borrow_mut() = Some((
+                history.point(height, self.history_offset.get(), a.0, a.1),
+                history.point(height, self.history_offset.get(), z.0, z.1),
+            ));
+        }
+        self.word_click.set(true);
+        self.area.queue_draw();
+        true
+    }
     pub fn selected(&self) -> String {
+        if let Some((a, z)) = *self.history_selection.borrow() {
+            return self.history_lines.borrow().selected(a, z);
+        }
         if self.stack.visible_child_name().as_deref() == Some("copy") {
             let b = self.copy.buffer();
             return b
@@ -1735,12 +2950,43 @@ impl View {
         };
         selection_text(&g, a, z)
     }
+    fn clipboard_selection(&self) -> String {
+        let selected = self.selected();
+        if !selected.is_empty() {
+            return selected;
+        }
+        if self.area.has_focus()
+            && self.primary_provider.borrow().as_ref().is_some_and(|ours| {
+                self.area.display().primary_clipboard().content().as_ref() == Some(ours)
+            })
+        {
+            return self
+                .program_selection_text
+                .borrow()
+                .clone()
+                .unwrap_or_default();
+        }
+        String::new()
+    }
     pub fn copy_clipboard(&self, primary: bool) {
+        if self.selection_copy_pending.get().is_some() {
+            self.status
+                .set_text("Loading selection history; copy will finish when ready");
+            return;
+        }
         if !self.broker.borrow().desktop_enabled() {
             self.status.set_text("Desktop clipboard disabled");
             return;
         }
-        let text = self.selected();
+        if !primary {
+            if let Some((_, _, _, copy)) = self.program_selection_pending.borrow_mut().as_mut() {
+                *copy = true;
+                self.status
+                    .set_text("Loading application selection; copy will finish when ready");
+                return;
+            }
+        }
+        let text = self.clipboard_selection();
         if text.is_empty() {
             self.status.set_text("Select terminal text before copying");
             return;
@@ -1773,6 +3019,79 @@ impl View {
         } else {
             "Selection copied to CLIPBOARD"
         });
+    }
+    /// A program in the target pane (typically a nested RUWAC client) used
+    /// OSC 52 PRIMARY. Its selection reaches the desktop, and the desktop
+    /// selection reaches it, only right after the user's own mouse gesture
+    /// in this pane; otherwise the program keeps its internal fallback.
+    fn program_selection(self: &Rc<Self>, (offer, request): (u64, u64)) {
+        let (seen_offer, seen_request) = self.selection_serials.get();
+        if (offer, request) == (seen_offer, seen_request) {
+            return;
+        }
+        self.selection_serials.set((offer, request));
+        let recent = |button: u32, within: u64| {
+            self.mouse_gesture.get().is_some_and(|(b, at)| {
+                b == button && at.elapsed() < std::time::Duration::from_millis(within)
+            })
+        };
+        if !self.broker.borrow().desktop_enabled() || !self.area.has_focus() {
+            return;
+        }
+        let pane = self.target.borrow().clone();
+        if offer > seen_offer && recent(0, 2000) {
+            self.mouse_gesture.set(None);
+            *self.program_selection_pending.borrow_mut() =
+                Some((pane.clone(), self.broker.borrow().epoch(), offer, false));
+            self.command("pane.selection", json!({"pane":pane,"serial":offer}));
+        }
+        if request > seen_request && recent(1, 1500) {
+            self.mouse_gesture.set(None);
+            let weak = Rc::downgrade(self);
+            let display = self.area.display();
+            let epoch = self.broker.borrow().epoch();
+            clipboard::read_text(
+                &display.primary_clipboard(),
+                self.broker.clone(),
+                epoch,
+                ruwac_clipboard::ClipScope::Primary,
+                std::time::Duration::ZERO,
+                move |result| {
+                    if let (Some(v), Ok(text)) = (weak.upgrade(), result) {
+                        if *v.target.borrow() == pane && text.len() <= 128 * 1024 {
+                            v.command(
+                                "pane.selectionReply",
+                                json!({"pane":pane,"serial":request,"text":text}),
+                            );
+                        }
+                    }
+                },
+            );
+        }
+    }
+    fn offer_program_selection(&self, text: &str) -> bool {
+        if text.is_empty() || text.len() > ruwac_clipboard::MAX_DESKTOP_TEXT {
+            return false;
+        }
+        self.broker.borrow_mut().local_copy();
+        let provider = gdk::ContentProvider::for_value(&text.to_value());
+        *self.primary_provider.borrow_mut() = Some(provider.clone());
+        if self
+            .area
+            .display()
+            .primary_clipboard()
+            .set_content(Some(&provider))
+            .is_err()
+        {
+            self.primary_provider.borrow_mut().take();
+            self.status
+                .set_text("The desktop could not publish this PRIMARY selection");
+            return false;
+        }
+        crate::terminal_primary::remember(&provider, text);
+        *self.program_selection_text.borrow_mut() = Some(text.into());
+        self.status.set_text("Selection offered to PRIMARY");
+        true
     }
     pub fn paste_clipboard(self: &Rc<Self>, primary: bool) {
         let display = self.area.display();
@@ -1826,6 +3145,21 @@ impl View {
             self.copy_clipboard(false);
             return;
         }
+        let plain_control = mods.contains(gdk::ModifierType::CONTROL_MASK)
+            && !mods.intersects(
+                gdk::ModifierType::ALT_MASK
+                    | gdk::ModifierType::SUPER_MASK
+                    | gdk::ModifierType::SHIFT_MASK,
+            );
+        if self.desktop_shortcuts.get()
+            && plain_control
+            && key == gdk::Key::c
+            && (!self.clipboard_selection().is_empty()
+                || self.program_selection_pending.borrow().is_some())
+        {
+            self.copy_clipboard(false);
+            return;
+        }
         // An image pasted into an SSH tab is sent to the host as a file.
         if matches!(key, gdk::Key::v | gdk::Key::V)
             && mods.contains(gdk::ModifierType::CONTROL_MASK)
@@ -1835,6 +3169,11 @@ impl View {
             return;
         }
         if self.binding(key, mods, "paste", "<Control><Shift>v") {
+            self.paste_clipboard(false);
+            return;
+        }
+        if self.desktop_shortcuts.get() && plain_control && matches!(key, gdk::Key::v | gdk::Key::V)
+        {
             self.paste_clipboard(false);
             return;
         }
@@ -1948,35 +3287,16 @@ impl View {
             }
             return;
         }
-        let mut text = match key {
+        let navigation = navigation_key(key, mods, self.grid_flag("application_cursor"))
+            .or_else(|| function_key(key, mods));
+        let is_navigation = navigation.is_some();
+        let mut text = navigation.unwrap_or_else(|| match key {
             gdk::Key::Return | gdk::Key::KP_Enter => "\r".into(),
             gdk::Key::BackSpace => "\x7f".into(),
             gdk::Key::Tab => "\t".into(),
             gdk::Key::Escape => "\x1b".into(),
-            gdk::Key::Up => "\x1b[A".into(),
-            gdk::Key::Down => "\x1b[B".into(),
-            gdk::Key::Left => "\x1b[D".into(),
-            gdk::Key::Right => "\x1b[C".into(),
-            gdk::Key::Home => "\x1b[H".into(),
-            gdk::Key::End => "\x1b[F".into(),
-            gdk::Key::Delete => "\x1b[3~".into(),
-            gdk::Key::Page_Up => "\x1b[5~".into(),
-            gdk::Key::Page_Down => "\x1b[6~".into(),
             _ => ch.map(|c| c.to_string()).unwrap_or_default(),
-        };
-        if self.grid().is_some_and(|g| g["application_cursor"] == true)
-            && matches!(
-                key,
-                gdk::Key::Up
-                    | gdk::Key::Down
-                    | gdk::Key::Left
-                    | gdk::Key::Right
-                    | gdk::Key::Home
-                    | gdk::Key::End
-            )
-        {
-            text = text.replacen("\x1b[", "\x1bO", 1);
-        }
+        });
         if ctrl {
             if let Some(c) = ch {
                 if ('@'..='_').contains(&c.to_ascii_uppercase()) {
@@ -1988,10 +3308,13 @@ impl View {
             self.status.set_text("NUL key unsupported");
             return;
         }
-        if mods.contains(gdk::ModifierType::ALT_MASK) {
+        if !is_navigation && mods.contains(gdk::ModifierType::ALT_MASK) {
             text.insert(0, '\x1b');
         }
         if !text.is_empty() {
+            self.history_offset.set(0);
+            self.cancel_inline_history();
+            self.area.queue_draw();
             self.input(&text);
         }
     }
@@ -2007,13 +3330,16 @@ impl View {
         if self.prefix.replace(false) {
             self.input(&self.literal_prefix());
         }
-        *self.selection.borrow_mut() = None;
+        self.clear_selection();
         self.detached.set(true);
         self.worker.borrow().close();
         self.broker.borrow_mut().disconnect(&self.session);
         self.status.set_text("Detached; daemon PTYs preserved");
     }
     pub fn apply_appearance(&self, prefs: &crate::sidebar_shell::Settings) {
+        self.desktop_shortcuts
+            .set(prefs.terminal_shortcuts == "desktop");
+        self.copy_on_select.set(prefs.copy_selection_to_clipboard);
         let font = if crate::chrome::font_available(&prefs.term_font) {
             prefs.term_font.as_str()
         } else {
@@ -2095,6 +3421,31 @@ impl View {
             json!({"queued":false})
         }
     }
+    pub fn fixture_recovery(&self, operation: &str) -> Value {
+        let buttons = RefCell::new(Vec::new());
+        crate::chrome::walk(self.dead.upcast_ref(), &|w| {
+            if let Some(button) = w.downcast_ref::<gtk::Button>() {
+                let name = button.widget_name();
+                if matches!(
+                    name.as_str(),
+                    "terminal-reconnect"
+                        | "terminal-new-ended"
+                        | "terminal-replace-ended"
+                        | "terminal-close-ended"
+                ) {
+                    let origin = button
+                        .root()
+                        .and_then(|r| button.compute_point(&r, &gtk::graphene::Point::new(0., 0.)))
+                        .map(|p| [p.x(), p.y()]);
+                    buttons.borrow_mut().push(json!({"name":name.as_str(),"label":button.label().map(|s|s.to_string()),"origin":origin,"width":button.width(),"height":button.height()}));
+                    if operation == name.as_str() {
+                        button.emit_clicked();
+                    }
+                }
+            }
+        });
+        json!({"visible":self.dead.is_visible(),"ended":self.ended.get(),"buttons":buttons.into_inner()})
+    }
     pub fn fixture_reconnect(&self) -> Value {
         let visible = self.dead.is_visible();
         let ended = self.ended.get();
@@ -2124,40 +3475,42 @@ impl View {
         let Some(panes) = frame["panes"].as_array() else {
             return;
         };
-        let layout = area.create_pango_layout(None);
-        let normal = gtk::pango::FontDescription::from_string(&format!(
-            "{} {}",
-            self.font.borrow(),
-            self.font_size.get()
-        ));
-        let bold = gtk::pango::FontDescription::from_string(&format!(
-            "{} Bold {}",
-            self.font.borrow(),
-            self.font_size.get()
-        ));
-        let italic = gtk::pango::FontDescription::from_string(&format!(
-            "{} Italic {}",
-            self.font.borrow(),
-            self.font_size.get()
-        ));
-        let bold_italic = gtk::pango::FontDescription::from_string(&format!(
-            "{} Bold Italic {}",
-            self.font.borrow(),
-            self.font_size.get()
-        ));
-        let attributes = gtk::pango::AttrList::new();
-        attributes.insert(gtk::pango::AttrFontFeatures::new("liga=0, calt=0"));
-        layout.set_attributes(Some(&attributes));
-        let mut last_glyph = String::new();
-        let mut last_font = None;
+        let font = self.font.borrow();
+        let mut glyphs = self.glyphs.borrow_mut();
+        glyphs.prepare(area, &font, self.font_size.get());
         for p in panes {
             let _ = cr.save();
             cr.translate(
                 p["rect"]["x"].as_f64().unwrap_or(0.0) * self.cell_width.get(),
                 p["rect"]["y"].as_f64().unwrap_or(0.0) * self.cell_height.get(),
             );
+            cr.rectangle(
+                0.0,
+                0.0,
+                p["rect"]["cols"].as_f64().unwrap_or(0.0) * self.cell_width.get(),
+                p["rect"]["rows"].as_f64().unwrap_or(0.0) * self.cell_height.get(),
+            );
+            cr.clip();
             let y = 0.0;
-            let g = &p["grid"];
+            let viewport = ((self.history_offset.get() > 0
+                || self.history_lines.borrow().is_frozen())
+                && p["id"].as_str() == Some(self.target.borrow().as_str()))
+            .then(|| self.viewport_grid(&p["grid"]));
+            let g = viewport.as_ref().unwrap_or(&p["grid"]);
+            let selected = if p["id"].as_str() == Some(self.target.borrow().as_str()) {
+                if let Some((a, z)) = *self.history_selection.borrow() {
+                    self.history_lines.borrow().visible_selection(
+                        a,
+                        z,
+                        g["rows"].as_u64().unwrap_or(24) as usize,
+                        self.history_offset.get(),
+                    )
+                } else {
+                    *self.selection.borrow()
+                }
+            } else {
+                None
+            };
             if panes.len() > 1 {
                 cr.set_source_rgb(0.30, 0.38, 0.48);
                 cr.rectangle(
@@ -2176,23 +3529,21 @@ impl View {
                             if cell[5] == true {
                                 bg = color(&cell[2], true);
                             }
-                            if p["id"].as_str() == Some(self.target.borrow().as_str())
-                                && self.selection.borrow().is_some_and(|(a, z)| {
-                                    let (lo, hi) = if a <= z { (a, z) } else { (z, a) };
-                                    lo <= (r, c) && (r, c) <= hi
-                                })
-                            {
+                            if selected.is_some_and(|(a, z)| {
+                                let (lo, hi) = if a <= z { (a, z) } else { (z, a) };
+                                lo <= (r, c) && (r, c) <= hi
+                            }) {
                                 bg = (0.18, 0.28, 0.48);
                             }
                             if bg != canvas_bg {
-                                cr.set_source_rgb(bg.0, bg.1, bg.2);
-                                cr.rectangle(
+                                crate::terminal_style::background(
+                                    cr,
                                     c as f64 * self.cell_width.get(),
                                     y + r as f64 * self.cell_height.get(),
                                     self.cell_width.get(),
                                     self.cell_height.get(),
+                                    bg,
                                 );
-                                let _ = cr.fill();
                             }
                         }
                         for (c, cell) in cells.iter().enumerate() {
@@ -2207,28 +3558,17 @@ impl View {
                                 }
                                 let glyph = cell[0].as_str().unwrap_or("");
                                 if !matches!(glyph, "" | " ") {
-                                    let font_key = (cell[4] == true, cell[6]["italic"] == true);
-                                    if last_font != Some(font_key) {
-                                        layout.set_font_description(Some(match font_key {
-                                            (true, true) => &bold_italic,
-                                            (true, false) => &bold,
-                                            (false, true) => &italic,
-                                            _ => &normal,
-                                        }));
-                                        last_font = Some(font_key);
-                                    }
-                                    if glyph != last_glyph {
-                                        layout.set_text(glyph);
-                                        last_glyph.clear();
-                                        last_glyph.push_str(glyph);
-                                    }
+                                    let (layout, glyph_height) = glyphs.get(
+                                        area,
+                                        cell[4] == true,
+                                        cell[6]["italic"] == true,
+                                        glyph,
+                                    );
                                     cr.set_source_rgb(fg.0, fg.1, fg.2);
                                     cr.move_to(
                                         c as f64 * self.cell_width.get(),
                                         y + r as f64 * self.cell_height.get()
-                                            + (self.cell_height.get()
-                                                - layout.pixel_size().1 as f64)
-                                                / 2.,
+                                            + (self.cell_height.get() - glyph_height as f64) / 2.,
                                     );
                                     pangocairo::functions::show_layout(cr, &layout);
                                 }
@@ -2371,9 +3711,177 @@ mod palette_tests {
 
 impl Drop for View {
     fn drop(&mut self) {
+        if let Some(task) = self.wake_task.borrow_mut().take() {
+            task.abort();
+        }
         if let Some(handler) = self.primary_handler.borrow_mut().take() {
             self.area.display().primary_clipboard().disconnect(handler);
         }
         self.cancel_image_paste();
+    }
+}
+
+// Xterm function keys: F1–F4 are SS3 P–S (CSI 1;m P–S with modifiers),
+// F5–F12 are CSI n~ (CSI n;m~). Without this they produced no input at all.
+fn function_key(key: gdk::Key, mods: gdk::ModifierType) -> Option<String> {
+    let (parameter, final_byte) = match key {
+        gdk::Key::F1 => (1, 'P'),
+        gdk::Key::F2 => (1, 'Q'),
+        gdk::Key::F3 => (1, 'R'),
+        gdk::Key::F4 => (1, 'S'),
+        gdk::Key::F5 => (15, '~'),
+        gdk::Key::F6 => (17, '~'),
+        gdk::Key::F7 => (18, '~'),
+        gdk::Key::F8 => (19, '~'),
+        gdk::Key::F9 => (20, '~'),
+        gdk::Key::F10 => (21, '~'),
+        gdk::Key::F11 => (23, '~'),
+        gdk::Key::F12 => (24, '~'),
+        _ => return None,
+    };
+    let modifier = 1
+        + u8::from(mods.contains(gdk::ModifierType::SHIFT_MASK))
+        + 2 * u8::from(mods.contains(gdk::ModifierType::ALT_MASK))
+        + 4 * u8::from(mods.contains(gdk::ModifierType::CONTROL_MASK));
+    Some(match (modifier > 1, final_byte) {
+        (false, '~') => format!("\x1b[{parameter}~"),
+        (false, _) => format!("\x1bO{final_byte}"),
+        (true, _) => format!("\x1b[{parameter};{modifier}{final_byte}"),
+    })
+}
+
+#[cfg(test)]
+mod function_key_tests {
+    use super::*;
+    #[test]
+    fn function_keys_use_xterm_sequences_with_modifiers() {
+        let none = gdk::ModifierType::empty();
+        let expected = [
+            (gdk::Key::F1, "\x1bOP"),
+            (gdk::Key::F2, "\x1bOQ"),
+            (gdk::Key::F3, "\x1bOR"),
+            (gdk::Key::F4, "\x1bOS"),
+            (gdk::Key::F5, "\x1b[15~"),
+            (gdk::Key::F6, "\x1b[17~"),
+            (gdk::Key::F7, "\x1b[18~"),
+            (gdk::Key::F8, "\x1b[19~"),
+            (gdk::Key::F9, "\x1b[20~"),
+            (gdk::Key::F10, "\x1b[21~"),
+            (gdk::Key::F11, "\x1b[23~"),
+            (gdk::Key::F12, "\x1b[24~"),
+        ];
+        for (key, sequence) in expected {
+            assert_eq!(function_key(key, none).as_deref(), Some(sequence));
+        }
+        assert_eq!(
+            function_key(gdk::Key::F1, gdk::ModifierType::SHIFT_MASK).as_deref(),
+            Some("\x1b[1;2P")
+        );
+        assert_eq!(
+            function_key(gdk::Key::F5, gdk::ModifierType::CONTROL_MASK).as_deref(),
+            Some("\x1b[15;5~")
+        );
+        assert_eq!(
+            function_key(
+                gdk::Key::F12,
+                gdk::ModifierType::ALT_MASK | gdk::ModifierType::SHIFT_MASK
+            )
+            .as_deref(),
+            Some("\x1b[24;4~")
+        );
+        assert_eq!(function_key(gdk::Key::a, none), None);
+        assert_eq!(
+            navigation_key(gdk::Key::Insert, none, false).as_deref(),
+            Some("\x1b[2~")
+        );
+    }
+}
+
+// Xterm navigation modifiers are encoded in CSI parameters, including when
+// unmodified cursor keys use SS3. An ESC prefix alone would lose Shift.
+fn navigation_key(key: gdk::Key, mods: gdk::ModifierType, application: bool) -> Option<String> {
+    let (parameter, final_byte) = match key {
+        gdk::Key::Up => (1, 'A'),
+        gdk::Key::Down => (1, 'B'),
+        gdk::Key::Right => (1, 'C'),
+        gdk::Key::Left => (1, 'D'),
+        gdk::Key::Home => (1, 'H'),
+        gdk::Key::End => (1, 'F'),
+        gdk::Key::Insert | gdk::Key::KP_Insert => (2, '~'),
+        gdk::Key::Delete => (3, '~'),
+        gdk::Key::Page_Up => (5, '~'),
+        gdk::Key::Page_Down => (6, '~'),
+        _ => return None,
+    };
+    let modifier = 1
+        + u8::from(mods.contains(gdk::ModifierType::SHIFT_MASK))
+        + 2 * u8::from(mods.contains(gdk::ModifierType::ALT_MASK))
+        + 4 * u8::from(mods.contains(gdk::ModifierType::CONTROL_MASK));
+    Some(if modifier > 1 {
+        format!("\x1b[{parameter};{modifier}{final_byte}")
+    } else if final_byte == '~' {
+        format!("\x1b[{parameter}~")
+    } else if application {
+        format!("\x1bO{final_byte}")
+    } else {
+        format!("\x1b[{final_byte}")
+    })
+}
+
+#[cfg(test)]
+mod navigation_modifier_tests {
+    use super::*;
+
+    #[test]
+    fn queued_question_shift_left_is_distinct_from_dashboard_left() {
+        for application in [false, true] {
+            assert_eq!(
+                navigation_key(gdk::Key::Left, gdk::ModifierType::SHIFT_MASK, application)
+                    .as_deref(),
+                Some("\x1b[1;2D")
+            );
+            assert_eq!(
+                navigation_key(gdk::Key::Left, gdk::ModifierType::empty(), application).as_deref(),
+                Some(if application { "\x1bOD" } else { "\x1b[D" })
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_preserves_all_shift_alt_control_combinations() {
+        for application in [false, true] {
+            for bits in 1..8 {
+                let mut mods = gdk::ModifierType::empty();
+                if bits & 1 != 0 {
+                    mods |= gdk::ModifierType::SHIFT_MASK;
+                }
+                if bits & 2 != 0 {
+                    mods |= gdk::ModifierType::ALT_MASK;
+                }
+                if bits & 4 != 0 {
+                    mods |= gdk::ModifierType::CONTROL_MASK;
+                }
+                for (key, parameter, final_byte) in [
+                    (gdk::Key::Up, 1, 'A'),
+                    (gdk::Key::Down, 1, 'B'),
+                    (gdk::Key::Right, 1, 'C'),
+                    (gdk::Key::Left, 1, 'D'),
+                    (gdk::Key::Home, 1, 'H'),
+                    (gdk::Key::End, 1, 'F'),
+                    (gdk::Key::Delete, 3, '~'),
+                    (gdk::Key::Page_Up, 5, '~'),
+                    (gdk::Key::Page_Down, 6, '~'),
+                ] {
+                    assert_eq!(
+                        navigation_key(key, mods, application),
+                        Some(format!("\x1b[{parameter};{}{final_byte}", bits + 1))
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            navigation_key(gdk::Key::a, gdk::ModifierType::SHIFT_MASK, false),
+            None
+        );
     }
 }

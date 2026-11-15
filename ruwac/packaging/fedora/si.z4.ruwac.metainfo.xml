@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>si.z4.ruwac</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>RUWAC</name>
+  <summary>Persistent terminals, remote desktops and files</summary>
+  <description>
+    <p>
+      RUWAC keeps terminal sessions running in a per-user daemon, so they survive
+      disconnects and can be reattached from the desktop or the command line,
+      locally and over SSH.
+    </p>
+    <p>
+      The desktop workspace combines terminal tabs and splits with an embedded RDP
+      client (including GNOME Remote Login), saved SSH and RDP machines, clipboard
+      sharing and file transfer.
+    </p>
+  </description>
+  <launchable type="desktop-id">si.z4.ruwac.desktop</launchable>
+  <url type="homepage">https://github.com/w3fans/RUWAC</url>
+  <url type="bugtracker">https://github.com/w3fans/RUWAC/issues</url>
+  <developer id="si.z4">
+    <name>RUWAC maintainers</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <provides>
+    <binary>ruwac</binary>
+    <binary>ruwac-desktop</binary>
+  </provides>
+  <releases>
+    <release version="0.4.53" date="2026-10-31"/>
+  </releases>
+</component>

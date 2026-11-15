@@ -96,7 +96,7 @@ impl Recipe {
     pub fn argv(&self, profile: &Profile) -> Result<Vec<String>, String> {
         self.validate().map_err(|e| e.to_string())?;
         match self {
-            Self::Ssh => crate::profiles::ssh_argv(profile)
+            Self::Ssh => crate::profiles::terminal_argv(profile)
                 .map(|a| crate::profiles::session_argv(profile, a)),
             Self::Agent {
                 provider,

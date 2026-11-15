@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.ruwac.primary" path="/org/gnome/shell/extensions/ruwac-primary/">
+    <key name="publication-permission" type="(bs)">
+      <default>(false, '')</default>
+      <summary>Allow mouse-selection publication for this desktop account</summary>
+      <description>Allow explicitly enrolled RUWAC connections to publish text for
+      a deliberate middle-click paste in this unlocked GNOME desktop. This grants
+      account-wide permission to eligible processes running as your user. It does
+      not grant clipboard reading. Disabling revokes current registrations;
+      re-enabling requires a new registration. Every explicit permission action
+      writes a fresh generation with its enabled state in one atomic value.
+      Connection consent is separate.</description>
+    </key>
+  </schema>
+</schemalist>

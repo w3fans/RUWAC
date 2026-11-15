@@ -1,5 +1,16 @@
 # Implementation roadmap
 
+## Historical prototype snapshot — clarified 2026-11-04
+
+The experiment and pending milestones below describe the October 2026 prototype,
+not the present feature backlog. Linux GTK, SSH/RDP, clipboard/image attachments,
+persistent recovery and published packages were subsequently implemented. Their
+existence does not prove complete physical, external, endurance or security
+qualification. Preserve this snapshot as history and use the
+[current development index](../spec/RUWAC_CLOUD_INDEX_2026-11-04.md),
+[acceptance status](../spec/RUWAC_ACCEPTANCE_STATUS.md) and
+[current work plan](../spec/RUWAC_CLOUD_WORK_PLAN_2026-11-04.md) for new work.
+
 Current desktop interaction and embedded IronRDP state is recorded in [the acceptance report](../spec/RUWAC_ACCEPTANCE_STATUS.md) and [current architecture decisions](../spec/RUWAC_ARCHITECTURE_ADR.md). Earlier measurements and design limits below are historical evidence.
 
 

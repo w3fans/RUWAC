@@ -165,7 +165,11 @@ try:
   eventually(lambda:any('Transfer verified' in l for l in command('files-inspect')['labels']),20);assert digest(native_target)==digest(source) and not pending()
   results.append({'id':'SFTP-NATIVE-PENDING-RESUME','status':'PASS','native_dialog_job_row_and_resume_handler':True,'actual_SFTP_bytes_and_hash':True})
   command('tab-select',tab=0);native_ref='generated-native-key-'+uuid.uuid4().hex
-  command('profile-editor',operation='new',fields={'0':'Encrypted SSH native','3':profile['server'],'4':profile['username'],'11':str(encrypted),'12':str(known),'13':1},named={'ssh-key-passphrase-reference':native_ref},key_passphrase=passphrase,credential_action='Set / replace key passphrase',response='keep')
+  # SSH-specific controls belong to a saved SSH endpoint; a newly created
+  # connection form starts as RDP. Save its protocol before opening the key UI.
+  created=command('profile-editor',operation='new',fields={'0':'Encrypted SSH native','3':profile['server'],'4':profile['username'],'12':str(known),'13':1},response='save')
+  assert next(p for p in created['items']if p['name']=='Encrypted SSH native')['protocol']=='SSH'
+  edited=command('profile-editor',operation='edit',fields={'11':str(encrypted)},named={'ssh-key-passphrase-reference':native_ref},key_passphrase=passphrase,credential_action='Set / replace key passphrase',response='keep');assert edited['applied']
   def secret_ready():
    r=subprocess.run(['secret-tool','lookup','application','RUWAC','profile',native_ref],env=env,text=True,capture_output=True);return r.returncode==0 and r.stdout.rstrip('\n')==passphrase
   eventually(secret_ready,10);saved=command('profile-editor',operation='update',response='save');profile_saved=next(p for p in saved['items'] if p['name']=='Encrypted SSH native');assert profile_saved['preferences']['identity_secret_reference']==native_ref
@@ -186,6 +190,19 @@ finally:
  if authorized.exists():authorized.unlink()
  auth_root.rmdir()
  receipt={'elapsed_ms':(time.monotonic()-started)*1000,'results':results,'driver_sha256':hashlib.sha256(Path(a.driver).read_bytes()).hexdigest(),'scope':'Real owned OpenSSH SFTP and private Secret Service; native actions are synthetic GTK callbacks, not physical input or external-host acceptance'}
+ # Successful fixtures retain receipts and diagnostics, not repeatable bulk
+ # transfer bytes. Failed runs preserve their payloads for diagnosis.
+ if sys.exc_info()[0] is None and len(results)==(14 if a.gui and a.binary else 12):
+  removed=[]
+  for relative in ['source ž; $(literal).bin','download.bin','loss.bin',
+                   'remote/target "quoted".bin','remote/loss-target',
+                   'remote/fault-final','remote/busy-target','remote/native-target']:
+   payload=root/relative
+   if payload.exists():
+    assert payload.is_file() and not payload.is_symlink()
+    removed.append({'path':relative,'bytes':payload.stat().st_size})
+    payload.unlink()
+  receipt['generated_payload_cleanup']={'removed':removed,'preserved':'All JSON, logs, keys, profiles and source; no owner data used'}
  if a.binary and a.gui:receipt['hashes']={n:hashlib.sha256(Path(path).read_bytes()).hexdigest() for n,path in [('ruwac',a.binary),('ruwac-desktop',a.gui)]}
  (root/'receipt.json').write_text(json.dumps(receipt,indent=2)+'\n');print(json.dumps(receipt,indent=2),flush=True)
 assert len(results)==(14 if a.gui and a.binary else 12)

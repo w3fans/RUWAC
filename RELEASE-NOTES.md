@@ -1,25 +1,21 @@
-# Explicit SSH checks and reliable update readiness
+RUWAC v0.4.81 — keep narrow Unicode panes alive
 
-RUWAC contacts saved machines for key-access checks only after **Check now**.
-Checks use public-key-only OpenSSH authentication and existing host trust,
-including configured jump routes. Results identify the accepted SHA-256 key
-when known. Additions start unselected and require a separate confirmation;
-changed inventory, keys or trust invalidate the result. Closing the review
-cancels its owned helpers. Existing credentials and chosen identities are retained.
+Prevent wide Unicode output in a one-column split from stopping the terminal
+engine. The PTY and emulator now share the terminal library's two-column
+minimum, while a smaller visible rectangle clips the retained grid. Widening
+the pane keeps the same child process and preserves its Unicode text.
 
-Update controls distinguish the latest published tag, latest eligible release,
-installed version and running frontend, including mixed installations. Failed
-quality/privacy checks or missing package/attestation assets hold installation
-with a specific reason. Downloaded hashes and provenance are verified before
-installation; installed receipts, command links and binary hashes are checked
-before reporting success. Publication requires artifact-bound frozen technical gates and
-exact-commit hosted quality/privacy checks.
+GTK painting and pointer hits stay within each pane's visible rectangle;
+the hidden column cannot cover or capture clicks in the split divider.
+The existing session-size voting and non-sizing viewer roles are unchanged.
 
-RPM directory modes are explicit, and repeated assembly varies the inherited
-default ACL. Running daemons and terminals are preserved by installation;
-reopen the frontend when ready. RDP reconnects after reopening are the accepted
-lifetime boundary.
+Candidate verification covers 165 headless and 277 desktop unit tests,
+40 real-PTY narrow/wide resize cycles, the 100-cycle viewer regression,
+checkpoint preservation, maximum grids and an isolated GTK comparison.
+The published previous GUI reproduces divider painting and hit errors;
+the candidate fixes both. This does not claim physical hardware acceptance.
 
-External Windows, physical input and provider-account qualification remain
-separate from generated fixtures. The documented RSA dependency advisory and
-signed Fedora repository qualification remain open.
+The desktop RSA advisory remains visible; Windows acceptance remains pending
+on R7. Package updates preserve active engines and programs. Open Updates →
+Open updated engine, or run `ruwac engine gui`, to test the new engine without
+closing existing terminal processes.

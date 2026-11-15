@@ -27,6 +27,19 @@ termination. Saved history and workspace layouts are distinct from live
 processes. RDP transports currently belong to the desktop process.
 .SH BASIC COMMANDS
 .TP
+.B engine status
+Report installed CLI and running engine versions without starting a daemon.
+With \-\-host, discovery runs through an updated CLI on that SSH endpoint.
+.TP
+.B engine gui
+Open an independent GUI window on a separate updated engine. Preserve the
+original engine, terminals and saved workspace; no sessions are migrated.
+.TP
+.B engine new
+Start or reuse the separate engine and print JSON launch argument arrays.
+Retain both RUWAC_SOCKET and RUWAC_STATE_FILE from these arrays when reconnecting.
+An existing custom RUWAC_STATE_FILE must be unset before using this command.
+.TP
 .BI "\-S " NAME
 Create and attach a named session, or attach the existing exact name.
 Starts the daemon when required.

@@ -1,13 +1,30 @@
-//! Deliberate terminal selections and an opt-in, write-only PRIMARY receiver.
+//! Application-owned selections and an opt-in, write-only PRIMARY receiver.
 use gtk::{gdk, glib, prelude::*};
-use std::cell::RefCell;
+use std::{cell::RefCell, sync::Arc};
 
 pub const MAX_OFFER: usize = 128 * 1024;
 thread_local! {
-    static LOCAL: RefCell<Option<(gdk::ContentProvider, String)>> = const { RefCell::new(None) };
+    static LOCAL: RefCell<Option<(gdk::ContentProvider, String, Option<Arc<()>>)>> = const { RefCell::new(None) };
 }
 pub fn remember(provider: &gdk::ContentProvider, text: &str) {
-    LOCAL.with(|value| *value.borrow_mut() = Some((provider.clone(), text.into())));
+    LOCAL.with(|value| *value.borrow_mut() = Some((provider.clone(), text.into(), None)));
+}
+pub fn remember_remote(provider: &gdk::ContentProvider, text: &str, origin: &Arc<()>) {
+    LOCAL.with(|value| {
+        *value.borrow_mut() = Some((provider.clone(), text.into(), Some(origin.clone())))
+    });
+}
+/// Protect selections from local terminals and other RDP connections, while
+/// allowing this connection to refresh its own snapshot after focus returns.
+pub fn selected_elsewhere(clipboard: &gdk::Clipboard, origin: &Arc<()>) -> bool {
+    selected(clipboard).is_some()
+        && LOCAL.with(|value| {
+            value.borrow().as_ref().is_some_and(|(_, _, previous)| {
+                previous
+                    .as_ref()
+                    .is_none_or(|previous| !Arc::ptr_eq(previous, origin))
+            })
+        })
 }
 pub fn forget() {
     LOCAL.with(|value| {
@@ -19,11 +36,11 @@ pub fn selected(clipboard: &gdk::Clipboard) -> Option<String> {
         let mut value = value.borrow_mut();
         if value
             .as_ref()
-            .is_some_and(|(provider, _)| clipboard.content().as_ref() != Some(provider))
+            .is_some_and(|(provider, _, _)| clipboard.content().as_ref() != Some(provider))
         {
             value.take();
         }
-        value.as_ref().map(|(_, text)| text.clone())
+        value.as_ref().map(|(_, text, _)| text.clone())
     })
 }
 pub fn validate(text: &str, enabled: bool, active: bool) -> Result<(), &'static str> {
@@ -72,6 +89,7 @@ pub fn receive(
             )
         })?;
     display.flush();
+    remember(&provider, text);
     Ok(serde_json::json!({"offered":true}))
 }
 #[cfg(test)]

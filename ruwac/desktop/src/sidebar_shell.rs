@@ -20,12 +20,24 @@ pub struct Settings {
     pub term_size_pt: u8,
     #[serde(default = "default_height")]
     pub line_height: f32,
+    #[serde(default = "default_terminal_shortcuts")]
+    pub terminal_shortcuts: String,
+    #[serde(default)]
+    pub copy_selection_to_clipboard: bool,
     #[serde(default = "default_labels")]
     pub bar_labels: bool,
+    /// Standard (GNOME Terminal) colours for the 16 ANSI colours instead of
+    /// the scheme's softer ones.
+    #[serde(default = "default_vivid")]
+    pub vivid_colors: bool,
     #[serde(default)]
     pub actions_collapsed: bool,
     #[serde(default)]
     pub controls_docked: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub two_tab_rows: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compact_tabs: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub primary_receive: bool,
 
@@ -33,6 +45,9 @@ pub struct Settings {
     width: u16,
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     collapsed_groups: std::collections::BTreeSet<String>,
+}
+fn default_terminal_shortcuts() -> String {
+    "desktop".into()
 }
 fn default_scheme() -> String {
     "graphite".into()
@@ -49,6 +64,9 @@ fn default_height() -> f32 {
 }
 pub const LINE_HEIGHTS: [f32; 5] = [0.95, 1.0, 1.15, 1.30, 1.45];
 fn default_labels() -> bool {
+    true
+}
+fn default_vivid() -> bool {
     true
 }
 pub const FONTS: [&str; 6] = [
@@ -69,6 +87,7 @@ impl Settings {
             && FONTS.contains(&self.term_font.as_str())
             && (9..=18).contains(&self.term_size_pt)
             && LINE_HEIGHTS.contains(&self.line_height)
+            && ["desktop", "traditional"].contains(&self.terminal_shortcuts.as_str())
             && (200..=420).contains(&self.width)
             && self.collapsed_groups.len() <= 1000
             && !self
@@ -85,9 +104,14 @@ impl Default for Settings {
             term_font: default_font(),
             term_size_pt: default_size(),
             line_height: default_height(),
+            terminal_shortcuts: default_terminal_shortcuts(),
+            copy_selection_to_clipboard: false,
             bar_labels: true,
+            vivid_colors: default_vivid(),
             actions_collapsed: false,
             controls_docked: false,
+            two_tab_rows: false,
+            compact_tabs: false,
             primary_receive: false,
             pinned: false,
             width: 260,
@@ -244,7 +268,7 @@ impl Shell {
         let button = gtk::ToggleButton::with_label("Machines");
         button.set_widget_name("machines-toggle");
         button.set_tooltip_text(Some(
-            "Show/hide Machines · Alt+M / Ctrl+K searches · Escape closes the overlay",
+            "Show/hide Machines · Alt+M · Escape closes the overlay",
         ));
         button.set_active(view.shows_sidebar());
         let v = view.downgrade();
@@ -350,6 +374,28 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tab_preferences_preserve_old_settings_and_omit_unused_keys() {
+        let old: Settings = serde_json::from_str(r#"{"schema":3,"pinned":true,"width":320,"term_size_pt":14,"collapsed_groups":["Generated/Group"]}"#).unwrap();
+        assert!(!old.two_tab_rows && !old.compact_tabs && old.validate());
+        let compatible = serde_json::to_value(&old).unwrap();
+        assert!(
+            compatible.get("two_tab_rows").is_none() && compatible.get("compact_tabs").is_none()
+        );
+        let mut changed = old;
+        changed.two_tab_rows = true;
+        changed.compact_tabs = true;
+        let restored: Settings =
+            serde_json::from_value(serde_json::to_value(&changed).unwrap()).unwrap();
+        assert!(
+            restored.two_tab_rows
+                && restored.compact_tabs
+                && restored.pinned
+                && restored.validate()
+        );
+        assert_eq!((restored.width, restored.term_size_pt), (320, 14));
+        assert!(restored.collapsed_groups.contains("Generated/Group"));
+    }
     #[test]
     fn old_default_spacing_migrates_once_to_standard() {
         let old: Settings =

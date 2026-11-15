@@ -15,6 +15,92 @@ fn agent_command(agent: u32) -> Result<(&'static str, &'static str), String> {
         _ => Err("Choose Codex, Claude or Kimi".into()),
     }
 }
+/// Remote RUWAC installation with its dependencies: python3 and GitHub CLI
+/// (which verifies the signed prebuilt package) come from the system's signed
+/// repositories via sudo/dnf, which may ask for the password in the terminal;
+/// then the verified prebuilt per-user install runs unchanged.
+/// The Fedora COPR project that publishes source-built `ruwac` packages.
+pub const COPR_PROJECT: &str = "zvegelj/ruwac";
+
+/// Fedora machines get RUWAC from COPR through DNF: install it when missing
+/// (replacing a per-user copy or GitHub testing RPM), otherwise upgrade it only
+/// when DNF reports a newer build, so routine launches need no password. Other
+/// systems, or a Fedora release COPR does not build for, keep the verified
+/// per-user installation.
+fn copr_function() -> String {
+    format!(
+        r#"copr_ruwac() {{
+        command -v dnf >/dev/null 2>&1 && grep -qx 'ID=fedora' /etc/os-release || return 1
+        repo=copr:copr.fedorainfracloud.org:{owner}:{name}
+        configured=$(dnf -q repolist --enabled) || {{ echo 'RUWAC: Fedora repository query failed.' >&2; return 2; }}
+        first_party=$(printf '%s\n' "$configured" | awk '$1 == "fedora" || $1 == "updates" || $1 == "rawhide" {{print $1}}')
+        [ -n "$first_party" ] || {{ echo 'RUWAC: no supported Fedora dependency repository is enabled.' >&2; return 2; }}
+        repos="--repo=$repo --setopt=$repo.skip_if_unavailable=0"
+        for id in $first_party; do repos="$repos --repo=$id"; done
+        if grep -qsF '"kind":"distribution"' /usr/share/ruwac/rpm-installation.json; then
+            # A machine set up with fleet-setup updates itself in the background;
+            # never block an agent launch on the network or a sudo prompt.
+            if systemctl is-enabled --quiet ruwac-package-update.timer 2>/dev/null; then
+                echo 'RUWAC: automatic package updates are enabled on this machine.'
+                return 0
+            fi
+            dnf -q --refresh check-upgrade --repo=$repo --setopt=$repo.skip_if_unavailable=0 ruwac
+            status=$?
+            case $status in
+                0) echo 'RUWAC: COPR package is current.'; return 0 ;;
+                100) ;;
+                *) echo "RUWAC: COPR upgrade query failed (DNF exit $status); no package was changed." >&2; return 2 ;;
+            esac
+            echo 'Updating RUWAC from Fedora COPR {copr} (sudo may ask for your password)'
+            packages=ruwac; rpm -q ruwac-desktop >/dev/null 2>&1 && packages='ruwac ruwac-desktop'
+            sudo dnf -y --refresh upgrade $repos $packages || return 2
+            return 0
+        fi
+        echo 'Installing RUWAC from Fedora COPR {copr} (sudo may ask for your password)'
+        {{ dnf copr --help >/dev/null 2>&1 || sudo dnf -y install dnf5-plugins; }} || return 2
+        sudo dnf -y copr enable {copr} || return 2
+        sudo dnf config-manager setopt "$repo.metadata_expire=300" || return 2
+        packages=ruwac; rpm -q ruwac-desktop >/dev/null 2>&1 && packages='ruwac ruwac-desktop'
+        if rpm -q ruwac >/dev/null 2>&1; then
+            sudo dnf -y --refresh upgrade $repos $packages &&
+            {{ grep -qsF '"kind":"distribution"' /usr/share/ruwac/rpm-installation.json ||
+               sudo dnf -y reinstall $repos $packages; }} || return 2
+        else sudo dnf -y --refresh install $repos ruwac || return 2; fi
+        grep -qsF '"kind":"distribution"' /usr/share/ruwac/rpm-installation.json || {{ echo 'RUWAC: distribution installation marker missing; refusing a parallel per-user install.' >&2; return 2; }}
+        /usr/bin/ruwac update >/dev/null 2>&1
+        return 0
+    }}"#,
+        copr = COPR_PROJECT,
+        owner = COPR_PROJECT.split('/').next().unwrap_or_default(),
+        name = COPR_PROJECT.split('/').nth(1).unwrap_or_default()
+    )
+}
+fn install_ruwac_command(binary: &str) -> String {
+    let copr = copr_function();
+    let deps = "missing=''; command -v python3 >/dev/null 2>&1 || missing=\"$missing python3\"; \
+                command -v gh >/dev/null 2>&1 || missing=\"$missing gh\"; \
+                if [ -n \"$missing\" ]; then \
+                  if command -v dnf >/dev/null 2>&1; then \
+                    echo \"Installing RUWAC dependencies:$missing (sudo may ask for your password)\"; \
+                    sudo dnf install -y $missing || { echo 'Dependency installation failed; RUWAC was not installed.'; exit 1; }; \
+                  else echo \"Install$missing with your package manager, then retry.\"; exit 1; fi; \
+                fi";
+    format!(
+        "{copr}; copr_ruwac; status=$?; [ $status = 0 ] && exit 0; [ $status = 1 ] || exit $status; {deps}; python3 -c {} --remote-cli {} --bootstrap --headless --prebuilt",
+        quote(include_str!("../../../scripts/update-user.py")),
+        quote(binary)
+    )
+}
+
+fn update_then_launch(update: &str, launch: &str) -> String {
+    // An unavailable release service must not prevent attaching with the
+    // installed CLI. Run installation in a subshell: dependency failures may
+    // exit it. The launcher still validates/requires the selected executable.
+    format!(
+        "( {update} ) || echo 'RUWAC update check/install failed; trying the installed CLI. Review the update diagnostic above.'; {launch}"
+    )
+}
+
 fn ssh_command(profile: &profiles::Profile, command: String) -> Result<Vec<String>, String> {
     let mut argv = profiles::ssh_argv(profile)?;
     let position = argv
@@ -54,6 +140,8 @@ pub(crate) fn argv(
         return Err("Invalid remote RUWAC executable or socket".into());
     }
     if agent == 4 {
+        // One explicitly chosen key: the confirmation names exactly what is
+        // installed (ssh-copy-id would otherwise add every agent identity).
         let key = &profile.preferences.identity_file;
         if key.is_empty() || key.starts_with('-') || key.chars().any(char::is_control) {
             return Err(
@@ -94,13 +182,7 @@ pub(crate) fn argv(
         return Ok(command);
     }
     if agent == 2 {
-        return ssh_command(
-            profile,
-            format!(
-                "python3 -c {} --bootstrap --headless --prebuilt",
-                quote(include_str!("../../../scripts/update-user.py"))
-            ),
-        );
+        return ssh_command(profile, install_ruwac_command(binary));
     }
     let (name, default) = agent_command(agent)?;
     let configured = if agent == 0 {
@@ -158,22 +240,19 @@ pub(crate) fn argv(
         _ => return Err("Unknown remote session backend".into()),
     }
     let script = format!(
-        "python3 -c {} {} {} {} {} {}",
+        "python3 -c {} {} {} {} {} {} {}",
         quote(include_str!("../../../scripts/remote-agent.py")),
         quote(binary),
         quote(socket),
         quote(name),
         quote(command),
-        quote(&profile.preferences.agent_session)
+        quote(&profile.preferences.agent_session),
+        quote(env!("CARGO_PKG_VERSION"))
     );
-    // Optional: install the RUWAC CLI first (prebuilt, per user) when missing.
+    // Always check verified releases when automatic installation is enabled.
+    // Existence alone does not establish that the installed CLI is current.
     let script = if profile.preferences.ruwac_install_missing {
-        format!(
-            "{{ command -v {} >/dev/null 2>&1 || test -x \"$HOME/.local/bin/ruwac\" || {{ echo 'Installing RUWAC…'; python3 -c {} --bootstrap --headless --prebuilt; }}; }} && {}",
-            quote(binary),
-            quote(include_str!("../../../scripts/update-user.py")),
-            script
-        )
+        update_then_launch(&install_ruwac_command(binary), &script)
     } else {
         script
     };
@@ -207,7 +286,7 @@ pub fn launch(
             )
         } else {
             format!(
-                "Install/update the headless CLI for {} at {} using its saved SSH account. The existing verified source installer runs in a terminal, needs Python 3 and Rust build tools, and preserves sessions. No agent installation or login is performed.",
+                "Install/update RUWAC for {} at {} using its saved SSH account and a verified prebuilt package. Python 3 and GitHub CLI dependencies may require sudo. Running sessions are preserved. No agent installation or login is performed.",
                 profile.name, profile.server
             )
         };
@@ -416,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_ruwac_is_installed_first_only_when_enabled() {
+    fn remote_version_is_checked_and_updates_only_when_enabled() {
         let mut profile: profiles::Profile = serde_json::from_value(json!({"id":"endpoint_demo","machine_id":"machine_demo","name":"Demo","group":"Test","protocol":"SSH","server":"127.0.0.1:2222","username":"generated-user","secret_reference":"GENERATED-SECRET-REF","favorite":false,"last_used":0,"tags":[]})).unwrap();
         let plain = argv(&profile, 0, "ruwac", "").unwrap();
         assert!(!plain.last().unwrap().contains("--prebuilt"));
@@ -425,6 +504,187 @@ mod tests {
         let command = install.last().unwrap();
         assert!(command.contains("--bootstrap --headless --prebuilt"));
         assert!(command.contains("command -v"));
+        assert!(!command.contains("|| test -x"));
+        assert!(plain.last().unwrap().contains(env!("CARGO_PKG_VERSION")));
+    }
+    #[test]
+    fn fedora_machines_install_ruwac_from_copr_with_dnf() {
+        let command = install_ruwac_command("ruwac");
+        assert!(command.contains(&format!("copr enable {COPR_PROJECT}")));
+        assert!(command.ends_with("--bootstrap --headless --prebuilt"));
+        let fedora = fs::read_to_string("/etc/os-release")
+            .is_ok_and(|text| text.lines().any(|line| line == "ID=fedora"));
+        if !fedora {
+            return;
+        }
+        // Without a distribution package: enable COPR and install with DNF.
+        // The stubs never install anything, so the marker check fails and the
+        // caller falls back to the per-user installer.
+        let dir = std::env::temp_dir().join(format!("ruwac-copr-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("calls");
+        for (name, body) in [
+            ("dnf", "echo fedora; echo updates; exit 0"),
+            ("rpm", "exit 1"),
+            ("sudo", "exit 0"),
+        ] {
+            let path = dir.join(name);
+            fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\necho \"{name} $*\" >> '{}'\n{body}\n",
+                    log.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // Never the build machine's own RUWAC package: point the marker at the fixture.
+        let script = copr_function().replace(
+            "/usr/share/ruwac/rpm-installation.json",
+            &dir.join("rpm-installation.json").display().to_string(),
+        );
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("{script}; copr_ruwac; echo rc=$?"))
+            .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+            .output()
+            .unwrap();
+        let calls = fs::read_to_string(&log).unwrap_or_default();
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            String::from_utf8_lossy(&output.stdout).ends_with("rc=2\n"),
+            "{output:?}"
+        );
+        assert!(
+            calls.contains(&format!("sudo dnf -y copr enable {COPR_PROJECT}")),
+            "{calls}"
+        );
+        // Only RUWAC's COPR and Fedora's official repositories are used, with
+        // fresh metadata: third-party repositories' keys are never accepted
+        // on the user's behalf.
+        assert!(
+            calls.contains(
+                "sudo dnf -y --refresh install --repo=copr:copr.fedorainfracloud.org:zvegelj:ruwac --setopt=copr:copr.fedorainfracloud.org:zvegelj:ruwac.skip_if_unavailable=0 --repo=fedora --repo=updates ruwac"
+            ),
+            "{calls}"
+        );
+        assert!(!calls.contains("upgrade"), "{calls}");
+    }
+    #[test]
+    fn provisioned_machines_never_block_agent_launch_on_package_checks() {
+        let fedora = fs::read_to_string("/etc/os-release")
+            .is_ok_and(|text| text.lines().any(|line| line == "ID=fedora"));
+        if !fedora {
+            return;
+        }
+        for (timer_enabled, expect_dnf_check) in [(true, false), (false, true)] {
+            let dir = std::env::temp_dir().join(ruwac_protocol::id("copr_timer"));
+            fs::create_dir_all(&dir).unwrap();
+            let log = dir.join("calls");
+            fs::write(
+                dir.join("rpm-installation.json"),
+                r#"{"kind":"distribution"}"#,
+            )
+            .unwrap();
+            for (name, body) in [
+                ("dnf", "echo fedora; echo updates; exit 0".to_owned()),
+                ("rpm", "exit 0".to_owned()),
+                ("sudo", "exit 0".to_owned()),
+                ("systemctl", format!("exit {}", u8::from(!timer_enabled))),
+            ] {
+                let path = dir.join(name);
+                fs::write(
+                    &path,
+                    format!(
+                        "#!/bin/sh\necho \"{name} $*\" >> '{}'\n{body}\n",
+                        log.display()
+                    ),
+                )
+                .unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let script = copr_function().replace(
+                "/usr/share/ruwac/rpm-installation.json",
+                &dir.join("rpm-installation.json").display().to_string(),
+            );
+            let output = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!("{script}; copr_ruwac; echo rc=$?"))
+                .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+                .output()
+                .unwrap();
+            let calls = fs::read_to_string(&log).unwrap_or_default();
+            fs::remove_dir_all(&dir).unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.ends_with("rc=0\n"), "{output:?}");
+            // GNU grep 3.8+ warns about `\"` in a pattern; the launcher must stay silent.
+            assert!(output.stderr.is_empty(), "{output:?}");
+            assert_eq!(calls.contains("check-upgrade"), expect_dnf_check, "{calls}");
+            assert!(!calls.contains("sudo"), "{calls}");
+        }
+    }
+    #[test]
+    fn copr_marker_checks_are_fixed_strings_without_stray_escapes() {
+        let script = copr_function();
+        assert!(!script.contains("\\\""), "{script}");
+        assert_eq!(
+            script
+                .matches(
+                    r#"grep -qsF '"kind":"distribution"' /usr/share/ruwac/rpm-installation.json"#
+                )
+                .count(),
+            3
+        );
+    }
+    #[test]
+    fn packaged_cli_wins_over_a_stale_per_user_copy() {
+        let dir = std::env::temp_dir().join(ruwac_protocol::id("cli_select"));
+        let (home_bin, system) = (dir.join("home/.local/bin"), dir.join("usr-bin-ruwac"));
+        fs::create_dir_all(&home_bin).unwrap();
+        for path in [home_bin.join("ruwac"), system.clone()] {
+            fs::write(&path, "#!/bin/sh\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let marker = dir.join("rpm-installation.json");
+        let select = |kind: &str| {
+            fs::write(&marker, format!(r#"{{"kind":"{kind}"}}"#)).unwrap();
+            let probe = format!(
+                "import sys,types\nm=types.ModuleType('remote_agent')\nexec(compile(sys.stdin.read(),'remote-agent.py','exec'),m.__dict__)\n\
+                 m.SYSTEM_RUWAC={:?}\nm.DISTRIBUTION_MARKER={:?}\nprint(m.select_executable('ruwac'))\nprint(m.select_executable('/explicit/ruwac'))",
+                system.display().to_string(),
+                marker.display().to_string()
+            );
+            let mut child = Command::new("python3")
+                .args(["-I", "-c", &probe])
+                .env("PATH", format!("{}:/usr/bin:/bin", home_bin.display()))
+                .env("HOME", dir.join("home"))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(include_str!("../../../scripts/remote-agent.py").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "{out:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        // A distribution install is canonical even though ~/.local/bin is first on PATH.
+        assert_eq!(
+            select("distribution"),
+            format!("{}\nNone\n", system.display())
+        );
+        // Without the marker (per-user install), PATH order is kept.
+        assert_eq!(
+            select("user"),
+            format!("{}\nNone\n", home_bin.join("ruwac").display())
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
     fn defaults_open_resume_pickers_without_a_prompt() {
@@ -442,7 +702,7 @@ mod tests {
         let receipt = root.join("receipt.json");
         // A disposable remote CLI process verifies the real shell/Python
         // boundary. It never starts Codex, Claude or an owner daemon.
-        fs::write(&binary,format!("#!/usr/bin/python3\nimport json,sys\nfrom pathlib import Path\na=sys.argv\nif 'session.list' in a:\n print(json.dumps({{'result':[]}}))\nif 'session.create' in a:\n Path({:?}).write_text(a[a.index('--params')+1])\n print(json.dumps({{'result':{{'session':'session_generated'}}}}))\n",receipt.to_str().unwrap())).unwrap();
+        fs::write(&binary,format!("#!/usr/bin/python3\nimport json,sys\nfrom pathlib import Path\na=sys.argv\nif '--version' in a:print('RUWAC 0.0.1')\nif 'session.list' in a:\n print(json.dumps({{'result':[]}}))\nif 'session.create' in a:\n Path({:?}).write_text(a[a.index('--params')+1])\n print(json.dumps({{'result':{{'session':'session_generated'}}}}))\n",receipt.to_str().unwrap())).unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
         let p = profiles::Profile {
             id: "endpoint_generated".into(),
@@ -481,7 +741,30 @@ mod tests {
             assert_eq!(params["argv"][0], "bash");
             assert_eq!(params["argv"][1], "-lic");
             assert_eq!(params["name"], if agent == 0 { "codex" } else { "claude" });
-            assert!(String::from_utf8_lossy(&output.stdout).contains("Closing this view detaches"));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains("Remote RUWAC 0.0.1:"));
+            assert!(stdout.contains("Remote CLI is older than this GUI"));
+            assert!(stdout.contains("Closing this view detaches"));
+            // Exercise the real shell/launcher boundary after an updater exits
+            // its subshell. No network, real agent or owner daemon is used.
+            let unavailable = update_then_launch("exit 1", args.last().unwrap());
+            let resumed = Command::new("bash")
+                .args(["-c", &unavailable])
+                .output()
+                .unwrap();
+            assert!(resumed.status.success());
+            assert!(
+                String::from_utf8_lossy(&resumed.stdout)
+                    .contains("RUWAC update check/install failed")
+            );
+            let absent_args =
+                argv(&p, agent, root.join("absent-cli").to_str().unwrap(), "").unwrap();
+            let absent = update_then_launch("exit 1", absent_args.last().unwrap());
+            let prior = fs::read(&receipt).unwrap();
+            let refused = Command::new("bash").args(["-c", &absent]).output().unwrap();
+            assert!(!refused.status.success());
+            assert!(String::from_utf8_lossy(&refused.stderr).contains("Install the RUWAC CLI"));
+            assert_eq!(fs::read(&receipt).unwrap(), prior);
         }
         let mut custom = p.clone();
         custom.preferences.codex_command = "printf '%s' 'generated command with spaces'".into();

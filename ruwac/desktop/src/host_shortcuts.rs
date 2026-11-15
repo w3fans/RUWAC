@@ -26,9 +26,7 @@ pub fn install(
     let button = gtk::MenuButton::new();
     button.set_widget_name("agent-host-menu");
     button.set_icon_name("applications-science-symbolic");
-    button.set_tooltip_text(Some(
-        "Agents · Alt+A · saved hosts · Codex, Claude and Kimi",
-    ));
+    button.set_tooltip_text(Some("Agents · saved hosts · Codex, Claude and Kimi"));
     button.update_property(&[gtk::accessible::Property::Label("Saved agent hosts")]);
     let pop = gtk::Popover::new();
     pop.connect_show(move |pop| {
@@ -61,6 +59,12 @@ pub fn popup(view: &std::rc::Rc<crate::view::View>, x: f64, y: f64) {
         pop.set_parent(area);
         pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
         let body = view.clipboard_menu();
+        if let Some(links) = view.link_menu(x, y) {
+            body.append(&links);
+        }
+        if let Some(service) = view.remote_service_button() {
+            body.append(&service);
+        }
         body.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         body.append(&menus(false));
         pop.set_child(Some(&scroll(&body)));
@@ -139,6 +143,19 @@ pub fn fixture(window: &adw::ApplicationWindow, q: &serde_json::Value) -> serde_
             }
         }
         crate::chrome::walk(&top, &|w| {
+            if q["focus"].as_str() == Some(w.widget_name().as_str()) {
+                w.grab_focus();
+            }
+            if let Some(e) = w.downcast_ref::<gtk::Entry>() {
+                if let Some(value) = q["fields"][w.widget_name().as_str()].as_str() {
+                    e.set_text(value);
+                }
+            }
+            if let Some(d) = w.downcast_ref::<gtk::DropDown>() {
+                if let Some(value) = q["fields"][w.widget_name().as_str()].as_u64() {
+                    d.set_selected(value as u32);
+                }
+            }
             if let Some(label) = w.downcast_ref::<gtk::Label>() {
                 if [
                     "Recent SSH connections",
@@ -171,10 +188,20 @@ pub fn fixture(window: &adw::ApplicationWindow, q: &serde_json::Value) -> serde_
                 || w.widget_name().starts_with("machine-")
                 || w.widget_name().starts_with("ssh-")
                 || w.widget_name() == "terminal-host-menu"
+                || w.widget_name().starts_with("quick-ssh-")
             {
-                widgets.borrow_mut().push(serde_json::json!({"name":w.widget_name().to_string(),"visible":w.is_visible(),"sensitive":w.is_sensitive(), "active":w.downcast_ref::<gtk::CheckButton>().map(|p| p.is_active()), "text":w.downcast_ref::<gtk::Label>().map(|p| p.text().to_string()), "bounds":w.compute_bounds(window).map(|r| [r.x(),r.y(),r.width(),r.height()])}));
+                widgets.borrow_mut().push(serde_json::json!({"name":w.widget_name().to_string(),"visible":w.is_visible(),"sensitive":w.is_sensitive(), "selected":w.downcast_ref::<gtk::DropDown>().map(|p|p.selected()), "focused":w.has_focus(), "entry":w.downcast_ref::<gtk::Entry>().map(|p|p.text().to_string()), "active":w.downcast_ref::<gtk::CheckButton>().map(|p| p.is_active()), "text":w.downcast_ref::<gtk::Label>().map(|p| p.text().to_string()), "bounds":w.compute_bounds(window).map(|r| [r.x(),r.y(),r.width(),r.height()])}));
             }
         });
+        if top.widget_name() == "quick-ssh-machine" {
+            if let Some(d) = top.downcast_ref::<gtk::Dialog>() {
+                match q["quick_response"].as_str() {
+                    Some("save") => d.response(gtk::ResponseType::Accept),
+                    Some("cancel") => d.response(gtk::ResponseType::Cancel),
+                    _ => (),
+                }
+            }
+        }
     }
     if let Some(button) = clicked.into_inner() {
         button.emit_clicked();

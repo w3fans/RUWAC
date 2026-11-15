@@ -556,7 +556,11 @@ pub fn inspect(tabs: &adw::TabView, memory: &FocusMemory) -> serde_json::Value {
         if let Some(p) = w.downcast_ref::<gtk::Paned>() {
             serde_json::json!({"split":if p.orientation()==Orientation::Vertical{"vertical"}else{"horizontal"},"position":p.position(),"width":p.width(),"height":p.height(),"first":p.start_child().map(node),"second":p.end_child().map(node)})
         } else {
-            serde_json::json!({"id":w.widget_name().as_str(),"view":w.type_().name(),"mapped":w.is_mapped(),"width":w.width(),"height":w.height()})
+            let mut metadata = serde_json::json!({"id":w.widget_name().as_str(),"view":w.type_().name(),"mapped":w.is_mapped(),"width":w.width(),"height":w.height()});
+            if w.has_css_class("ruwac-web") {
+                metadata["kind"] = serde_json::json!("web");
+            }
+            metadata
         }
     }
     serde_json::json!({"focused_view":focused_id(tabs,memory),"selected_tab":tabs.selected_page().map(|p|p.child().widget_name().to_string()),"tabs":(0..tabs.n_pages()).map(|i|{let p=tabs.nth_page(i);serde_json::json!({"id":p.child().widget_name().as_str(),"title":p.title().as_str(),"layout":p.child().first_child().map(node)})}).collect::<Vec<_>>()})
@@ -707,23 +711,26 @@ pub fn set_page_loading(page: &adw::TabPage, loading: bool) {
 }
 
 /// Full-colour, shape-distinct indicators, independent of GTK's private tab CSS.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TabStatus {
     Ready,
     Busy,
     Error,
     Offline,
+    ReadyWithWarning,
 }
 pub fn set_page_status(page: &adw::TabPage, status: TabStatus) {
     use gtk::gio::prelude::*;
     thread_local! {
         static ICONS: Vec<gtk::gio::BytesIcon> = [
-            ("#34d399", "M4 8l3 3 5-6"),
-            ("#f5c451", "M8 4v4l3 2"),
-            ("#f0737a", "M8 4v5m0 2v1"),
-            ("#9b9ca3", "M4 8h8"),
-        ].iter().map(|(color,path)| {
-            let svg = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="{color}"/><path d="{path}" stroke="#131416" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>"##);
+            ("#34d399", "M4 8l3 3 5-6", false),
+            ("#f5c451", "M8 4v4l3 2", false),
+            ("#f0737a", "M8 4v5m0 2v1", false),
+            ("#9b9ca3", "M4 8h8", false),
+            ("#34d399", "M4 8l3 3 5-6", true),
+        ].iter().map(|(color,path,warning)| {
+            let badge = if *warning { r##"<circle cx="13" cy="3" r="3" fill="#f5c451" stroke="#131416" stroke-width="1"/>"## } else { "" };
+            let svg = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="{color}"/><path d="{path}" stroke="#131416" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>{badge}</svg>"##);
             gtk::gio::BytesIcon::new(&gtk::glib::Bytes::from_owned(svg.into_bytes()))
         }).collect();
     }

@@ -205,8 +205,10 @@ impl FocusBroker {
     }
     /// Changing focus invalidates in-flight promotions, without promoting cached data.
     pub fn focus(&mut self, view: Option<&str>) {
-        self.active = view.map(str::to_owned);
-        self.epoch = self.epoch.saturating_add(1);
+        if self.active.as_deref() != view {
+            self.active = view.map(str::to_owned);
+            self.epoch = self.epoch.saturating_add(1);
+        }
     }
     /// Explicit local copy takes ownership even when the focused view is unchanged.
     pub fn local_copy(&mut self) {
@@ -270,6 +272,23 @@ mod broker_tests {
             size: 10,
             scope: ClipScope::Clipboard,
         }
+    }
+    #[test]
+    fn repeated_keyboard_focus_keeps_clipboard_lease_but_owner_changes_and_copy_cancel() {
+        let mut broker = FocusBroker::default();
+        broker.focus(Some("terminal-a"));
+        let epoch = broker.epoch();
+        for _ in 0..1000 {
+            broker.focus(Some("terminal-a"));
+            assert_eq!(broker.epoch(), epoch);
+        }
+        broker.local_copy();
+        assert_ne!(broker.epoch(), epoch);
+        let copied = broker.epoch();
+        broker.focus(Some("rdp-a"));
+        assert_ne!(broker.epoch(), copied);
+        broker.focus(None);
+        assert_eq!(broker.active(), None);
     }
     #[test]
     fn inactive_offer_never_steals_or_auto_promotes_on_focus() {

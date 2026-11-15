@@ -1,0 +1,13 @@
+{
+  "uuid": "primary@w3fans.github.io",
+  "name": "RUWAC mouse selection",
+  "description": "Explicitly approved text selection delivery to this unlocked desktop",
+  "shell-version": [
+    "50"
+  ],
+  "session-modes": [
+    "user"
+  ],
+  "settings-schema": "org.gnome.shell.extensions.ruwac.primary",
+  "url": "https://github.com/w3fans/RUWAC"
+}

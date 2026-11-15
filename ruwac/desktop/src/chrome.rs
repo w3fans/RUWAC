@@ -37,6 +37,24 @@ pub fn action(button: &gtk::Button, icon: &str, label: &str, tooltip: &str) {
     button.add_css_class("flat");
     button.update_property(&[gtk::accessible::Property::Label(tooltip)]);
 }
+/// Keep terminal creation available even when the header actions are collapsed.
+pub fn terminal_tab_action(bar: &crate::tab_strip::TabStrip, action: &gtk::Button) {
+    let add = gtk::Button::from_icon_name("list-add-symbolic");
+    add.set_widget_name("terminal-tab-new");
+    add.set_tooltip_text(Some("New terminal"));
+    add.update_property(&[gtk::accessible::Property::Label("New terminal")]);
+    action
+        .bind_property("sensitive", &add, "sensitive")
+        .sync_create()
+        .build();
+    let action = action.downgrade();
+    add.connect_clicked(move |_| {
+        if let Some(action) = action.upgrade().filter(|b| b.is_sensitive()) {
+            action.emit_clicked();
+        }
+    });
+    bar.set_end_action_widget(Some(&add));
+}
 pub fn detach(w: &impl IsA<gtk::Widget>) {
     let w = w.as_ref();
     if let Some(p) = w.parent() {
@@ -55,7 +73,7 @@ pub struct Chrome {
     pub actions: gtk::Box,
     pub controls: gtk::MenuButton,
     header: adw::HeaderBar,
-    bar: adw::TabBar,
+    bar: crate::tab_strip::TabStrip,
     reveal: gtk::Revealer,
     collapse: gtk::Button,
     pop: gtk::Popover,
@@ -71,7 +89,7 @@ impl Chrome {
     pub fn new(
         window: &adw::ApplicationWindow,
         header: &adw::HeaderBar,
-        bar: &adw::TabBar,
+        bar: &crate::tab_strip::TabStrip,
         body: &gtk::Box,
         changed: Rc<dyn Fn(&Settings)>,
     ) -> Rc<Self> {
@@ -83,10 +101,9 @@ impl Chrome {
         header.set_show_start_title_buttons(false);
         header.set_centering_policy(adw::CenteringPolicy::Loose);
         header.set_title_widget(None::<&gtk::Widget>);
-        let title = TabTitle::new(bar);
+        let title = TabTitle::new(bar.widget());
         header.set_title_widget(Some(&title));
-        bar.set_expand_tabs(true);
-        bar.set_hexpand(true);
+        bar.widget().set_hexpand(true);
         let static_css = gtk::CssProvider::new();
         static_css.load_from_string(include_str!("chrome.css"));
         let scheme = gtk::CssProvider::new();
@@ -199,9 +216,14 @@ impl Chrome {
             saved.term_font = p.term_font.clone();
             saved.term_size_pt = p.term_size_pt;
             saved.line_height = p.line_height;
+            saved.terminal_shortcuts = p.terminal_shortcuts.clone();
+            saved.copy_selection_to_clipboard = p.copy_selection_to_clipboard;
             saved.bar_labels = p.bar_labels;
+            saved.vivid_colors = p.vivid_colors;
             saved.actions_collapsed = p.actions_collapsed;
             saved.controls_docked = p.controls_docked;
+            saved.two_tab_rows = p.two_tab_rows;
+            saved.compact_tabs = p.compact_tabs;
         }) {
             Ok(p) => {
                 *self.prefs.borrow_mut() = p;
@@ -217,7 +239,9 @@ impl Chrome {
     }
     fn apply(&self) {
         let p = self.prefs.borrow();
+        crate::tab_strip::TabStrip::apply_preferences(&p);
         let s = schemes::select(&p.scheme).unwrap_or(&schemes::SCHEMES[0]);
+        schemes::set_vivid(p.vivid_colors);
         self.scheme.load_from_string(&schemes::css(s));
         adw::StyleManager::default().set_color_scheme(if s.id == "paper" {
             adw::ColorScheme::ForceLight
@@ -445,6 +469,92 @@ impl Chrome {
                 c.update(|p| p.bar_labels = s.is_active());
             }
         });
+        for (title, name, initial, two_rows) in [
+            (
+                "Two rows of tabs",
+                "two-tab-rows",
+                self.prefs.borrow().two_tab_rows,
+                true,
+            ),
+            (
+                "Compact tabs",
+                "compact-tabs",
+                self.prefs.borrow().compact_tabs,
+                false,
+            ),
+        ] {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            row.append(&gtk::Label::new(Some(title)));
+            let toggle = gtk::Switch::new();
+            toggle.set_widget_name(name);
+            toggle.set_active(initial);
+            row.append(&toggle);
+            body.append(&row);
+            let weak = Rc::downgrade(self);
+            toggle.connect_active_notify(move |s| {
+                if let Some(c) = weak.upgrade() {
+                    c.update(|p| {
+                        if two_rows {
+                            p.two_tab_rows = s.is_active();
+                        } else {
+                            p.compact_tabs = s.is_active();
+                        }
+                    });
+                }
+            });
+        }
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.append(&gtk::Label::new(Some("Vivid terminal colours")));
+        let vivid = gtk::Switch::new();
+        vivid.set_widget_name("vivid-terminal-colours");
+        vivid.set_tooltip_text(Some(
+            "Standard GNOME Terminal colours for programs like btm; off uses the scheme's softer colours",
+        ));
+        vivid.set_active(self.prefs.borrow().vivid_colors);
+        row.append(&vivid);
+        body.append(&row);
+        let weak = Rc::downgrade(self);
+        vivid.connect_active_notify(move |s| {
+            if let Some(c) = weak.upgrade() {
+                c.update(|p| p.vivid_colors = s.is_active());
+            }
+        });
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.append(&gtk::Label::new(Some(
+            "Desktop terminal shortcuts (Ctrl+C/V)",
+        )));
+        let desktop = gtk::Switch::new();
+        desktop.set_active(self.prefs.borrow().terminal_shortcuts == "desktop");
+        desktop.set_tooltip_text(Some("Copy selected text with Ctrl+C; without selection interrupt. Ctrl+V pastes. Off retains traditional terminal control keys."));
+        row.append(&desktop);
+        body.append(&row);
+        let weak = Rc::downgrade(self);
+        desktop.connect_active_notify(move |s| {
+            if let Some(c) = weak.upgrade() {
+                c.update(|p| {
+                    p.terminal_shortcuts = if s.is_active() {
+                        "desktop"
+                    } else {
+                        "traditional"
+                    }
+                    .into()
+                });
+            }
+        });
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.append(&gtk::Label::new(Some(
+            "Also copy terminal selections to CLIPBOARD",
+        )));
+        let copy = gtk::Switch::new();
+        copy.set_active(self.prefs.borrow().copy_selection_to_clipboard);
+        row.append(&copy);
+        body.append(&row);
+        let weak = Rc::downgrade(self);
+        copy.connect_active_notify(move |s| {
+            if let Some(c) = weak.upgrade() {
+                c.update(|p| p.copy_selection_to_clipboard = s.is_active());
+            }
+        });
         body.append(&self.status);
     }
     pub fn fixture(
@@ -455,6 +565,16 @@ impl Chrome {
     ) -> serde_json::Value {
         if let (Some(w), Some(h)) = (q["width"].as_i64(), q["height"].as_i64()) {
             window.set_default_size(w.clamp(500, 3200) as i32, h.clamp(400, 2000) as i32);
+        }
+        if let Some(name) = q["press"].as_str() {
+            // Activate a named, sensitive button exactly as its click handler would.
+            walk(window.upcast_ref(), &|w| {
+                if w.widget_name() == name && w.is_sensitive() && w.is_visible() {
+                    if let Some(b) = w.downcast_ref::<gtk::Button>() {
+                        b.emit_clicked();
+                    }
+                }
+            });
         }
         if let Some(value) = q["maximized"].as_bool() {
             if value {
@@ -477,17 +597,27 @@ impl Chrome {
         }
         if [
             "collapse",
+            "two_tab_rows",
+            "compact_tabs",
             "dock",
             "scheme",
             "font",
             "size",
             "labels",
             "line_height",
+            "terminal_shortcuts",
+            "copy_selection_to_clipboard",
         ]
         .iter()
         .any(|k| !q[k].is_null())
         {
             self.update(|p| {
+                if let Some(v) = q["two_tab_rows"].as_bool() {
+                    p.two_tab_rows = v;
+                }
+                if let Some(v) = q["compact_tabs"].as_bool() {
+                    p.compact_tabs = v;
+                }
                 if let Some(v) = q["collapse"].as_bool() {
                     p.actions_collapsed = v;
                 }
@@ -509,6 +639,15 @@ impl Chrome {
                 if let Some(v) = q["size"].as_u64().filter(|v| (9..=18).contains(v)) {
                     p.term_size_pt = v as u8;
                 }
+                if let Some(v) = q["terminal_shortcuts"]
+                    .as_str()
+                    .filter(|s| ["desktop", "traditional"].contains(s))
+                {
+                    p.terminal_shortcuts = v.into();
+                }
+                if let Some(v) = q["copy_selection_to_clipboard"].as_bool() {
+                    p.copy_selection_to_clipboard = v;
+                }
                 if let Some(v) = q["labels"].as_bool() {
                     p.bar_labels = v;
                 }
@@ -527,13 +666,39 @@ impl Chrome {
                 tree.borrow_mut().push(serde_json::json!({"type":w.type_().name(),"name":w.widget_name().as_str(),"height":w.height(),"width":w.width(),"css":w.css_classes().iter().map(|s|s.to_string()).collect::<Vec<_>>()}));
             }
         });
-        serde_json::json!({"header_tree":tree.into_inner(),"header_height":self.header.height(),"tab_bar_width":self.bar.width(),"actions_revealed":self.reveal.reveals_child(),"docked":p.controls_docked,"dock_height":self.dock.height(),"scheme":p.scheme,"term_font":p.term_font,"term_size_pt":p.term_size_pt,"content_height":content.as_ref().height(),"maximized":window.is_maximized(),"fullscreen":window.is_fullscreen(),"window_height":window.height(),"window_width":window.width(),"terminal_background":schemes::current().colors[8],"open":self.pop.is_visible()})
+        serde_json::json!({"tab_new_terminal":self.bar.end_action_widget().map(|w|serde_json::json!({"name":w.widget_name().as_str(),"mapped":w.is_mapped(),"sensitive":w.is_sensitive(),"width":w.width(),"height":w.height(),"origin":w.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()])})),"header_tree":tree.into_inner(),"header_height":self.header.height(),"tab_bar_width":self.bar.width(),"tab_layout":self.bar.inspect(window),"two_tab_rows":p.two_tab_rows,"compact_tabs":p.compact_tabs,"actions_revealed":self.reveal.reveals_child(),"docked":p.controls_docked,"dock_height":self.dock.height(),"scheme":p.scheme,"term_font":p.term_font,"term_size_pt":p.term_size_pt,"terminal_shortcuts":p.terminal_shortcuts,"copy_selection_to_clipboard":p.copy_selection_to_clipboard,"content_height":content.as_ref().height(),"maximized":window.is_maximized(),"fullscreen":window.is_fullscreen(),"window_height":window.height(),"window_width":window.width(),"terminal_background":schemes::current().colors[8],"open":self.pop.is_visible()})
     }
 }
-pub fn controls_shortcut(key: gdk::Key, mods: gdk::ModifierType) -> bool {
+/// F10 opens session controls only while keys stay with this computer; with
+/// Map keys on (AltGr tap) it reaches the terminal program or remote desktop
+/// like every other function key. Ctrl+. always opens the controls.
+pub fn controls_shortcut(key: gdk::Key, mods: gdk::ModifierType, map_keys: bool) -> bool {
     let m = mods - gdk::ModifierType::LOCK_MASK;
-    (key == gdk::Key::F10 && m.is_empty())
+    (key == gdk::Key::F10 && m.is_empty() && !map_keys)
         || (key == gdk::Key::period && m == gdk::ModifierType::CONTROL_MASK)
+}
+
+#[cfg(test)]
+mod controls_shortcut_tests {
+    use super::*;
+    #[test]
+    fn f10_belongs_to_the_program_while_keys_are_mapped() {
+        let none = gdk::ModifierType::empty();
+        assert!(controls_shortcut(gdk::Key::F10, none, false));
+        assert!(!controls_shortcut(gdk::Key::F10, none, true));
+        assert!(!controls_shortcut(gdk::Key::F9, none, false));
+        for mapped in [false, true] {
+            assert!(controls_shortcut(
+                gdk::Key::period,
+                gdk::ModifierType::CONTROL_MASK,
+                mapped
+            ));
+        }
+    }
+}
+
+pub fn tab_title_widget(bar: &impl IsA<gtk::Widget>) -> gtk::Widget {
+    TabTitle::new(bar).upcast()
 }
 
 // A header title otherwise receives only TabBar's small natural width, or a
@@ -545,7 +710,7 @@ mod tab_title {
     use gtk::subclass::prelude::*;
     #[derive(Default)]
     pub struct Title {
-        pub child: RefCell<Option<adw::TabBar>>,
+        pub child: RefCell<Option<gtk::Widget>>,
     }
     #[glib::object_subclass]
     impl ObjectSubclass for Title {
@@ -586,11 +751,11 @@ mod tab_title {
 }
 glib::wrapper! {pub struct TabTitle(ObjectSubclass<tab_title::Title>) @extends gtk::Widget, @implements gtk::Accessible,gtk::Buildable,gtk::ConstraintTarget;}
 impl TabTitle {
-    fn new(bar: &adw::TabBar) -> Self {
+    fn new(bar: &impl IsA<gtk::Widget>) -> Self {
         use gtk::subclass::prelude::ObjectSubclassIsExt;
         let s: Self = glib::Object::new();
-        bar.set_parent(&s);
-        *s.imp().child.borrow_mut() = Some(bar.clone());
+        bar.as_ref().set_parent(&s);
+        *s.imp().child.borrow_mut() = Some(bar.as_ref().clone());
         s
     }
 }

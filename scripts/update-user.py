@@ -515,6 +515,60 @@ def update_units(prefix):
     return dict(zip(UNIT_NAMES, (service, timer)))
 
 
+DISTRIBUTION_HINT = ('RUWAC is installed from a distribution package; update it with your package '
+                     'manager: sudo dnf upgrade ruwac ruwac-desktop')
+
+
+def distribution_package():
+    """A COPR/Fedora package owns /usr/bin/ruwac and all updates (DNF)."""
+    marker = Path('/usr/share/ruwac/rpm-installation.json')
+    try:
+        if not Path('/usr/bin/ruwac').is_file() or marker.stat().st_size > 8192:
+            return False
+        return json.loads(marker.read_text()).get('kind') == 'distribution'
+    except (OSError, ValueError):
+        return False
+
+
+def retire_user_installation(prefix):
+    """Hand a per-user installation over to the distribution package.
+
+    Only RUWAC's own command links, launcher, resource links and update timer are
+    removed; ~/.local/lib/ruwac (and so running daemons, their sessions and
+    rollback) is kept. Anything edited or owned by another tool is preserved.
+    """
+    retired, kept = [], []
+    for name in ['ruwac', 'ruwac-desktop']:
+        path = prefix / 'bin' / name
+        if path.is_symlink() and os.readlink(path) == '../lib/ruwac/current/' + name:
+            path.unlink(); retired.append(str(path))
+        elif path.exists() or path.is_symlink():
+            kept.append(str(path))
+    for relative in ['share/man/man1/ruwac.1', 'share/icons/hicolor/scalable/apps/si.z4.ruwac.svg']:
+        path = prefix / relative
+        own = str(prefix / 'lib/ruwac') + '/'
+        if path.is_symlink() and os.path.normpath(os.path.join(path.parent, os.readlink(path))).startswith(own):
+            path.unlink(); retired.append(str(path))
+    launcher = prefix / 'share/applications/si.z4.ruwac.desktop'
+    try:
+        text = launcher.read_text() if launcher.is_file() and not launcher.is_symlink() else None
+    except OSError:
+        text = None
+    if text is not None:
+        if text.startswith('[Desktop Entry]\nType=Application\nName=RUWAC\n') and str(prefix / 'bin/ruwac') in text:
+            launcher.unlink(); retired.append(str(launcher))
+        else:
+            kept.append(str(launcher))
+    if preferences().get('automatic_install'):
+        try:
+            automatic_install_setting(False, prefix)
+            retired.append('automatic per-user updates')
+        except ValueError as error:
+            kept.append(str(error))
+    return {'distribution': 'package-manager', 'available': False, 'skipped': DISTRIBUTION_HINT,
+            'retired': retired, 'kept': kept}
+
+
 def scheduler_directory():
     # The directory can contain other application units: retain existing permissions.
     base = settings_path().parent.parent / 'systemd'
@@ -782,7 +836,7 @@ def install(release, prefix, cache, desktop=True, automatic=False, prebuilt=Fals
             raise ValueError('Missing build dependency: ' + tool + '; no verified prebuilt bundle is available for this release and platform; see Fedora update instructions')
     if desktop:
         # libssh2-sys already builds its bundled library when system headers are absent.
-        for package in ['gtk4', 'libadwaita-1', 'openssl', 'sqlite3']:
+        for package in ['gtk4', 'libadwaita-1', 'openssl', 'sqlite3', 'webkitgtk-6.0']:
             run(['pkg-config', '--exists', package])
     lock = locked_file(cache / '.update.lock')
     root = Path(tempfile.mkdtemp(prefix='source-', dir=cache))
@@ -816,28 +870,51 @@ def install(release, prefix, cache, desktop=True, automatic=False, prebuilt=Fals
         os.close(lock)
 
 
+def remote_cli_version(binary):
+    """Inspect the selected SSH executable, with the same user-local fallback."""
+    executable = shutil.which(binary)
+    if executable is None and binary == 'ruwac':
+        candidate = Path.home() / '.local/bin/ruwac'
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            executable = str(candidate)
+    if executable is None:
+        return '0.0.0'
+    result = subprocess.run([executable, '--version'], capture_output=True, text=True, timeout=5)
+    match = re.fullmatch(r'RUWAC ([0-9]+\.[0-9]+\.[0-9]+)\s*', result.stdout)
+    if result.returncode or not match:
+        raise ValueError('Selected remote RUWAC executable has an invalid version')
+    version(match[1])
+    return match[1]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group(required=True)
-    modes.add_argument('--check', action='store_true')
-    modes.add_argument('--check-auto', action='store_true')
-    modes.add_argument('--install', action='store_true')
-    modes.add_argument('--bootstrap', action='store_true', help='Build/install the latest published version when no CLI is installed')
-    parser.add_argument('--prebuilt', action='store_true', help='Prefer the verified prebuilt Fedora bundle over a source build')
-    modes.add_argument('--install-auto', action='store_true')
-    modes.add_argument('--auto-install', choices=['on', 'off', 'status'])
-    modes.add_argument('--rollback', action='store_true')
-    modes.add_argument('--auto-check', choices=['on', 'off', 'status'])
-    modes.add_argument('--testing-bundles', choices=['on', 'off', 'status'])
-    parser.add_argument('--current', default='0.0.0')
-    parser.add_argument('--prefix', type=Path, default=Path.home() / '.local')
-    parser.add_argument('--headless', action='store_true')
-    parser.add_argument('--running-executable', help=argparse.SUPPRESS)
-    parser.add_argument('--managed-rpm', action='store_true', help=argparse.SUPPRESS)
+    modes.add_argument('-c', '--check', action='store_true')
+    modes.add_argument('-C', '--check-auto', action='store_true')
+    modes.add_argument('-i', '--install', action='store_true')
+    modes.add_argument('-b', '--bootstrap', action='store_true', help='Build/install the latest published version when no CLI is installed')
+    parser.add_argument('-p', '--prebuilt', action='store_true', help='Prefer the verified prebuilt Fedora bundle over a source build')
+    modes.add_argument('-I', '--install-auto', action='store_true')
+    modes.add_argument('-a', '--auto-install', choices=['on', 'off', 'status'])
+    modes.add_argument('-r', '--rollback', action='store_true')
+    modes.add_argument('-A', '--auto-check', choices=['on', 'off', 'status'])
+    modes.add_argument('-t', '--testing-bundles', choices=['on', 'off', 'status'])
+    parser.add_argument('-v', '--current', default='0.0.0')
+    parser.add_argument('-R', '--remote-cli', help='Check the executable selected for a remote agent before a verified per-user update')
+    parser.add_argument('-P', '--prefix', type=Path, default=Path.home() / '.local')
+    parser.add_argument('-H', '--headless', action='store_true')
+    parser.add_argument('-e', '--running-executable', help=argparse.SUPPRESS)
+    parser.add_argument('-m', '--managed-rpm', action='store_true', help=argparse.SUPPRESS)
+    modes.add_argument('--retire-user', action='store_true', help='Hand a per-user installation over to the distribution package')
     args = parser.parse_args()
     if not args.bootstrap and args.current == '0.0.0':
         parser.error('--current is required except for bootstrap installation')
     version(args.current)
+    if args.remote_cli:
+        if not args.bootstrap or args.managed_rpm:
+            parser.error('--remote-cli requires per-user bootstrap mode')
+        args.current = max(args.current, remote_cli_version(args.remote_cli), key=version)
     if args.managed_rpm:
         if args.auto_install:
             result = rpm_operation(args.auto_install)
@@ -866,7 +943,16 @@ def main():
         print(json.dumps(result))
         return
     prefix = args.prefix.absolute()
-    if args.testing_bundles:
+    if args.retire_user:
+        if not distribution_package():
+            raise ValueError('No distribution package of RUWAC is installed; the per-user installation was kept')
+        result = retire_user_installation(prefix)
+    elif distribution_package() and (
+            args.install or args.install_auto or args.bootstrap or args.check or args.check_auto
+            or args.auto_install == 'on' or args.rollback):
+        # Never install or check a competing per-user copy beside the DNF package.
+        result = {'distribution': 'package-manager', 'available': False, 'skipped': DISTRIBUTION_HINT}
+    elif args.testing_bundles:
         result = {'testing_bundles': testing_bundle_setting({'on': True, 'off': False}.get(args.testing_bundles))}
     elif args.auto_install:
         result = {'automatic_install': automatic_install_setting({'on': True, 'off': False}.get(args.auto_install), prefix)}
@@ -886,12 +972,16 @@ def main():
             os.close(lock)
     else:
         installed = installed_version(prefix, '0.0.0' if args.bootstrap else args.current)
+        if args.remote_cli:
+            installed = max(installed, args.current, key=version)
         delivery = 'testing-bundle' if args.prebuilt or (not args.headless and testing_bundle_setting()) else 'source-build'
         result = verified_status(installed, delivery)
         result = installation_status(result, installation_identity(prefix, args.current, args.running_executable))
         if 'skipped' not in result and (args.install or args.install_auto or args.bootstrap) and result['available']:
             cache = private_directory(Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')) / 'RUWAC/updates')
-            desktop = not args.headless
+            # --headless installs only the CLI on a fresh machine; an existing
+            # per-user desktop is updated with it rather than refused.
+            desktop = not args.headless or (prefix / 'bin/ruwac-desktop').is_symlink()
             if args.install_auto:
                 receipt = prefix / 'lib/ruwac/current/installation.json'
                 artifacts = json.loads(receipt.read_text()).get('artifacts', {})

@@ -23,7 +23,7 @@ fn target(rpc: &mut Rpc, session: &str, pane: &str, pid: Option<u64>) -> io::Res
     let job = rpc.call("job.query", json!({"pane":pane}))?;
     let current = job["foreground"]["pid"]
         .as_u64()
-        .ok_or_else(|| io::Error::other("Live Codex foreground unavailable"))?;
+        .ok_or_else(|| io::Error::other("Live Codex or Claude Code foreground unavailable"))?;
     if job["session"] != session || job["selected"] != true || pid.is_some_and(|pid| pid != current)
     {
         return Err(io::Error::other("Image attachment target changed"));
@@ -36,17 +36,99 @@ fn target(rpc: &mut Rpc, session: &str, pane: &str, pid: Option<u64>) -> io::Res
         || !selected.is_some_and(|p| p["grid"]["bracketed_paste"] == true && p["ended"] != true)
     {
         return Err(io::Error::other(
-            "Select a live Codex pane with bracketed paste enabled",
+            "Select a live Codex or Claude Code pane with bracketed paste enabled",
         ));
     }
     let screen = rpc.call("pane.capture", json!({"pane":pane,"lines":100}))?;
-    if !guard::model_ready(screen["text"].as_str().unwrap_or("")) {
+    // A local nested RUWAC client hides the agent behind its own PTY; its
+    // footer alone decides whether Ctrl+V may be forwarded.
+    let text = screen["text"].as_str().unwrap_or("");
+    let ready = match u32::try_from(current)
+        .ok()
+        .and_then(guard::foreground_agent)
+    {
+        Some(agent) => guard::ready(agent, text),
+        None => guard::ready(guard::Agent::Codex, text) || guard::ready(guard::Agent::Claude, text),
+    };
+    if !ready {
         return Err(io::Error::other(
-            "Wait until Codex has loaded an image-capable model",
+            "Wait until the agent's input box is ready (Codex loads its model first)",
         ));
     }
     Ok(current)
 }
+#[path = "../../crates/ruwac-pty/src/image_offer.rs"]
+mod offer;
+
+/// Bind the offer before forwarding Ctrl+V. The nested client claims using its
+/// actual process identity and attaches through its existing authenticated RPC.
+/// This worker returns immediately; focus cancellation stays with the GTK ticket.
+pub fn start_nested(
+    rpc: &mut Rpc,
+    session: &str,
+    pane: &str,
+    path: &Path,
+    ticket: std::sync::Arc<AtomicBool>,
+    done: std::sync::mpsc::SyncSender<Result<Value, String>>,
+) -> io::Result<bool> {
+    allowed(&ticket)?;
+    let pid = target(rpc, session, pane, None)?;
+    if !local_ruwac_foreground(pid) {
+        return Ok(false);
+    }
+    let expected = offer::Process::read(
+        u32::try_from(pid).map_err(|_| io::Error::other("Invalid local TUI PID"))?,
+    )?;
+    let worker = offer::Worker::reserve()?;
+    let offer = offer::Offer::new(expected)?;
+    let message = serde_json::to_vec(&json!({"version":1,"path":path}))?;
+    if message.len() > offer::MAX_MESSAGE {
+        return Err(io::Error::other("PNG handoff path too long"));
+    }
+    target(rpc, session, pane, Some(pid))?;
+    allowed(&ticket)?;
+    rpc.call(
+        "client.input",
+        json!({"pane":pane,"kind":"keyboard","text":"\u{16}"}),
+    )?;
+    let pane = pane.to_owned();
+    std::thread::spawn(move || {
+        let _worker = worker;
+        let result = (|| -> io::Result<Value> {
+            let Some(mut stream) = offer.accept(|| ticket.load(Ordering::Acquire))? else {
+                allowed(&ticket)?;
+                // An older local TUI already received its native Ctrl+V. Keep
+                // that compatibility route; absence of a claim is not proof
+                // that the native clipboard failed or that the image attached.
+                return Ok(json!({"pane":pane,"native_clipboard_key_forwarded":true,
+                    "queued":true,"submitted":false,"consumed":false,
+                    "draft_attachment_observed":false,"legacy_TUI":true}));
+            };
+            let request: Value = serde_json::from_slice(&offer::receive(&mut stream, || {
+                ticket.load(Ordering::Acquire)
+            })?)?;
+            if request != json!({"version":1,"kind":"local-image"}) {
+                return Err(io::Error::other("PNG handoff request rejected"));
+            }
+            allowed(&ticket)?;
+            offer::send(&mut stream, &message)?;
+            let mut result: Value = serde_json::from_slice(&offer::receive(&mut stream, || {
+                ticket.load(Ordering::Acquire)
+            })?)?;
+            if result["version"] != 1 || result["queued"] != true || result["submitted"] != false {
+                return Err(io::Error::other("PNG handoff receipt rejected"));
+            }
+            result["pane"] = json!(pane);
+            result["local_nested_handoff"] = json!(true);
+            result["draft_attachment_observed"] = json!(false);
+            Ok(result)
+        })()
+        .map_err(|error| error.to_string());
+        let _ = done.try_send(result);
+    });
+    Ok(true)
+}
+
 pub fn attach(
     rpc: &mut Rpc,
     session: &str,
@@ -54,17 +136,38 @@ pub fn attach(
     path: &Path,
     ticket: &AtomicBool,
     native_api: bool,
+    native_clipboard_key: bool,
 ) -> io::Result<Value> {
     allowed(ticket)?;
     let pid = target(rpc, session, pane, None)?;
     let path = path
         .to_str()
         .ok_or_else(|| io::Error::other("Image path is not UTF-8"))?;
-    guard::validate(
+    // A local nested TUI owns another PTY, so its agent process is not in
+    // this foreground group. Preserve the user's Ctrl+V instead of treating
+    // the visible model footer as permission to inject a path through it.
+    if native_clipboard_key && local_ruwac_foreground(pid) {
+        target(rpc, session, pane, Some(pid))?;
+        allowed(ticket)?;
+        rpc.call(
+            "client.input",
+            json!({"pane":pane,"kind":"keyboard","text":"\u{16}"}),
+        )?;
+        return Ok(json!({"pane":pane,"native_clipboard_key_forwarded":true,
+            "submitted":false,"consumed":false,"queued":true}));
+    }
+    let agent = guard::validate(
         path,
         pid.try_into()
             .map_err(|_| io::Error::other("Invalid foreground PID"))?,
     )?;
+    // Daemons before v0.4.54 attach drafts only to Codex; their probe never
+    // reports Claude Code. Use the guarded client paste route for them.
+    let native_api = native_api
+        && (agent != guard::Agent::Claude
+            || rpc
+                .call("agent.probe", json!({"pane":pane}))
+                .is_ok_and(|probe| probe["adapter"] == "claude"));
     let before = rpc.call("pane.capture", json!({"pane":pane,"lines":100}))?;
     let before = guard::highest_image(before["text"].as_str().unwrap_or(""));
     target(rpc, session, pane, Some(pid))?;
@@ -104,6 +207,16 @@ pub fn attach(
     )
 }
 
+fn local_ruwac_foreground(pid: u64) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let root = std::path::PathBuf::from(format!("/proc/{pid}"));
+    std::fs::metadata(&root).is_ok_and(|m| m.uid() == unsafe { libc::geteuid() })
+        && std::fs::read_link(root.join("exe")).is_ok_and(|p| {
+            p.file_name()
+                .is_some_and(|n| n == "ruwac" || n == "ruwac (deleted)")
+        })
+}
+
 /// GDK reads are asynchronous; the GTK thread continuously revokes worker delivery on focus changes.
 pub fn clipboard(
     view: &std::rc::Rc<crate::view::View>,
@@ -120,6 +233,17 @@ pub fn clipboard_route(
     selected: std::rc::Rc<dyn Fn() -> bool>,
     delay: Duration,
     remote: Option<crate::remote_image::Target>,
+    done: impl FnOnce(Result<Value, String>) + 'static,
+) {
+    clipboard_route_inner(view, directory, selected, delay, remote, false, done);
+}
+fn clipboard_route_inner(
+    view: &std::rc::Rc<crate::view::View>,
+    directory: std::path::PathBuf,
+    selected: std::rc::Rc<dyn Fn() -> bool>,
+    delay: Duration,
+    remote: Option<crate::remote_image::Target>,
+    native_clipboard_key: bool,
     done: impl FnOnce(Result<Value, String>) + 'static,
 ) {
     use gtk::prelude::*;
@@ -141,7 +265,8 @@ pub fn clipboard_route(
     };
     if !valid(view) {
         done(Err(
-            "Select and focus the intended Codex pane before attaching an image".into(),
+            "Select and focus the intended Codex or Claude Code pane before attaching an image"
+                .into(),
         ));
         return;
     }
@@ -203,6 +328,7 @@ pub fn clipboard_route(
                         pane: view.target.borrow().clone(),
                         path: image.path.clone(),
                         allowed: allowed.clone(),
+                        native_clipboard_key,
                         done: send,
                     })
             };
@@ -256,4 +382,132 @@ pub fn clipboard_route(
             });
         },
     );
+}
+
+/// Local Codex/Claude Code image keys use the same guarded route as the explicit button.
+/// Screen text is only a routing hint; worker process/file/model checks remain
+/// authoritative before a path can reach a draft. Other programs keep their keys.
+pub fn try_clipboard_paste(
+    view: &std::rc::Rc<crate::view::View>,
+    directory: Option<std::path::PathBuf>,
+) -> bool {
+    use gtk::prelude::*;
+    let formats = view.area.display().clipboard().formats();
+    if !formats.contain_mime_type("image/png")
+        || formats.contain_mime_type("text/plain")
+        || formats.contain_mime_type("text/plain;charset=utf-8")
+    {
+        return false;
+    }
+    let hinted = view.frame.borrow().as_ref().is_some_and(|frame| {
+        let pane = view.target.borrow();
+        frame["panes"]
+            .as_array()
+            .and_then(|panes| panes.iter().find(|p| p["id"] == pane.as_str()))
+            .is_some_and(|p| local_model_hint(&p["grid"]))
+    });
+    if !hinted {
+        return false;
+    }
+    let Some(directory) = directory else {
+        view.warn("Private image staging is unavailable");
+        return true;
+    };
+    if view.image_paste_pending() {
+        view.warn("An image paste is already in progress");
+        return true;
+    }
+    let ticket = view.begin_image_paste();
+    let (valid_ticket, valid_view) = (ticket.clone(), std::rc::Rc::downgrade(view));
+    let selected: std::rc::Rc<dyn Fn() -> bool> = std::rc::Rc::new(move || {
+        valid_ticket.load(Ordering::Acquire)
+            && valid_view.upgrade().is_some_and(|v| v.root.is_mapped())
+    });
+    let weak = std::rc::Rc::downgrade(view);
+    view.warn("Reading clipboard PNG for the selected agent draft…");
+    clipboard_route_inner(
+        view,
+        directory,
+        selected,
+        Duration::ZERO,
+        None,
+        true,
+        move |result| {
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            if !view.end_image_paste(&ticket) {
+                return;
+            }
+            match result {
+                Ok(receipt)
+                    if receipt["local_nested_handoff"] == true
+                        && receipt["focus_current"] == true =>
+                {
+                    view.warn("PNG sent to the nested agent draft; inspect it before submitting.")
+                }
+                Ok(receipt) if receipt["native_clipboard_key_forwarded"] == true => view
+                    .warn("Ctrl+V forwarded to the nested RUWAC session; check the agent draft."),
+                Ok(receipt)
+                    if receipt["draft_attachment_observed"] == true
+                        && receipt["focus_current"] == true =>
+                {
+                    view.warn("PNG attached to the draft; submit it when ready.")
+                }
+                Ok(_) => {
+                    view.warn("Image attachment not confirmed; inspect the draft before retrying.")
+                }
+                Err(error) => view.warn(&error),
+            }
+        },
+    );
+    true
+}
+
+fn local_model_hint(grid: &Value) -> bool {
+    if grid["bracketed_paste"] != true {
+        return false;
+    }
+    let Some(rows) = grid["cells"].as_array() else {
+        return false;
+    };
+    let mut text = String::new();
+    for row in rows.iter().skip(rows.len().saturating_sub(100)) {
+        if let Some(cells) = row.as_array() {
+            for cell in cells {
+                text.push_str(cell[0].as_str().unwrap_or(""));
+            }
+        }
+        text.push('\n');
+    }
+    // Either supported agent's input footer: Codex or Claude Code. (Only Codex
+    // was recognized before, so Ctrl+V into a nested Claude Code fell through
+    // to a text paste of an image-only clipboard and sent nothing.)
+    guard::ready(guard::Agent::Codex, &text) || guard::ready(guard::Agent::Claude, &text)
+}
+
+#[cfg(test)]
+mod local_paste_tests {
+    use super::*;
+    #[test]
+    fn routing_hint_requires_ready_grid_but_never_authorizes_a_process() {
+        let mut grid = json!({"bracketed_paste":true,"cells":[[["GPT-6.1-Sol"]]]});
+        assert!(local_model_hint(&grid));
+        grid["bracketed_paste"] = json!(false);
+        assert!(!local_model_hint(&grid));
+        grid["bracketed_paste"] = json!(true);
+        grid["cells"] = json!([[["shell prompt"]]]);
+        assert!(!local_model_hint(&grid));
+        // Claude Code's footer, full and shortened, also routes the image.
+        for footer in [
+            "  ⏵⏵ auto mode on (shift+tab to cycle)",
+            "  ? for shortcuts",
+            "  ⏵⏵ auto mode on · 1 shell",
+        ] {
+            let cells: Vec<Value> = footer.chars().map(|c| json!([c.to_string()])).collect();
+            grid["cells"] = json!([cells]);
+            assert!(local_model_hint(&grid), "{footer}");
+        }
+        assert!(!local_model_hint(&json!({})));
+    }
 }

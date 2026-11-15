@@ -63,6 +63,18 @@ pub const SCHEMES: [Scheme; 6] = [
     },
 ];
 thread_local! { static CURRENT: Cell<&'static Scheme> = const { Cell::new(&SCHEMES[0]) }; }
+thread_local! {
+    static VIVID: Cell<bool> = const { Cell::new(true) };
+}
+/// GNOME Terminal's default palette (normal 0–7, bright 8–15), with normal
+/// yellow and blue lifted for legibility on dark backgrounds.
+const VIVID_ANSI: [u32; 16] = [
+    0x171421, 0xc01c28, 0x26a269, 0xc88800, 0x3584e4, 0xa347ba, 0x2aa1b3, 0xd0cfcc, 0x5e5c64,
+    0xf66151, 0x33da7a, 0xe9ad0c, 0x2a7bde, 0xc061cb, 0x33c7de, 0xffffff,
+];
+pub fn set_vivid(vivid: bool) {
+    VIVID.with(|v| v.set(vivid));
+}
 pub fn current() -> &'static Scheme {
     CURRENT.with(Cell::get)
 }
@@ -147,6 +159,10 @@ impl Scheme {
         rgb(self.colors[9])
     }
     pub fn ansi(&self, n: usize) -> (f64, f64, f64) {
+        // Black and white keep the scheme's contrast with its background.
+        if VIVID.with(Cell::get) && self.id != "paper" && !matches!(n, 0 | 7 | 8 | 15) {
+            return rgb(VIVID_ANSI[n % 16]);
+        }
         let base = match n % 8 {
             0 => {
                 let b = self.bg();

@@ -1,0 +1,16 @@
+[Unit]
+Description=Update RUWAC packages from its COPR repository
+Documentation=man:ruwac(1)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/ruwac/update.conf
+
+[Service]
+Type=oneshot
+# Package files only: user RUWAC engines and their terminals are separate
+# per-user processes and are never stopped or restarted by this service.
+ExecStart=/usr/libexec/ruwac/package-update
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=idle
+PrivateTmp=yes

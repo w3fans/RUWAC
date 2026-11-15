@@ -82,3 +82,96 @@ mod tests {
         assert!(m.key(Some(0x5b), true, false, false).events.is_empty());
     }
 }
+
+/// A clean AltGr tap is a host shortcut and must never reach a nested GUI.
+/// Delay only its press; a chord flushes it before the next remote input.
+#[derive(Default)]
+pub struct DeferredAltGr {
+    pending: bool,
+}
+impl DeferredAltGr {
+    pub fn clear(&mut self) {
+        self.pending = false;
+    }
+    pub fn key(
+        &mut self,
+        altgr: bool,
+        release: bool,
+        focused: bool,
+        held: bool,
+        other_held: bool,
+    ) -> Plan {
+        if !focused {
+            self.clear();
+            return Plan {
+                handled: altgr,
+                events: vec![],
+            };
+        }
+        if altgr {
+            if !release {
+                if held {
+                    return Plan {
+                        handled: true,
+                        events: vec![],
+                    };
+                }
+                if other_held {
+                    return Plan {
+                        handled: false,
+                        events: vec![],
+                    };
+                }
+                self.pending = true;
+                return Plan {
+                    handled: true,
+                    events: vec![],
+                };
+            }
+            let pending = std::mem::take(&mut self.pending);
+            return Plan {
+                handled: pending || !held,
+                events: vec![],
+            };
+        }
+        let flush = !release && std::mem::take(&mut self.pending);
+        Plan {
+            handled: false,
+            events: if flush { vec![(0x38, false)] } else { vec![] },
+        }
+    }
+}
+
+#[cfg(test)]
+mod altgr_tests {
+    use super::*;
+    #[test]
+    fn tap_and_repeated_press_never_reach_nested_gui() {
+        let mut p = DeferredAltGr::default();
+        assert!(p.key(true, false, true, false, false).handled);
+        assert!(p.key(true, false, true, false, false).events.is_empty());
+        let up = p.key(true, true, true, false, false);
+        assert!(up.handled && up.events.is_empty());
+    }
+    #[test]
+    fn chord_flushes_before_key_and_release_is_forwarded_once() {
+        let mut p = DeferredAltGr::default();
+        p.key(true, false, true, false, false);
+        assert_eq!(
+            p.key(false, false, true, false, false).events,
+            vec![(0x38, false)]
+        );
+        assert!(!p.key(true, true, true, true, false).handled);
+        assert!(p.key(true, true, true, false, false).handled);
+    }
+    #[test]
+    fn modifier_already_held_and_focus_cancellation_remain_balanced() {
+        let mut p = DeferredAltGr::default();
+        assert!(!p.key(true, false, true, false, true).handled);
+        assert!(!p.key(true, true, true, true, false).handled);
+        p.key(true, false, true, false, false);
+        p.clear();
+        assert!(p.key(true, true, true, false, false).handled);
+        assert!(p.key(false, false, true, false, false).events.is_empty());
+    }
+}

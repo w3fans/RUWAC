@@ -64,6 +64,17 @@ pub fn select(formats: &[ClipboardFormat]) -> Option<(ClipboardFormatId, Format)
     }
     None
 }
+/// One preferred image wire format plus Unicode text. Data is requested lazily.
+pub fn select_all(formats: &[ClipboardFormat]) -> Vec<(ClipboardFormatId, Format)> {
+    let mut result = Vec::new();
+    if let Some(image) = select(formats).filter(|(_, k)| *k != Format::Text) {
+        result.push(image);
+    }
+    if formats.iter().any(|f| f.id() == Format::Text.id()) {
+        result.push((Format::Text.id(), Format::Text));
+    }
+    result
+}
 pub enum Event {
     Reset,
     Initialize,
@@ -72,6 +83,7 @@ pub enum Event {
         generation: u64,
         epoch: u64,
         selected: Option<(ClipboardFormatId, Format)>,
+        formats: Vec<(ClipboardFormatId, Format)>,
     },
     Request(ClipboardFormatId),
     Data(Result<Vec<u8>, String>),
@@ -161,6 +173,7 @@ impl CliprdrBackend for Backend {
             generation: self.generation,
             epoch: self.bridge.epoch.load(Ordering::Acquire),
             selected: select(f),
+            formats: select_all(f),
         });
     }
     fn on_format_data_request(&mut self, r: FormatDataRequest) {

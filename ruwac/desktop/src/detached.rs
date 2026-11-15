@@ -243,18 +243,22 @@ impl Windows {
         let tabs = adw::TabView::new();
         tabs.set_vexpand(true);
         tabs.remove_shortcuts(adw::TabViewShortcuts::ALT_DIGITS | adw::TabViewShortcuts::ALT_ZERO);
-        let bar = adw::TabBar::builder()
-            .view(&tabs)
-            .autohide(false)
-            .expand_tabs(true)
-            .build();
+        let bar = crate::tab_strip::TabStrip::new(&tabs, &window);
         bar.add_css_class("ruwac-tabs");
-        header.set_title_widget(Some(&bar));
+        header.set_centering_policy(adw::CenteringPolicy::Loose);
+        header.set_title_widget(Some(&crate::chrome::tab_title_widget(bar.widget())));
         body.append(&header);
         body.append(&tabs);
         window.set_content(Some(&body));
         let memory: tiles::FocusMemory = Rc::new(RefCell::new(Default::default()));
         self.bind(&window, &tabs, memory.clone());
+        crate::sessions::install_recovery(
+            &window,
+            &tabs,
+            &self.terminal,
+            &self.socket,
+            &self.broker,
+        );
         let group = self.clone();
         let focus: tiles::FocusView = Rc::new(move |root| group.focus(root));
         let (m, f) = (memory.clone(), focus.clone());
@@ -293,12 +297,20 @@ impl Windows {
             .build();
         let pop = gtk::Popover::new();
         let actions = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        actions.append(&sessions::controls(
+        let terminal_controls = sessions::controls(
             tabs.clone(),
             self.terminal.clone(),
             self.socket.clone(),
             self.broker.clone(),
-        ));
+        );
+        // Every window keeps the visible "+" new-terminal control of its own tabs.
+        if let Some(new_terminal) = terminal_controls
+            .first_child()
+            .and_downcast::<gtk::Button>()
+        {
+            crate::chrome::terminal_tab_action(&bar, &new_terminal);
+        }
+        actions.append(&terminal_controls);
         pop.set_child(Some(&actions));
         controls.set_popover(Some(&pop));
         header.pack_end(&controls);
@@ -350,17 +362,18 @@ impl Windows {
         let g = grab.clone();
         window.connect_is_active_notify(move |_| g.update());
         let mode = Rc::new(shortcuts::LocalMode::default());
+        shortcuts::bind_mode(window.upcast_ref(), &mode);
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let (m, g) = (mode.clone(), grab.clone());
-        keys.connect_key_released(move |_, key, _, _| {
-            if let Some(mapped) = m.release(key) {
+        keys.connect_key_released(move |_, _, code, _| {
+            if let Some(mapped) = m.release(code) {
                 g.set_local(!mapped);
             }
         });
         let (t, w, c) = (tabs.clone(), window.downgrade(), controls.clone());
-        keys.connect_key_pressed(move |_, key, _, mods| {
-            mode.press(key);
+        keys.connect_key_pressed(move |_, key, code, mods| {
+            mode.press(key, code);
             if !mode.active() {
                 if let Some(index) = shortcuts::alt_tab_index(key, mods) {
                     shortcuts::select_tab(&t, index);
@@ -377,7 +390,9 @@ impl Windows {
                 }
                 return glib::Propagation::Stop;
             }
-            if shortcuts::local_escape(key, mods) || crate::chrome::controls_shortcut(key, mods) {
+            if shortcuts::local_escape(key, mods)
+                || crate::chrome::controls_shortcut(key, mods, mode.active())
+            {
                 c.popup();
                 return glib::Propagation::Stop;
             }
@@ -386,6 +401,32 @@ impl Windows {
         window.add_controller(keys);
         window.present();
         Some(tabs)
+    }
+    /// A new window in this process, so tabs can be dragged between all
+    /// windows. Optionally starts with a fresh terminal on this engine.
+    pub fn open_window(
+        self: &Rc<Self>,
+        with_terminal: bool,
+    ) -> Option<(adw::TabView, tiles::FocusMemory)> {
+        let tabs = self.create()?;
+        let memory = self
+            .entries
+            .borrow()
+            .iter()
+            .find(|(_, t, _)| t.upgrade().as_ref() == Some(&tabs))
+            .map(|(_, _, m)| m.clone())?;
+        if with_terminal {
+            if let Some(window) = tabs.root().and_downcast::<gtk::Window>() {
+                crate::chrome::walk(window.upcast_ref(), &|w| {
+                    if w.widget_name() == "terminal-tab-new" {
+                        if let Some(b) = w.downcast_ref::<gtk::Button>() {
+                            b.emit_clicked();
+                        }
+                    }
+                });
+            }
+        }
+        Some((tabs, memory))
     }
     pub fn fixture(
         self: &Rc<Self>,
@@ -409,6 +450,18 @@ impl Windows {
                     if source != from && source.n_pages() > 0 {
                         source.transfer_page(&source.nth_page(0), from, from.n_pages());
                     }
+                }
+            }
+            "new-window" => {
+                // The real header button, as a user click would trigger it.
+                if let Some(window) = from.root().and_downcast::<gtk::Window>() {
+                    crate::chrome::walk(window.upcast_ref(), &|w| {
+                        if w.widget_name() == "new-workspace-window" {
+                            if let Some(b) = w.downcast_ref::<gtk::Button>() {
+                                b.emit_clicked();
+                            }
+                        }
+                    });
                 }
             }
             "close" => {

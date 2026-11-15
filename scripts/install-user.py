@@ -2,8 +2,12 @@
 """Reversible per-user installation of built RUWAC artifacts; never allocates a version."""
 import argparse, fcntl, hashlib, json, os, platform, re, shutil, stat, subprocess, tempfile, tomllib
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('--build-root',type=Path,required=True);p.add_argument('--desktop',action='store_true');p.add_argument('--prefix',type=Path);p.add_argument('--target-dir',type=Path,help='Cargo target directory for source builds (default: BUILD_ROOT/target)');a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('-b', '--build-root',type=Path,required=True);p.add_argument('-d', '--desktop',action='store_true');p.add_argument('-p', '--prefix',type=Path);p.add_argument('-t', '--target-dir',type=Path,help='Cargo target directory for source builds (default: BUILD_ROOT/target)');a=p.parse_args()
 root=a.build_root.resolve();prefix=(a.prefix or Path.home()/'.local').absolute()
+# A COPR/Fedora package owns RUWAC on this machine; never install a competing copy.
+try:distribution=json.loads(Path('/usr/share/ruwac/rpm-installation.json').read_text()).get('kind')=='distribution' and Path('/usr/bin/ruwac').is_file()
+except (OSError,ValueError):distribution=False
+if distribution:raise SystemExit('RUWAC is installed from a distribution package; update it with: sudo dnf upgrade ruwac ruwac-desktop. Run /usr/bin/ruwac update to retire this per-user copy.')
 version=tomllib.loads((root/'ruwac/Cargo.toml').read_text())['workspace']['package']['version']
 if not re.fullmatch(r'(0|[1-9][0-9]*)\.[0-9]\.([0-9]|[1-9][0-9])',version):raise SystemExit('Invalid controller-assigned numeric version')
 bundle=None
@@ -39,6 +43,9 @@ lock=os.open(base/'.install.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600);m=os
 if not stat.S_ISREG(m.st_mode)or m.st_uid!=os.geteuid()or m.st_nlink!=1 or m.st_mode&0o077:raise SystemExit('Unsafe installation lock')
 try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
 except BlockingIOError:raise SystemExit('Another RUWAC installation is active')
+# Refuse before writing anything: a refused install must not leave a partial
+# immutable release behind that blocks the next, correct attempt.
+if not a.desktop and (prefix/'bin'/'ruwac-desktop').is_symlink():raise SystemExit('Retain the desktop installation with --desktop')
 release=base/'releases'/version;release.parent.mkdir(exist_ok=True)
 if release.parent.is_symlink():raise SystemExit('Unsafe releases directory')
 resources={}

@@ -407,10 +407,11 @@ pub enum Command {
         allowed: Arc<AtomicBool>,
         done: SyncSender<Result<(), String>>,
     },
-    History(String, bool),
+    History(String, bool, u64),
     AttachImage {
         pane: String,
         path: std::path::PathBuf,
+        native_clipboard_key: bool,
         allowed: Arc<AtomicBool>,
         done: SyncSender<Result<Value, String>>,
     },
@@ -421,7 +422,7 @@ impl Command {
         match self {
             Self::Rpc(_, v) => v.to_string().len(),
             Self::Paste(_, s) | Self::GuardedPaste { text: s, .. } => s.len(),
-            Self::History(s, _) => s.len(),
+            Self::History(s, _, _) => s.len(),
             Self::AttachImage { pane, path, .. } => pane.len() + path.as_os_str().len(),
             Self::Close => 0,
         }
@@ -440,6 +441,8 @@ pub struct State {
     pub acknowledgements: u64,
     pub coalesced: u64,
     pub supports_previous_window: bool,
+    /// Cached once per authenticated connection; never queried while rendering.
+    pub engine_version: Option<String>,
 }
 pub struct Worker {
     tx: SyncSender<Command>,
@@ -447,6 +450,16 @@ pub struct Worker {
     stop: Arc<AtomicBool>,
     bytes: Arc<AtomicUsize>,
     visible: Arc<AtomicBool>,
+    wake_reader: Option<UnixStream>,
+}
+
+fn notify_view(wake: &Option<UnixStream>) {
+    use std::io::Write;
+    if let Some(stream) = wake {
+        // Latest state is already bounded/coalesced. A full wake socket needs
+        // no additional byte; never block terminal I/O on the GTK main loop.
+        let _ = (&*stream).write(&[1]);
+    }
 }
 /// Two render frames show the same content (revision numbers aside). The
 /// revision counts changes in every session of the daemon.
@@ -498,6 +511,13 @@ impl Worker {
         Self::spawn(path, session, true)
     }
     fn spawn(path: std::path::PathBuf, session: String, ensure_daemon: bool) -> Self {
+        let (wake_reader, wake_writer) = UnixStream::pair()
+            .ok()
+            .filter(|(read, write)| {
+                read.set_nonblocking(true).is_ok() && write.set_nonblocking(true).is_ok()
+            })
+            .map(|(read, write)| (Some(read), Some(write)))
+            .unwrap_or_default();
         let (tx, rx) = mpsc::sync_channel::<Command>(128);
         let state = Arc::new(Mutex::new(State::default()));
         let stop = Arc::new(AtomicBool::new(false));
@@ -523,6 +543,15 @@ impl Worker {
                     .is_some_and(|methods| methods.iter().any(|m| m == "window.previous"));
                 let capabilities = rpc.call("capabilities", json!({}))?;
                 rpc.limits = ruwac_protocol::TerminalLimits::advertised(&capabilities);
+                let engine_version = rpc.call("version", json!({})).ok().and_then(|v| {
+                    v["package"]
+                        .as_str()
+                        .filter(|s| {
+                            !s.is_empty() && s.len() <= 64 && !s.chars().any(char::is_control)
+                        })
+                        .map(str::to_owned)
+                });
+                st.lock().unwrap().engine_version = engine_version;
                 // A not-yet-allocated or hidden tab must not impose a 24x80
                 // transient resize on an already shared session.
                 let mut early = VecDeque::new();
@@ -561,12 +590,18 @@ impl Worker {
                 let mut shown: Option<Value> = None;
                 // Poll fast while output or input is recent, slowly when quiet.
                 let mut active = Instant::now();
+                let mut typed = Instant::now() - Duration::from_secs(1);
                 while !halt.load(Ordering::Relaxed) {
+                    let mut delivered = false;
                     for _ in 0..16 {
                         let Some(cmd) = early.pop_front().or_else(|| rx.try_recv().ok()) else {
                             break;
                         };
                         let size = cmd.bytes();
+                        delivered = true;
+                        if matches!(&cmd, Command::Rpc(method, _) if method == "client.input") {
+                            typed = Instant::now();
+                        }
                         let result = match cmd {
                             Command::Rpc(m, p) if m == "client.retireEnded" => {
                                 (|| -> io::Result<_> {
@@ -597,6 +632,14 @@ impl Worker {
                                     Ok((m, json!({"closed":true})))
                                 })()
                             }
+                            Command::Rpc(m, p) if m == "pane.selection" => {
+                                let (pane, serial) = (p["pane"].clone(), p["serial"].clone());
+                                rpc.call(&m, p).map(|mut v| {
+                                    v["request_pane"] = pane;
+                                    v["request_serial"] = serial;
+                                    (m, v)
+                                })
+                            }
                             Command::Rpc(m, p) => rpc.call(&m, p).map(|v| (m, v)),
                             Command::Close => {
                                 halt.store(true, Ordering::Relaxed);
@@ -605,14 +648,42 @@ impl Worker {
                             Command::AttachImage {
                                 pane,
                                 path,
+                                native_clipboard_key,
                                 allowed,
                                 done,
                             } => {
                                 let native_api = schema["methods"]
                                     .as_array()
                                     .is_some_and(|m| m.iter().any(|m| m == "pane.attachImage"));
+                                if native_clipboard_key {
+                                    match crate::image_attach::start_nested(
+                                        &mut rpc,
+                                        &session,
+                                        &pane,
+                                        &path,
+                                        allowed.clone(),
+                                        done.clone(),
+                                    ) {
+                                        Ok(true) => {
+                                            budget.fetch_sub(size, Ordering::Relaxed);
+                                            continue;
+                                        }
+                                        Ok(false) => (),
+                                        Err(error) => {
+                                            let _ = done.try_send(Err(error.to_string()));
+                                            budget.fetch_sub(size, Ordering::Relaxed);
+                                            continue;
+                                        }
+                                    }
+                                }
                                 let result = crate::image_attach::attach(
-                                    &mut rpc, &session, &pane, &path, &allowed, native_api,
+                                    &mut rpc,
+                                    &session,
+                                    &pane,
+                                    &path,
+                                    &allowed,
+                                    native_api,
+                                    native_clipboard_key,
                                 )
                                 .map_err(|e| e.to_string());
                                 let _ = done.try_send(result.clone());
@@ -620,8 +691,16 @@ impl Worker {
                                     .map(|v| ("image-attach".into(), v))
                                     .map_err(io::Error::other)
                             }
-                            Command::History(pane, primary) => {
+                            Command::History(pane, primary, generation) => {
                                 let mut text = String::new();
+                                let mut styles = Vec::<Value>::new();
+                                let mut style_palette =
+                                    vec![json!(["", false, 256, 256, false, false, {}])];
+                                let mut style_lookup =
+                                    std::collections::HashMap::<String, usize>::new();
+                                let styled = capabilities["history_style_encoding"] == "runs-v1";
+                                let mut style_bytes = 0;
+                                let mut styles_truncated = false;
                                 let mut offset = 0;
                                 let mut total = 0;
                                 let mut truncated = false;
@@ -637,14 +716,15 @@ impl Worker {
                                     if schema["methods"].as_array().is_some_and(|methods| {
                                         methods.iter().any(|m| m == "pane.history.freeze")
                                     }) {
-                                        let metadata = rpc.call(
-                                            "pane.history.freeze",
-                                            if primary {
-                                                json!({"pane":pane,"buffer":"primary"})
-                                            } else {
-                                                json!({"pane":pane})
-                                            },
-                                        )?;
+                                        let mut freeze = if primary {
+                                            json!({"pane":pane,"buffer":"primary"})
+                                        } else {
+                                            json!({"pane":pane})
+                                        };
+                                        if styled {
+                                            freeze["styles"] = json!(true);
+                                        }
+                                        let metadata = rpc.call("pane.history.freeze", freeze)?;
                                         pin = Some(
                                             metadata["snapshot"]
                                                 .as_str()
@@ -673,6 +753,62 @@ impl Worker {
                                             truncated = true;
                                             break;
                                         }
+                                        if styled && !styles_truncated {
+                                            let mut byte = text.len();
+                                            if let Some(rows) = page["rows"].as_array() {
+                                                for row in rows {
+                                                    let line = row["text"].as_str().unwrap_or("");
+                                                    if !line.is_empty() {
+                                                        styles.push(json!([byte, 0]));
+                                                    }
+                                                    if let Some(runs) = row["styles"].as_array() {
+                                                        for run in runs {
+                                                            let at =
+                                                                run[0].as_u64().unwrap_or(u64::MAX)
+                                                                    as usize;
+                                                            if at < line.len()
+                                                                && line.is_char_boundary(at)
+                                                            {
+                                                                let key = run[1].to_string();
+                                                                let index = if let Some(index) =
+                                                                    style_lookup.get(&key)
+                                                                {
+                                                                    *index
+                                                                } else {
+                                                                    style_bytes += key.len();
+                                                                    if style_bytes > 8 * 1024 * 1024
+                                                                        || style_palette.len()
+                                                                            >= 4096
+                                                                    {
+                                                                        styles_truncated = true;
+                                                                        break;
+                                                                    }
+                                                                    let index = style_palette.len();
+                                                                    style_lookup.insert(key, index);
+                                                                    style_palette
+                                                                        .push(run[1].clone());
+                                                                    index
+                                                                };
+                                                                if styles.len() >= 115_536 {
+                                                                    styles_truncated = true;
+                                                                    break;
+                                                                }
+                                                                styles.push(json!([
+                                                                    byte + at,
+                                                                    index
+                                                                ]));
+                                                            }
+                                                        }
+                                                    }
+                                                    byte += line.len()
+                                                        + usize::from(row["wrapped"] != true);
+                                                    if styles_truncated {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            styles_truncated |= page["styles_truncated"] == true;
+                                        }
                                         text.push_str(part);
                                         if next >= total || halt.load(Ordering::Relaxed) {
                                             break;
@@ -693,7 +829,20 @@ impl Worker {
                                         result = release.map(|_| ());
                                     }
                                 }
-                                result.map(|()|("pane.history".into(),json!({"pane":pane,"text":text,"total_lines":total,"truncated":truncated,"buffer":if primary {"primary"}else{"active"}})))
+                                if styles_truncated {
+                                    styles.clear();
+                                }
+                                Ok((
+                                    "pane.history".into(),
+                                    match result {
+                                        Ok(()) => {
+                                            json!({"pane":pane,"generation":generation,"text":text,"styles":{"palette":style_palette,"runs":styles},"styles_truncated":styles_truncated,"total_lines":total,"truncated":truncated,"buffer":if primary {"primary"}else{"active"}})
+                                        }
+                                        Err(error) => {
+                                            json!({"pane":pane,"generation":generation,"error":error.to_string()})
+                                        }
+                                    },
+                                ))
                             }
                             Command::GuardedPaste {
                                 pane,
@@ -737,6 +886,7 @@ impl Worker {
                                     || reply.0 == "pane.create"
                                     || reply.0 == "pane.capture"
                                     || reply.0 == "buffer.get"
+                                    || reply.0 == "pane.selection"
                                     || reply.0 == "paste"
                                     || reply.0 == "window.list"
                                 {
@@ -751,6 +901,9 @@ impl Worker {
                             }
                             Err(e) => s.error = Some(format!("Input/command delivery failed: {e}")),
                         };
+                    }
+                    if delivered {
+                        notify_view(&wake_writer);
                     }
                     let mut frame = rpc.call(
                         "client.render",
@@ -788,12 +941,16 @@ impl Worker {
                                 s.coalesced += 1;
                             }
                             s.frame = Some(frame);
+                            drop(s);
+                            notify_view(&wake_writer);
                         }
                     }
                     // Tabs out of view poll slowly; a quiet screen polls at 10 Hz.
                     // Any command (typing, resize) ends the wait immediately.
                     let wait = if !seen.load(Ordering::Relaxed) {
                         250
+                    } else if typed.elapsed() < Duration::from_millis(150) {
+                        8
                     } else if active.elapsed() < Duration::from_secs(1) {
                         20
                     } else {
@@ -820,6 +977,7 @@ impl Worker {
                 }
             }
             halt.store(true, Ordering::Relaxed);
+            notify_view(&wake_writer);
         });
         Self {
             tx,
@@ -827,7 +985,11 @@ impl Worker {
             stop,
             bytes,
             visible,
+            wake_reader,
         }
+    }
+    pub fn take_wake_reader(&mut self) -> Option<UnixStream> {
+        self.wake_reader.take()
     }
     /// Whether the view is on screen (polls fast) or hidden (polls slowly).
     pub fn set_visible(&self, visible: bool) {

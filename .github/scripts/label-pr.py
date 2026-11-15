@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Base-branch-only, add-only contribution labels. Never execute PR code."""
-import argparse,json,os,re,urllib.request
+import argparse,json,os,re,sys,urllib.error,urllib.request
 from pathlib import Path
 LABELS={'area/terminal':('268bd2','Persistent engine, CLI and terminal input'),'area/ui':('6f42c1','Native desktop workspace'),'area/rdp':('0075ca','Embedded RDP transport/display'),'area/clipboard':('0e8a16','Clipboard ownership or transfer'),'area/files':('d4c5f9','SSH/SFTP and file workspaces'),'area/docs':('5319e7','Documentation or governance'),'area/ci':('fbca04','Repository checks and workflows')}
 def classify(paths):
@@ -16,12 +16,34 @@ def classify(paths):
   if p.endswith('.md') or p.startswith(('spec/','architecture/')):result.add('area/docs')
   if p.startswith('.github/') or p.startswith('scripts/'):result.add('area/ci')
  return sorted(result)
+def report_http_error(error,method,path):
+ # Never emit the raw response, request headers or arbitrary server strings.
+ raw=error.read(4097);message=None
+ if len(raw)<=4096:
+  try:
+   value=json.loads(raw)
+   if isinstance(value,dict):message=value.get('message')
+  except (ValueError,UnicodeError):pass
+ known={'Resource not accessible by integration','Resource not accessible by personal access token','Bad credentials','Not Found','Validation Failed','Must have admin rights to Repository.','Issues are disabled for this repo','API rate limit exceeded'}
+ diagnostic={'event':'github-label-http-error','status':error.code,'method':method,'endpoint':path.split('?',1)[0],'github_message':message if isinstance(message,str)and message in known else 'unrecognized or unavailable','response_truncated':len(raw)>4096}
+ request_id=error.headers.get('X-GitHub-Request-Id','')if error.headers else ''
+ if re.fullmatch(r'[A-F0-9]+(?::[A-F0-9]+){3,5}',request_id)and len(request_id)<=128:diagnostic['request_id']=request_id
+ permissions=error.headers.get('X-Accepted-GitHub-Permissions','')if error.headers else ''
+ if len(permissions)<=512:
+  accepted=sorted(set(re.findall(r'\b(issues|pull_requests|contents|metadata)=(read|write|admin)\b',permissions)))
+  if accepted:diagnostic['accepted_permissions']=['='.join(item)for item in accepted]
+ print(json.dumps(diagnostic,sort_keys=True),file=sys.stderr)
 def api(method,path,body=None):
  req=urllib.request.Request('https://api.github.com/repos/w3fans/RUWAC'+path,data=None if body is None else json.dumps(body).encode(),method=method,headers={'Authorization':'Bearer '+os.environ['GITHUB_TOKEN'],'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','Content-Type':'application/json'})
- with urllib.request.urlopen(req,timeout=20)as r:
-  data=r.read(4*1024*1024+1)
-  if len(data)>4*1024*1024:raise ValueError('API response limit')
-  return json.loads(data)
+ try:
+  with urllib.request.urlopen(req,timeout=20)as r:
+   data=r.read(4*1024*1024+1)
+   if len(data)>4*1024*1024:raise ValueError('API response limit')
+   return json.loads(data)
+ except urllib.error.HTTPError as error:
+  try:report_http_error(error,method,path)
+  except Exception:pass # Diagnostic failure must not replace the original HTTP refusal.
+  raise
 def main():
  p=argparse.ArgumentParser();p.add_argument('--files',type=Path);a=p.parse_args()
  if a.files:print(json.dumps({'labels':classify(json.loads(a.files.read_text()))}));return

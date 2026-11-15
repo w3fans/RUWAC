@@ -1,9 +1,27 @@
 # RUWAC delivered behavior and remaining acceptance
 
+## Reading this historical ledger — 2026-11-04
+
+Start with the [current development index](RUWAC_CLOUD_INDEX_2026-11-04.md),
+[acceptance status](RUWAC_ACCEPTANCE_STATUS.md) and
+[actionable work plan](RUWAC_CLOUD_WORK_PLAN_2026-11-04.md).
+This chronological ledger preserves earlier decisions and receipts; the v0.4.40
+baseline below is not the latest source status. CLI/SSH non-sizing viewers shipped
+in v0.4.53; source through v0.4.56 adds Claude image paste, machine-copy usability
+and COPR updates. Controller/GUI sizing and full physical/external qualification
+remain open. Do not implement old pending lists without checking later evidence.
+
 Use [the README](../README.md) for current build, installation and interaction
 instructions. [The functionality audit](RUWAC_FUNCTIONALITY_AUDIT.md) tracks
 requirements and distinguishes implementation from full acceptance. Versioned
 receipts are summarized in [acceptance status](RUWAC_ACCEPTANCE_STATUS.md).
+
+Reconciled baseline (2026-10-24): v0.4.40 delivered terminal shortcut/inline-history
+changes, full-screen wheel routing, correlated clipboard transactions and native
+ephemeral Web Preview. Nineteen required frozen categories and nine actual-public
+runtime phases passed. This does not qualify physical input, every external host
+or the unresolved RSA advisory. Installed updates take effect only after reopening
+the GUI; running older engines keep their behavior and terminal processes.
 
 The Linux daemon owns terminal processes independently of the optional GTK
 frontend. Closing a frontend detaches; new engines drain final output before
@@ -34,8 +52,9 @@ GNOME Remote Login has separate service and Linux-user credentials and optional
 automatic sign-in for the supported recognized English greeter. Actual targeted
 Fedora journeys and generated loopback RDP tests exist; they do not establish all
 Windows display/clipboard, mixed-external-host or physical-input acceptance.
-RDP transports still belong to the GUI process, so seamless frontend replacement
-with a retained RDP transport remains unfinished.
+RDP transports belong to the GUI process. The owner accepts reconnection after
+reopening; seamless transport preservation across frontend replacement is not a
+completion requirement. Daemon-owned terminal persistence remains required.
 
 Public source builds use Cargo and the source installer. External target paths
 are explicit; archive installs keep their verified artifact paths. Source releases,
@@ -65,7 +84,7 @@ Package 0.2.0: existing stage-one username/Secret Service reference remains unch
 
 Assisted GNOME Sign-in is an explicit native action for a saved GNOME Remote Login profile with a verified authenticated transport and decoded and drawn desktop of the current transport generation. The operator must confirm the selected connection, endpoint, GDM screen and focused field. Username and password are separate actions; neither Tab nor Enter is sent. The existing RDP Unicode input channel is used. Saved-profile, window/tab/focus, endpoint, transport generation, reactivation and held-input checks cancel stale requests; queued sensitive input is bounded and checked between chunks. An already transmitted chunk cannot be retracted. This is assisted field input, not unattended GDM authentication. Automatic second-stage login is not exposed.
 
-The toolbar now opens independent windows explicitly, sharing the persistent daemon but saving each additional window's layout in its own private namespace. Window closure exits that frontend and preserves daemon PTYs. The default GUI automation socket remains owned by the first window; default CLI GUI automation does not select additional windows. Live RDP tabs cannot yet be moved between processes without reconnecting. Machines is a hidden-by-default overlay, with persisted pinning and width controls from 200 to 420 logical pixels. Ctrl+K opens search, Escape closes the overlay, and tab selection hides it. Alt+1–9/0 retains per-window tab navigation. Four-pixel resize hysteresis prevents allocation rounding from generating repeated tiny remote resizes; intentional larger resizes retain debounce and Display Control behavior.
+The toolbar now opens independent windows explicitly, sharing the persistent daemon but saving each additional window's layout in its own private namespace. Window closure exits that frontend and preserves daemon PTYs. The default GUI automation socket remains owned by the first window; default CLI GUI automation does not select additional windows. Live RDP tabs cannot yet be moved between processes without reconnecting. Machines is a hidden-by-default overlay, with persisted pinning and width controls from 200 to 420 logical pixels. Alt+M opens Machines search, Escape closes the overlay, and tab selection hides it. Alt+1–9/0 retains per-window tab navigation. Four-pixel resize hysteresis prevents allocation rounding from generating repeated tiny remote resizes; intentional larger resizes retain debounce and Display Control behavior.
 
 New terminals select the user shell and load its login configuration. Explicit argv remains unchanged. GTK supplies the selected shell explicitly, so a new frontend works with an older persistent daemon without restarting its sessions. Generated acceptance shells read only a disposable profile; owner startup files are not test fixtures.
 

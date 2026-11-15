@@ -4,19 +4,38 @@ use alacritty_terminal::{
     grid::{Dimensions, Grid},
     index::{Column, Line, Point},
     term::{
-        Config, TermMode,
+        ClipboardType, Config, Osc52, TermMode,
         cell::{Cell, Flags},
     },
-    vte::ansi::{Color, Processor},
+    vte::ansi::{Color, NamedColor, Processor},
 };
+use ruwac_protocol::render_cells::valid_cell;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
+type Formatter = Arc<dyn Fn(&str) -> String + Sync + Send>;
+/// Largest OSC 52 mouse selection a program may offer to the desktop.
+pub const MAX_SELECTION: usize = 128 * 1024;
+/// Fullwidth characters need a leading cell and a spacer, even in a narrow view.
+pub const MIN_COLUMNS: u16 = alacritty_terminal::term::MIN_COLUMNS as u16;
+#[derive(Default)]
+struct Pending {
+    replies: Vec<String>,
+    store: Option<String>,
+    load: Option<Formatter>,
+}
 #[derive(Clone, Default)]
-struct Events(Arc<Mutex<Vec<String>>>);
+struct Events(Arc<Mutex<Pending>>);
 impl EventListener for Events {
     fn send_event(&self, e: Event) {
-        if let Event::PtyWrite(s) = e {
-            self.0.lock().unwrap().push(s)
+        let mut pending = self.0.lock().unwrap();
+        match e {
+            Event::PtyWrite(s) => pending.replies.push(s),
+            // OSC 52 PRIMARY ("p"/"s") only, e.g. a nested RUWAC client's mouse
+            // selection. The desktop decides whether a user gesture backs it;
+            // CLIPBOARD ("c") writes and reads stay ignored.
+            Event::ClipboardStore(ClipboardType::Selection, text) => pending.store = Some(text),
+            Event::ClipboardLoad(ClipboardType::Selection, format) => pending.load = Some(format),
+            _ => (),
         }
     }
 }
@@ -118,6 +137,58 @@ impl PrimaryArchive {
     }
 }
 
+// Opt-in history styles use runs, never a second full cell grid. The cap is
+// independent of text retention; exhausting it never drops canonical copy text.
+const MAX_HISTORY_STYLE_RUNS: usize = 65_536;
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct HistoryStyle {
+    fg: Color,
+    bg: Color,
+    flags: Flags,
+    underline: Option<Color>,
+}
+impl HistoryStyle {
+    fn from_cell(cell: &Cell) -> Self {
+        Self {
+            fg: cell.fg,
+            bg: cell.bg,
+            flags: cell.flags
+                & (Flags::BOLD
+                    | Flags::INVERSE
+                    | Flags::ITALIC
+                    | Flags::DIM
+                    | Flags::HIDDEN
+                    | Flags::STRIKEOUT
+                    | Flags::ALL_UNDERLINES),
+            underline: cell.underline_color(),
+        }
+    }
+    fn cell(self) -> Value {
+        let underline = if self.flags.contains(Flags::UNDERCURL) {
+            "curly"
+        } else if self.flags.contains(Flags::DOUBLE_UNDERLINE) {
+            "double"
+        } else if self.flags.contains(Flags::DOTTED_UNDERLINE) {
+            "dotted"
+        } else if self.flags.contains(Flags::DASHED_UNDERLINE) {
+            "dashed"
+        } else if self.flags.contains(Flags::UNDERLINE) {
+            "single"
+        } else {
+            "none"
+        };
+        json!(["",false,color(self.fg),color(self.bg),self.flags.contains(Flags::BOLD),
+            self.flags.contains(Flags::INVERSE),{"italic":self.flags.contains(Flags::ITALIC),
+            "dim":self.flags.contains(Flags::DIM),"hidden":self.flags.contains(Flags::HIDDEN),
+            "strike":self.flags.contains(Flags::STRIKEOUT),"width":1,"underline":underline,
+            "underline_color":self.underline.map(color)}])
+    }
+}
+struct HistoryRun {
+    byte: usize,
+    style: HistoryStyle,
+}
+
 /// Immutable, bounded canonical copy view, independent of later output/resize.
 pub struct HistorySnapshot {
     pub rows: Vec<(String, bool)>,
@@ -128,17 +199,25 @@ pub struct HistorySnapshot {
     pub cursor: (usize, usize),
     pub alternate: bool,
     pub buffer: &'static str,
+    styles: Option<Vec<Vec<HistoryRun>>>,
+    styles_truncated: bool,
 }
 impl HistorySnapshot {
     pub fn metadata(&self) -> Value {
-        json!({"epoch":self.epoch,"total_lines":self.rows.len(),"cols":self.cols,
+        let mut value = json!({"epoch":self.epoch,"total_lines":self.rows.len(),"cols":self.cols,
             "text_bytes":self.bytes,"dropped_lines":self.dropped,"cursor_row":self.cursor.0,"cursor_col":self.cursor.1,
-            "alternate_screen":self.alternate,"buffer":self.buffer})
+            "alternate_screen":self.alternate,"buffer":self.buffer});
+        if self.styles.is_some() {
+            value["style_encoding"] = json!("runs-v1");
+            value["styles_truncated"] = json!(self.styles_truncated);
+        }
+        value
     }
     pub fn page(&self, offset: usize, lines: usize) -> Value {
         let mut text = String::new();
         let mut rows = Vec::new();
         let mut wrapped = Vec::new();
+        let mut style_bytes = 0;
         for (row, wrap) in self
             .rows
             .iter()
@@ -148,12 +227,28 @@ impl HistorySnapshot {
             if text.len() + row.len() + 1 > 128 * 1024 {
                 break;
             }
+            let index = offset.min(self.rows.len()) + rows.len();
+            let mut value = json!({"text":row,"wrapped":wrap});
+            if let Some(styles) = &self.styles {
+                let runs = styles[index]
+                    .iter()
+                    .map(|r| json!([r.byte, r.style.cell()]))
+                    .collect::<Vec<_>>();
+                let bytes = serde_json::to_vec(&runs).unwrap().len();
+                // One dense row is bounded by terminal columns. Keep pages
+                // bounded too, while guaranteeing at least one row of progress.
+                if style_bytes + bytes > 128 * 1024 && !rows.is_empty() {
+                    break;
+                }
+                style_bytes += bytes;
+                value["styles"] = json!(runs);
+            }
             text.push_str(row);
             if !wrap {
                 text.push('\n');
             }
             wrapped.push(*wrap);
-            rows.push(json!({"text":row,"wrapped":wrap}));
+            rows.push(value);
         }
         let mut result = self.metadata();
         result["offset"] = json!(offset);
@@ -170,15 +265,20 @@ pub struct Terminal {
     term: Term<Events>,
     parser: Processor,
     events: Events,
+    selection_serial: u64,
+    selection: Option<(u64, String)>,
+    selection_request: Option<(u64, Formatter)>,
     pub rows: u16,
     pub cols: u16,
     pub history_epoch: u64,
 }
 impl Terminal {
     pub fn new(rows: u16, cols: u16) -> Self {
+        let cols = cols.max(MIN_COLUMNS);
         let events = Events::default();
         let config = Config {
             scrolling_history: history_limit(cols),
+            osc52: Osc52::CopyPaste,
             ..Config::default()
         };
         let term = Term::new(config, &Size(rows as usize, cols as usize), events.clone());
@@ -187,6 +287,9 @@ impl Terminal {
             term,
             parser: Processor::new(),
             events,
+            selection_serial: 0,
+            selection: None,
+            selection_request: None,
             rows,
             cols,
             history_epoch: 0,
@@ -198,9 +301,53 @@ impl Terminal {
         }
         self.history_epoch = self.history_epoch.wrapping_add(1);
         self.parser.advance(&mut self.term, b);
-        std::mem::take(&mut *self.events.0.lock().unwrap())
+        let (replies, store, load) = {
+            let mut pending = self.events.0.lock().unwrap();
+            (
+                std::mem::take(&mut pending.replies),
+                pending.store.take(),
+                pending.load.take(),
+            )
+        };
+        if let Some(text) =
+            store.filter(|t| !t.is_empty() && t.len() <= MAX_SELECTION && !t.contains('\0'))
+        {
+            self.selection_serial += 1;
+            self.selection = Some((self.selection_serial, text));
+        }
+        if let Some(format) = load {
+            self.selection_serial += 1;
+            self.selection_request = Some((self.selection_serial, format));
+        }
+        replies
+    }
+    /// Serials of the latest OSC 52 PRIMARY offer and read request.
+    pub fn selection_serials(&self) -> (Option<u64>, Option<u64>) {
+        (
+            self.selection.as_ref().map(|(n, _)| *n),
+            self.selection_request.as_ref().map(|(n, _)| *n),
+        )
+    }
+    pub fn selection_offer(&self, serial: u64) -> Option<&str> {
+        self.selection
+            .as_ref()
+            .filter(|(n, _)| *n == serial)
+            .map(|(_, t)| t.as_str())
+    }
+    /// The program's OSC 52 answer for one outstanding read request.
+    pub fn selection_reply(&mut self, serial: u64, text: &str) -> Option<String> {
+        if self
+            .selection_request
+            .as_ref()
+            .is_none_or(|(n, _)| *n != serial)
+        {
+            return None;
+        }
+        let (_, format) = self.selection_request.take()?;
+        Some(format(text))
     }
     pub fn resize(&mut self, rows: u16, cols: u16) {
+        let cols = cols.max(MIN_COLUMNS);
         self.history_epoch = self.history_epoch.wrapping_add(1);
         self.rows = rows;
         self.cols = cols;
@@ -209,6 +356,7 @@ impl Terminal {
         }
         self.term.set_options(Config {
             scrolling_history: history_limit(cols),
+            osc52: Osc52::CopyPaste,
             ..Config::default()
         });
         self.term.resize(Size(rows as usize, cols as usize))
@@ -303,8 +451,12 @@ impl Terminal {
         let bottom = g.bottommost_line().0;
         let mut history = Vec::new();
         let mut bytes = 0usize;
+        // Reuse scratch storage while visiting history. The retained rows below
+        // still own only their text, so blank/short rows do not retain a full
+        // terminal-width allocation in every checkpoint.
+        let mut row = String::with_capacity(self.cols as usize);
         for r in (top..=bottom).rev().take(50000) {
-            let mut row = String::new();
+            row.clear();
             for c in 0..self.cols as usize {
                 let cell = &g[Point::new(Line(r), Column(c))];
                 if !cell
@@ -320,12 +472,12 @@ impl Terminal {
             let wrap = g[Point::new(Line(r), Column(self.cols as usize - 1))]
                 .flags
                 .contains(Flags::WRAPLINE);
-            let row = if wrap { row } else { row.trim_end().to_owned() };
-            if bytes + row.len() > budget {
+            let text = if wrap { row.as_str() } else { row.trim_end() };
+            if bytes + text.len() > budget {
                 break;
             }
-            bytes += row.len();
-            history.push((row, wrap));
+            bytes += text.len();
+            history.push((text.to_owned(), wrap));
         }
         history.reverse();
         Archive {
@@ -339,12 +491,15 @@ impl Terminal {
         }
     }
     pub fn freeze_history(&self) -> HistorySnapshot {
-        self.freeze_buffer(false).unwrap()
+        self.freeze_buffer(false, false).unwrap()
     }
     pub fn freeze_primary_history(&self) -> Option<HistorySnapshot> {
-        self.freeze_buffer(true)
+        self.freeze_buffer(true, false)
     }
-    fn freeze_buffer(&self, primary: bool) -> Option<HistorySnapshot> {
+    pub fn freeze_styled_history(&self, primary: bool) -> Option<HistorySnapshot> {
+        self.freeze_buffer(primary, true)
+    }
+    fn freeze_buffer(&self, primary: bool, styled: bool) -> Option<HistorySnapshot> {
         let selected;
         let archived = if primary {
             if let Some(a) = &self.archived {
@@ -364,6 +519,8 @@ impl Terminal {
             let cursor = a.history.len().saturating_sub(a.rows as usize)
                 + a.grid["cursor"]["row"].as_u64().unwrap_or(0) as usize;
             return Some(HistorySnapshot {
+                styles: None,
+                styles_truncated: false,
                 rows: a.history.clone(),
                 bytes: a.history.iter().map(|(s, _)| s.len() + 1).sum(),
                 cols: a.cols,
@@ -387,14 +544,29 @@ impl Terminal {
         let total = (bottom - top + 1) as usize;
         let mut rows = Vec::new();
         let mut bytes = 0;
+        let mut styles = styled.then(Vec::new);
+        let mut style_runs = 0;
+        let mut styles_truncated = false;
         'history: for r in (top..=bottom).rev().take(50000) {
             let mut row = String::new();
+            let mut runs = Vec::new();
+            let mut previous = HistoryStyle::from_cell(&Cell::default());
             for c in 0..self.cols as usize {
                 let cell = &g[Point::new(Line(r), Column(c))];
                 if !cell
                     .flags
                     .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
                 {
+                    if styled && !styles_truncated {
+                        let style = HistoryStyle::from_cell(cell);
+                        if style != previous {
+                            runs.push(HistoryRun {
+                                byte: row.len(),
+                                style,
+                            });
+                            previous = style;
+                        }
+                    }
                     for ch in std::iter::once(if cell.c == '\t' { ' ' } else { cell.c })
                         .chain(cell.zerowidth().into_iter().flat_map(|z| z.iter().copied()))
                     {
@@ -418,11 +590,26 @@ impl Terminal {
             }
             row.shrink_to_fit();
             bytes += row.len() + 1;
+            if let Some(styles) = &mut styles {
+                runs.retain(|r| r.byte < row.len());
+                if style_runs + runs.len() > MAX_HISTORY_STYLE_RUNS {
+                    styles_truncated = true;
+                    runs.clear();
+                }
+                style_runs += runs.len();
+                runs.shrink_to_fit();
+                styles.push(runs);
+            }
             rows.push((row, wrap));
         }
         rows.reverse();
+        if let Some(styles) = &mut styles {
+            styles.reverse();
+        }
         let dropped = total - rows.len();
         Some(HistorySnapshot {
+            styles,
+            styles_truncated,
             rows,
             bytes,
             cols: self.cols,
@@ -458,6 +645,80 @@ impl Terminal {
     }
     pub fn capture_primary(&self, lines: usize) -> Option<String> {
         self.capture_buffer(lines, true)
+    }
+    /// Non-sizing capture with SGR styles only. Historical checkpoint text has no retained styles.
+    /// Bound ANSI responses to 64 KiB, retaining complete newest rows.
+    pub fn capture_ansi(&self, lines: usize, primary: bool) -> Option<String> {
+        if self.archived.is_some() {
+            let text = self.capture_buffer(lines, primary)?;
+            let mut bytes = 0;
+            let mut rows = Vec::new();
+            for line in text.lines().rev() {
+                if bytes + line.len() + 1 > 65536 {
+                    break;
+                }
+                rows.push(format!("{line}\n"));
+                bytes += line.len() + 1;
+            }
+            rows.reverse();
+            return Some(rows.concat());
+        }
+        let g = if primary {
+            self.term.primary_grid()
+        } else {
+            self.term.grid()
+        };
+        let bottom = g.bottommost_line().0;
+        let start = (bottom + 1 - lines as i32).max(g.topmost_line().0);
+        let mut rows = Vec::new();
+        let mut bytes = 0;
+        for r in (start..=bottom).rev() {
+            let last = (0..self.cols as usize).rfind(|&c| {
+                let cell = &g[Point::new(Line(r), Column(c))];
+                (cell.c != ' '
+                    || cell.bg != Color::Named(NamedColor::Background)
+                    || cell.flags.contains(Flags::INVERSE))
+                    && !cell
+                        .flags
+                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            });
+            let mut row = String::new();
+            let mut previous = String::new();
+            let mut previous_style = None;
+            if let Some(last) = last {
+                for c in 0..=last {
+                    let cell = &g[Point::new(Line(r), Column(c))];
+                    if cell
+                        .flags
+                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    {
+                        continue;
+                    }
+                    let style = (cell.fg, cell.bg, cell.flags);
+                    if previous_style != Some(style) {
+                        let sgr = capture_sgr(cell);
+                        if sgr != previous {
+                            row.push_str(&sgr);
+                            previous = sgr;
+                        }
+                        previous_style = Some(style);
+                    }
+                    row.push(if cell.c.is_control() { ' ' } else { cell.c });
+                    if let Some(z) = cell.zerowidth() {
+                        row.extend(z.iter().filter(|c| !c.is_control()));
+                    }
+                }
+                row.push_str("\x1b[0m");
+            }
+            row.push('\n');
+            if bytes + row.len() > 65536 {
+                break;
+            }
+            bytes += row.len();
+            rows.push(row);
+        }
+        rows.reverse();
+        Some(rows.concat())
     }
     fn capture_buffer(&self, lines: usize, primary: bool) -> Option<String> {
         let selected;
@@ -648,6 +909,17 @@ impl Terminal {
             self.term.mode().contains(TermMode::ALT_SCREEN),
         )
     }
+    /// Optional wire encoding; canonical snapshots and archive behavior stay plain.
+    pub fn render_snapshot(&self, compact: bool) -> Value {
+        if !compact || self.archived.is_some() {
+            return self.snapshot();
+        }
+        self.grid_encoded(
+            self.term.grid(),
+            self.term.mode().contains(TermMode::ALT_SCREEN),
+            true,
+        )
+    }
     fn snapshot_grid(&self, g: &Grid<Cell>, alternate: bool) -> Value {
         self.grid_encoded(g, alternate, false)
     }
@@ -758,33 +1030,6 @@ fn packed_color(c: Color) -> u32 {
         Color::Named(n) => n as u32,
     }
 }
-fn valid_cell(cell: &Value) -> bool {
-    let Some(c) = cell.as_array() else {
-        return false;
-    };
-    (c.len() == 6 || c.len() == 7 && valid_extended_style(&c[6]))
-        && c[0]
-            .as_str()
-            .is_some_and(|s| s.len() <= 4096 && !s.chars().any(|c| c.is_control() && c != '\t'))
-        && [1, 4, 5].iter().all(|i| c[*i].is_boolean())
-        && [2, 3].iter().all(|i| valid_color(&c[*i]))
-}
-fn valid_extended_style(style: &Value) -> bool {
-    let Some(s) = style.as_object() else {
-        return false;
-    };
-    s.len() == 7
-        && s.contains_key("underline_color")
-        && ["italic", "dim", "hidden", "strike"]
-            .iter()
-            .all(|key| style[*key].is_boolean())
-        && matches!(style["width"].as_u64(), Some(1 | 2))
-        && matches!(
-            style["underline"].as_str(),
-            Some("none" | "single" | "double" | "curly" | "dotted" | "dashed")
-        )
-        && (style["underline_color"].is_null() || valid_color(&style["underline_color"]))
-}
 fn validate_grid(grid: &Value, rows: u16, cols: u16) -> std::result::Result<(), String> {
     if grid["rows"] != rows || grid["cols"] != cols {
         return Err("invalid terminal archive grid".into());
@@ -863,11 +1108,6 @@ fn expand_grid(grid: &mut Value) {
     object.remove("cell_indices");
     object.insert("cells".into(), json!(rows));
 }
-fn valid_color(c: &Value) -> bool {
-    c.as_u64().is_some_and(|i| i <= 268)
-        || c.as_array()
-            .is_some_and(|a| a.len() == 3 && a.iter().all(|n| n.as_u64().is_some_and(|n| n <= 255)))
-}
 fn history_limit(cols: u16) -> usize {
     let lines = std::env::var("RUWAC_SCROLLBACK_LINES")
         .ok()
@@ -889,6 +1129,64 @@ fn history_limit(cols: u16) -> usize {
         )
         .max(1)
 }
+fn capture_sgr(cell: &Cell) -> String {
+    let mut codes = vec!["0".to_string()];
+    for (flag, code) in [
+        (Flags::BOLD, "1"),
+        (Flags::DIM, "2"),
+        (Flags::ITALIC, "3"),
+        (Flags::ALL_UNDERLINES, "4"),
+        (Flags::INVERSE, "7"),
+        (Flags::HIDDEN, "8"),
+        (Flags::STRIKEOUT, "9"),
+    ] {
+        if cell.flags.intersects(flag) {
+            codes.push(code.into());
+        }
+    }
+    for (color, foreground) in [(cell.fg, true), (cell.bg, false)] {
+        let prefix = if foreground { 38 } else { 48 };
+        match color {
+            Color::Spec(rgb) => codes.push(format!("{prefix};2;{};{};{}", rgb.r, rgb.g, rgb.b)),
+            Color::Indexed(i) => codes.push(format!("{prefix};5;{i}")),
+            Color::Named(n) => {
+                let n = n as u16;
+                match n {
+                    0..=15 => codes.push(format!(
+                        "{}",
+                        if n < 8 {
+                            if foreground { 30 + n } else { 40 + n }
+                        } else if foreground {
+                            90 + n - 8
+                        } else {
+                            100 + n - 8
+                        }
+                    )),
+                    259..=266 => {
+                        codes.push("2".into());
+                        codes.push(format!(
+                            "{}",
+                            if foreground {
+                                30 + n - 259
+                            } else {
+                                40 + n - 259
+                            }
+                        ));
+                    }
+                    _ => {
+                        if n == 267 {
+                            codes.push("1".into());
+                        } else if n == 268 {
+                            codes.push("2".into());
+                        }
+                        codes.push(if foreground { "39" } else { "49" }.into());
+                    }
+                }
+            }
+        }
+    }
+    format!("\x1b[{}m", codes.join(";"))
+}
 fn color(c: Color) -> Value {
     match c {
         Color::Spec(rgb) => json!([rgb.r, rgb.g, rgb.b]),
@@ -899,6 +1197,182 @@ fn color(c: Color) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn narrow_terminal_keeps_wide_characters_and_valid_cursor() {
+        for initial in [1, 2, 80] {
+            let mut t = Terminal::new(4, initial);
+            for requested in [1, 2, 80, 1] {
+                t.resize(4, requested);
+                assert_eq!(t.cols, requested.max(MIN_COLUMNS));
+                for alternate in [false, true] {
+                    t.feed(if alternate {
+                        b"\x1b[?1049h"
+                    } else {
+                        b"\x1b[?1049l"
+                    });
+                    t.feed("\x1b[2J\x1b[H界e\u{301}".as_bytes());
+                    assert!(t.capture(20).contains('界'));
+                    assert!(t.capture(20).contains("e\u{301}"));
+                    let grid = t.snapshot();
+                    assert_eq!(grid["cols"], t.cols);
+                    assert!(grid["cursor"]["col"].as_u64().unwrap() < u64::from(t.cols));
+                    assert_eq!(grid["cells"][0].as_array().unwrap().len(), t.cols as usize);
+                    let archive = t.archive();
+                    assert_eq!(archive.cols, t.cols);
+                }
+            }
+        }
+    }
+    #[test]
+    fn styled_history_preserves_scrolled_unicode_and_snapshot_identity() {
+        let mut t = Terminal::new(3, 20);
+        t.feed("\x1b[1;31mž界e\u{301}\x1b[0m plain\r\nsecond\r\nthird\r\nfourth".as_bytes());
+        let frozen = t.freeze_styled_history(false).unwrap();
+        let before = frozen.page(0, 500);
+        let first = &before["rows"][0];
+        assert!(first["text"].as_str().unwrap().contains("ž界e\u{301}"));
+        assert_eq!(first["styles"][0][0], 0);
+        assert_eq!(first["styles"][0][1][2], 1);
+        assert_eq!(first["styles"][0][1][4], true);
+        assert_eq!(before["style_encoding"], "runs-v1");
+        assert!(
+            t.freeze_history().page(0, 500)["rows"][0]
+                .get("styles")
+                .is_none()
+        );
+        t.feed(b"\r\nchanged\x1b[32mgreen");
+        assert_eq!(frozen.page(0, 500), before);
+        assert_eq!(
+            frozen
+                .rows
+                .iter()
+                .map(|(text, _)| text.len() + 1)
+                .sum::<usize>(),
+            frozen.bytes
+        );
+    }
+    #[test]
+    fn style_budget_preserves_plain_history_and_page_progress() {
+        let mut t = Terminal::new(3, 200);
+        let line = "\x1b[31ma\x1b[32mb".repeat(100) + "\r\n";
+        for _ in 0..400 {
+            t.feed(line.as_bytes());
+        }
+        let frozen = t.freeze_styled_history(false).unwrap();
+        assert!(frozen.styles_truncated);
+        assert_eq!(frozen.rows, t.freeze_history().rows);
+        let mut offset = 0;
+        while offset < frozen.rows.len() {
+            let page = frozen.page(offset, 500);
+            let next = page["next_offset"].as_u64().unwrap() as usize;
+            assert!(next > offset);
+            assert!(page.to_string().len() < 512 * 1024);
+            offset = next;
+        }
+    }
+    #[test]
+    fn ansi_capture_preserves_styles_without_resizing_or_controls() {
+        let mut t = Terminal::new(3, 40);
+        t.feed(b"\x1b[38;2;12;34;56;48;5;24;1mRGB\x1b[0m plain\r\n\x1b[31mred\x1b[0m");
+        let before = t.snapshot();
+        let styled = t.capture_ansi(3, false).unwrap();
+        assert!(styled.contains("38;2;12;34;56"));
+        assert!(styled.contains("48;5;24"));
+        assert!(styled.contains("RGB"));
+        assert!(styled.contains("31;49mred"));
+        assert_eq!(t.snapshot(), before);
+        let mut replay = Terminal::new(3, 40);
+        replay.feed(
+            styled
+                .trim_end_matches('\n')
+                .replace('\n', "\r\n")
+                .as_bytes(),
+        );
+        assert_eq!(replay.capture(3), t.capture(3));
+        assert_eq!(
+            replay.snapshot()["cells"][0][0][2],
+            before["cells"][0][0][2]
+        );
+    }
+    #[test]
+    fn ansi_capture_bounds_latest_rows_and_respects_primary_buffer() {
+        let mut t = Terminal::new(3, 80);
+        for _ in 0..1000 {
+            t.feed(b"\x1b[32mhistory\x1b[0m\r\n");
+        }
+        t.feed(b"latest");
+        let styled = t.capture_ansi(2000, false).unwrap();
+        assert!(styled.len() <= 65536);
+        assert!(styled.contains("latest"));
+        t.feed(b"\x1b[?1049hALT");
+        assert!(t.capture_ansi(3, false).unwrap().contains("ALT"));
+        assert!(t.capture_ansi(3, true).unwrap().contains("latest"));
+    }
+    #[test]
+    fn ansi_capture_keeps_unicode_and_only_exports_sgr_controls() {
+        let mut t = Terminal::new(3, 80);
+        t.feed("\x1b]0;private-title\x07\x1b]8;;https://example.invalid/hidden\x1b\\\x1b[3;4;7;9mž界e\u{301}👩\u{200d}💻\x1b[0m\x1b]8;;\x1b\\".as_bytes());
+        let before = t.snapshot();
+        let text = t.capture_ansi(3, false).unwrap();
+        assert!(text.contains("ž界e\u{301}"));
+        assert!(!text.contains("private-title"));
+        assert!(!text.contains("https://"));
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                assert_eq!(chars.next(), Some('['));
+                loop {
+                    let code = chars.next().expect("complete SGR");
+                    if code == 'm' {
+                        break;
+                    }
+                    assert!(code.is_ascii_digit() || code == ';');
+                }
+            } else {
+                assert!(!c.is_control() || c == '\n');
+            }
+        }
+        let mut replay = Terminal::new(3, 80);
+        replay.feed(text.trim_end_matches('\n').replace('\n', "\r\n").as_bytes());
+        assert_eq!(replay.capture(3), t.capture(3));
+        assert_eq!(t.snapshot(), before);
+    }
+    #[test]
+    fn ansi_capture_truncates_at_complete_rows_with_independent_styles() {
+        let mut t = Terminal::new(3, 80);
+        for n in 0..1600 {
+            t.feed(
+                format!(
+                    "\x1b[38;2;{};20;30mrow-{n:04}-{}\x1b[0m\r\n",
+                    n % 255,
+                    "界".repeat(25)
+                )
+                .as_bytes(),
+            );
+        }
+        t.feed(b"LATEST-ANSI-END");
+        let text = t.capture_ansi(2000, false).unwrap();
+        assert!(text.len() <= 65536);
+        assert!(text.len() > 60000);
+        assert!(text.contains("LATEST-ANSI-END"));
+        assert!(!text.contains("row-0000-"));
+        assert!(text.ends_with("\x1b[0m\n"));
+        assert!(text.lines().all(|row| row.is_empty()
+            || (row.starts_with("\x1b[") && row.ends_with("\x1b[0m"))));
+    }
+    #[test]
+    fn ansi_capture_of_restored_archives_retains_plain_primary_fallback() {
+        let mut t = Terminal::new(3, 30);
+        t.feed(b"\x1b[31mPRIMARY\x1b[0m\x1b[?1049h\x1b[32mALTERNATE\x1b[0m");
+        let restored = Terminal::restore(t.checkpoint_archive()).unwrap();
+        assert_eq!(
+            restored.capture_ansi(3, false).unwrap(),
+            restored.capture(3)
+        );
+        assert_eq!(restored.capture_ansi(3, true), restored.capture_primary(3));
+        assert!(!restored.capture_ansi(3, false).unwrap().contains('\x1b'));
+        assert!(restored.capture_ansi(3, true).unwrap().contains("PRIMARY"));
+    }
     #[test]
     fn grid_modes_unicode() {
         let mut t = Terminal::new(4, 20);
@@ -1134,6 +1608,43 @@ mod tests {
         let mut t = Terminal::new(4, 20);
         assert!(!t.feed(b"\x1b[6n").is_empty());
         assert!(t.feed(b"\x1b]52;c;QUJD\x07").is_empty());
+        assert_eq!(t.selection_serials(), (None, None));
+        // PRIMARY offers and read requests wait for the desktop; nothing is
+        // answered by the engine itself.
+        assert!(t.feed(b"\x1b]52;p;QUJD\x07").is_empty());
+        let (Some(offer), None) = t.selection_serials() else {
+            panic!("offer expected")
+        };
+        assert_eq!(t.selection_offer(offer), Some("ABC"));
+        assert_eq!(t.selection_offer(offer + 1), None);
+        assert!(t.feed(b"\x1b]52;p;?\x07").is_empty());
+        let (_, Some(request)) = t.selection_serials() else {
+            panic!("request expected")
+        };
+        assert_eq!(t.selection_reply(request + 1, "x"), None);
+        assert_eq!(
+            t.selection_reply(request, "hi").as_deref(),
+            Some("\x1b]52;p;aGk=\x07")
+        );
+        assert_eq!(t.selection_reply(request, "hi"), None);
+    }
+    #[test]
+    fn compact_live_render_matches_plain_with_color_unicode_modes_and_restore() {
+        let mut t = Terminal::new(12, 60);
+        for bytes in [
+            b"\x1b[38;2;1;2;3m\x1b[48;2;4;5;6m\x1b[1;3;4;7m".as_slice(),
+            "Že\u{301}界\r\n".as_bytes(),
+            b"\x1b[?1000h\x1b[?2004h",
+            b"\x1b[?1049hALT",
+        ] {
+            t.feed(bytes);
+            let mut compact = json!({"panes":[{"grid":t.render_snapshot(true)}]});
+            ruwac_protocol::render_cells::expand_frame(&mut compact).unwrap();
+            assert_eq!(compact["panes"][0]["grid"], t.snapshot());
+            assert_eq!(t.render_snapshot(false), t.snapshot());
+        }
+        let t = Terminal::restore(t.checkpoint_archive()).unwrap();
+        assert_eq!(t.render_snapshot(true), t.snapshot());
     }
     #[test]
     fn compact_dual_grid_preserves_canonical_cells_and_history() {
@@ -1168,6 +1679,85 @@ mod tests {
             restored.archive().primary.unwrap().grid["cells"],
             plain.primary.unwrap().grid["cells"]
         );
+    }
+    #[test]
+    fn reused_history_row_matches_legacy_encoding_at_budget_boundaries() {
+        // Frozen pre-optimization row encoder: compare content and byte-budget
+        // decisions across wraps, Unicode spacers/combining marks and blanks.
+        fn legacy(t: &Terminal, g: &Grid<Cell>, budget: usize) -> Vec<(String, bool)> {
+            let mut history = Vec::new();
+            let mut bytes = 0usize;
+            for r in (g.topmost_line().0..=g.bottommost_line().0)
+                .rev()
+                .take(50000)
+            {
+                let mut row = String::new();
+                for c in 0..t.cols as usize {
+                    let cell = &g[Point::new(Line(r), Column(c))];
+                    if !cell
+                        .flags
+                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    {
+                        row.push(if cell.c == '\t' { ' ' } else { cell.c });
+                        if let Some(z) = cell.zerowidth() {
+                            row.extend(z.iter());
+                        }
+                    }
+                }
+                let wrap = g[Point::new(Line(r), Column(t.cols as usize - 1))]
+                    .flags
+                    .contains(Flags::WRAPLINE);
+                let row = if wrap { row } else { row.trim_end().to_owned() };
+                if bytes + row.len() > budget {
+                    break;
+                }
+                bytes += row.len();
+                history.push((row, wrap));
+            }
+            history.reverse();
+            history
+        }
+        for cols in [1, 2, 7, 80, 1024] {
+            let mut t = Terminal::new(6, cols);
+            for _ in 0..40 {
+                let text = if cols == 1 {
+                    "\x1b[31mASCII e\u{301}  \r\n\r\n"
+                } else {
+                    "\x1b[31mASCII \t界e\u{301}🙂\u{2003}  \r\n\r\n"
+                };
+                t.feed(text.as_bytes());
+            }
+            for step in 0..4 {
+                match step {
+                    1 => {
+                        t.feed(b"\x1b[?1049hAlt buffer \t\r\n");
+                    }
+                    2 => {
+                        t.feed(b"\x1b[?1049l");
+                    }
+                    3 => {
+                        t.resize(4, cols);
+                    }
+                    _ => {}
+                }
+                let grid = t.term.grid();
+                for budget in [0, 1, 2, 3, 4, 7, 17, 80, 511, 4096, 512 * 1024] {
+                    let expected = legacy(&t, grid, budget);
+                    for compact in [false, true] {
+                        let actual = t.archive_grid_encoded(grid, false, budget, compact);
+                        assert_eq!(
+                            actual.history, expected,
+                            "cols={cols} step={step} budget={budget}"
+                        );
+                        assert_eq!(
+                            actual.dropped_lines,
+                            (grid.bottommost_line().0 - grid.topmost_line().0 + 1) as usize
+                                - expected.len()
+                        );
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn compact_unique_cells_keep_plain_encoding() {

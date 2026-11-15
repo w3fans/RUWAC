@@ -1,5 +1,63 @@
 # RUWAC dependency security assessment
 
+RSA advisory update (2026-11-09): RustSec now marks
+[RUSTSEC-2023-0071](https://github.com/rustsec/advisory-db/blob/main/crates/rsa/RUSTSEC-2023-0071.md)
+patched in stable `rsa >= 0.10.0` (published 2026-11-08). RUWAC's desktop lockfile
+still resolves `rsa 0.10.0-rc.18`, so the desktop graph remains affected and the
+advisory job stays nonzero. It cannot be moved yet without patching cryptography
+locally: every crate that pulls it in pins the release candidate exactly
+(`rsa = "=0.10.0-rc.18"`), including the newest published versions checked on
+2026-11-09 — `picky` 7.0.0-rc.25…rc.29, `sspi` 0.21.3…0.23.1 and `winscard`
+0.3.3…0.4.1. IronRDP's newest `ironrdp-connector` (0.12.0) depends on that same
+stack. Path: `rsa` ← `picky`/`sspi`/`winscard` ← `ironrdp-connector` ← desktop
+only; the headless CLI/engine graph has no `rsa`. The advisory concerns timing
+during RSA private-key operations; RUWAC's password/CredSSP RDP client
+configures no client private key or smart card, which narrows but does not prove
+away reachability. Remediation: move to `picky`/`sspi`/`winscard` releases that
+require `rsa 0.10.0` once published (and the matching IronRDP), then rebuild,
+re-scan unsuppressed, and repeat loopback CredSSP/TLS plus real Windows/Fedora RDP
+acceptance before claiming the advisory resolved. No `[patch]` override or
+suppression is used.
+
+Release qualification update (2026-10-24): a fresh unsuppressed scan discovered
+[RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387.html)
+in crypto-bigint 0.7.5. The pending release now locks crypto-bigint 0.7.6 and
+ctutils 0.4.5, using the compatible upstream patch. The advisory covers timing
+variability in arithmetic intended to be constant-time; upstream identifies
+0.7.6 as patched. This does not resolve the separate RSA finding. Fresh build,
+scan and runtime qualification are required before this candidate is delivered.
+
+Published baseline reconciliation (2026-10-24): v0.4.40 includes the compatible
+patches described below and completed frozen/native/public-artifact acceptance.
+Its hosted unsuppressed scanner reports RUSTSEC-2023-0071 for the desktop, no
+headless vulnerabilities, and the two documented maintenance warnings. Hosted
+quality/privacy and package builds passed; the advisory job remains nonzero.
+The following candidate notes and older assessment are dated history, not a
+claim that v0.4.39 remains the latest delivered build. Any future dependency
+change requires a fresh scan and runtime qualification.
+
+Current remediation candidate (2026-10-23): the desktop lockfile resolves
+`rustls-webpki 0.103.16` and `ctutils 0.4.4`; both workspaces pin Tokio 1.53.3.
+The Tokio patch also removes the unsoundness warning RUSTSEC-2026-0386 found
+in the first fresh candidate scan. These are compatible patch updates
+for [RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382) and
+[the ctutils fix](https://github.com/RustCrypto/utils/pull/1569). The last published
+v0.4.39 still contained the affected versions. The locked Fedora normal dependency tree and the all-target normal tree contain
+no path to rustls-webpki: this candidate's rustls provider is in the development
+server graph. This does not establish a production outer-TLS certificate flaw;
+RUWAC's RDP connection uses native-tls/OpenSSL. The fresh unsuppressed cargo-audit 0.22.2 scan reports no headless
+vulnerabilities and only RUSTSEC-2023-0071 for the desktop; both patchable
+findings and the Tokio unsoundness warning are absent. The maintenance warnings for atomic-polyfill and
+rustls-pemfile remain visible. Fresh full-build/native evidence is still
+required for this changed candidate; it is not a
+claim that v0.4.39's advisory job passed. The new WebKitGTK GUI uses the Fedora
+system browser libraries and adds no browser dependency to the headless workspace.
+
+RSA remains an unresolved production dependency; no advisory suppression,
+unreviewed cryptographic fork or forced incompatible SSPI upgrade is introduced.
+The older assessment below is retained as dated history.
+
+
 Assessed 2026-10-12. This is a source and dependency-path assessment, not a cryptographic timing audit or stable-distribution clearance.
 
 The locked desktop graph contains `rsa 0.10.0-rc.18`, flagged by [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html). The advisory describes timing disclosure of RSA private keys when an attacker can observe private-key operations. Its patched-version list is empty. The headless lockfile has no reported vulnerabilities in the inspected advisory snapshot and contains no RSA, IronRDP or GTK dependency.

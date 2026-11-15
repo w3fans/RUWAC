@@ -69,7 +69,38 @@ def matches(peer,text):return command(peer,'read')==text
 def mode(send,receive):
  with lock:modes.update(send=send,receive=receive);bridge.stdin.write((json.dumps(modes)+'\n').encode());bridge.stdin.flush()
  time.sleep(.35)
+def check_peer_epochs():
+ # Exercise the exact production peer protocol with controlled completion order.
+ # The separate native desktops below still prove real selection/INCR transport.
+ import importlib.util,types
+ spec=importlib.util.spec_from_file_location('primary_epoch_fixture',helper)
+ module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+ class Primary:
+  def __init__(self,changed):self.readers=[];self.last_digest=None;self.owner_revision=0;self.changes=types.SimpleNamespace(revision=lambda:self.owner_revision)
+  def cancel(self):pass
+  def read(self,ready):self.readers.append(ready)
+ class Pipe:
+  def __init__(self,*args):self.sent=[]
+  def send(self,value):self.sent.append(value)
+ module.Primary=Primary;module.Pipe=Pipe;module.loop=types.SimpleNamespace(quit=lambda:None)
+ module.GLib=types.SimpleNamespace(timeout_add=lambda *args:1,source_remove=lambda *args:None)
+ peer=module.Peer(0,1)
+ def mode_at(epoch,send):peer.message({'type':'mode','epoch':epoch,'send':send,'receive':False})
+ def complete(text):peer.primary.readers.pop(0)(text)
+ mode_at(1,True);peer.changed();peer.publish();complete('INITIAL_GDK_NOTIFICATION')
+ assert peer.pipe.sent[-1]=={'type':'text','epoch':1,'initial':True,'text':'INITIAL_GDK_NOTIFICATION'}
+ peer.primary.owner_revision+=1;peer.changed();peer.publish();complete('FIRST_ACTIVE_SELECTION')
+ assert peer.pipe.sent[-1]=={'type':'text','epoch':1,'initial':False,'text':'FIRST_ACTIVE_SELECTION'}
+ mode_at(2,False);peer.primary.owner_revision+=1;peer.changed();mode_at(3,True);peer.publish();complete('BACKGROUND_SNAPSHOT')
+ assert peer.pipe.sent[-1]=={'type':'text','epoch':3,'initial':True,'text':'BACKGROUND_SNAPSHOT'}
+ peer.primary.owner_revision+=1;peer.changed();peer.publish();complete('NEW_SELECTION_ON_RETURN')
+ assert peer.pipe.sent[-1]=={'type':'text','epoch':3,'initial':False,'text':'NEW_SELECTION_ON_RETURN'}
+ peer.changed();peer.publish();count=len(peer.pipe.sent);mode_at(4,False);complete('LATE_REPLY')
+ assert len(peer.pipe.sent)==count
+ peer.publish();assert not peer.primary.readers
+ mark('peer-epochs-distinguish-deliberate-selections-from-background-and-late-replies')
 try:
+ check_peer_epochs()
  displays=[]
  for name in ['local','remote']:
   q=root/name;q.mkdir()
@@ -124,15 +155,23 @@ try:
    if select.select([direct.stdout],[],[],max(0,end-time.monotonic()))[0]:
     data=os.read(direct.stdout.fileno(),65536);assert data;pending.extend(data);assert len(pending)<7*1024*1024
   raise AssertionError('INCR peer frame timed out')
- assert frame()['type']=='hello';direct.stdin.write(b'{"type":"mode","epoch":1,"send":true,"receive":false}\n');direct.stdin.flush();time.sleep(.15)
+ assert frame()['type']=='hello';direct.stdin.write(b'{"type":"mode","epoch":1,"send":true,"receive":false}\n');direct.stdin.flush();time.sleep(.25)
+ # Drain initialization ownership notifications, then re-enter the same
+ # desktop with a new epoch while its existing selection remains unchanged.
+ # The first subsequent deliberate selection must replace another tab's text.
+ while b'\n' in pending or select.select([direct.stdout],[],[],0)[0]:frame()
+ direct.stdin.write(b'{"type":"mode","epoch":2,"send":true,"receive":false}\n');direct.stdin.flush();time.sleep(.15)
  incr_text='INCR_transfer_line\n'*30000;incr_file=root/'INCR.txt';incr_file.write_text(incr_text)
  with incr_file.open('rb') as stream:
   owner=subprocess.Popen(['xsel','--primary','--input','--nodetach'],stdin=stream,env={**env,'DISPLAY':displays[1]},stdout=(root/'xsel.log').open('wb'),stderr=subprocess.STDOUT);children.append(owner)
  for _ in range(4):
-  value=frame();assert value['type']=='text' and value['epoch']==1
-  if value['text']==incr_text:break
+  value=frame();assert value['type']=='text' and value['epoch']==2
+  if value['text']==incr_text:
+   assert value['initial'] is False,'First deliberate selection was mislabeled as an initial snapshot'
+   break
  else:raise AssertionError('INCR data did not match the independent owner')
  assert '"primary_trace": "INCR"' in (root/'INCR-peer.log').read_text()
+ mark('first-deliberate-remote-selection-is-not-a-stale-initial-snapshot')
  direct.stdin.close();assert direct.wait(timeout=5)==0;mark('independent-INCR-owner-complete-transfer-and-terminator')
  mode(False,True)
  command('remote','set',text='x'*(1024*1024+1));time.sleep(.7);assert matches('local',bulk);mark('oversized-selection-refused')

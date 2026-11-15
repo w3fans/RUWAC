@@ -53,7 +53,7 @@ jobs:
         run: |
           printf 'CARGO_HOME=%s/cargo\nCARGO_TARGET_DIR=%s/target\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Install Fedora test tools
-        run: dnf install -y acl git cargo rust rustfmt clippy gcc gcc-c++ pkgconf-pkg-config gtk4-devel libadwaita-devel openssl openssl-devel libssh2-devel sqlite-devel python3 python3-pyyaml python3-pillow tesseract tesseract-langpack-eng screen tmux fzf openssh-server openssh-clients shadow-utils rsync util-linux
+        run: dnf install -y acl git cargo rust rustfmt clippy gcc gcc-c++ pkgconf-pkg-config gtk4-devel libadwaita-devel webkitgtk6.0-devel openssl openssl-devel libssh2-devel sqlite-devel python3 python3-pyyaml python3-pillow tesseract tesseract-langpack-eng screen tmux fzf openssh-server openssh-clients shadow-utils rsync util-linux
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           persist-credentials: false
@@ -66,8 +66,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/workflow-tools"
           tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP/workflow-tools" actionlint
           "$RUNNER_TEMP/workflow-tools/actionlint" -shellcheck= -pyflakes=
+      - name: Portable CLI package contract regressions
+        run: python3 ruwac/tests/integration/test_portable_cli.py
+      - name: COPR error and Rawhide repository contracts
+        run: python3 ruwac/tests/integration/copr_update_contracts.py
       - name: Public source inventory
         run: python3 scripts/public-files.py --tracked
+      - name: Typing measurement glyph and deadline regressions
+        run: python3 ruwac/tests/benchmarks/test_typing_latency.py
       - name: Contribution label guards
         run: python3 .github/scripts/test-label-pr.py
       - name: GitHub updater and reversible installation guards
@@ -79,16 +85,21 @@ jobs:
       - name: Fedora candidate bundle and installation integrity guards
         run: python3 ruwac/tests/integration/test_bundles.py
       - name: Validate workflow test command execution
-        run: python3 ruwac/tests/integration/test_workflow_commands.py
+        run: |
+          python3 ruwac/tests/integration/test_workflow_commands.py
+          python3 ruwac/tests/integration/test_desktop_mouse_stream.py
       - name: Testing artifact attestation subject regressions
         run: |
           python3 ruwac/tests/integration/test_testing_subjects.py
           python3 ruwac/tests/integration/test_verified_quality.py
+      - name: Source release publication classification
+        run: python3 ruwac/tests/integration/test_release_mode.py
       - name: Testing bundle updater integrity and archive faults
         run: |
           python3 ruwac/tests/integration/test_bundle_updates.py
           python3 ruwac/tests/integration/test_update_provenance.py
           python3 ruwac/tests/integration/test_rpm_updates.py
+          python3 ruwac/tests/integration/test_package_update.py
       - name: Opt-in agent installer contracts
         run: python3 ruwac/tests/integration/test_agent_bootstrap.py
       - name: Fail-closed local GDM recognition fixtures
@@ -134,9 +145,43 @@ jobs:
           cargo build --locked --manifest-path ruwac/Cargo.toml
           python3 ruwac/tests/integration/atomic_paste.py --binary "$CARGO_TARGET_DIR/debug/ruwac" --evidence "$RUNNER_TEMP"
           mkdir -p "$RUNNER_TEMP/ruwac-evidence"
-          for test in spike desktop_state client_focus jobs jobs_capacity recovery screen_previous screen_copy history_snapshot primary_history checkpoint_validation terminal_styles_apps mixed_nesting terminal_usability cli_user_shell cli_shell_contract natural_grid status_bar split_dividers; do
+          for test in spike desktop_state client_focus jobs jobs_capacity recovery screen_previous multiplexer_commands screen_copy history_snapshot primary_history checkpoint_validation checkpoint_consistency terminal_styles_apps mobile_capture mixed_nesting terminal_usability cli_user_shell cli_shell_contract natural_grid status_bar split_dividers narrow_unicode; do
             python3 "ruwac/tests/integration/$test.py" --binary "$CARGO_TARGET_DIR/debug/ruwac" --evidence "$RUNNER_TEMP/ruwac-evidence"
           done
+      - name: Large independent zoomers and non-sizing viewer palette fallback
+        run: |
+          mkdir -p "$RUNNER_TEMP/large-viewer"
+          timeout 120 python3 ruwac/tests/integration/render_cells_large.py --binary "$CARGO_TARGET_DIR/debug/ruwac" --evidence "$RUNNER_TEMP/large-viewer"
+      - name: Non-sizing viewer real-PTY fixtures and older-daemon refusal
+        env:
+          # v0.4.52 is the last published source without the non_sizing_viewer capability.
+          RUWAC_PRE_VIEWER_COMMIT: fca85c5ec0bc5a22a1895d363458fc9e025bb940
+        run: |
+          cargo build --locked --manifest-path ruwac/Cargo.toml
+          viewer="$RUNNER_TEMP/viewer"
+          mkdir -m 700 "$viewer" "$viewer/tmp" "$viewer/generated-home"
+          TMPDIR="$viewer/tmp" timeout 300 python3 ruwac/tests/integration/client_sizing_viewer.py --binary "$CARGO_TARGET_DIR/debug/ruwac" --evidence "$viewer/sizing-evidence"
+          git fetch --no-tags --depth=1 origin "$RUWAC_PRE_VIEWER_COMMIT"
+          git archive --output="$viewer/pre-viewer.tar" "$RUWAC_PRE_VIEWER_COMMIT"
+          mkdir "$viewer/pre-viewer-source"
+          tar -xf "$viewer/pre-viewer.tar" -C "$viewer/pre-viewer-source"
+          cargo build --locked --manifest-path "$viewer/pre-viewer-source/ruwac/Cargo.toml" --target-dir "$viewer/pre-viewer-target"
+          env TMPDIR="$viewer/tmp" HOME="$viewer/generated-home" XDG_CONFIG_HOME="$viewer/generated-home/config" XDG_DATA_HOME="$viewer/generated-home/data" XDG_CACHE_HOME="$viewer/generated-home/cache" \
+            timeout 120 python3 ruwac/tests/integration/viewer_legacy.py --binary "$CARGO_TARGET_DIR/debug/ruwac" --legacy "$viewer/pre-viewer-target/debug/ruwac" --evidence "$viewer/legacy-evidence"
+          mkdir -m 700 "$viewer/palette-evidence"
+          env TMPDIR="$viewer/tmp" HOME="$viewer/generated-home" XDG_CONFIG_HOME="$viewer/generated-home/config" XDG_DATA_HOME="$viewer/generated-home/data" XDG_CACHE_HOME="$viewer/generated-home/cache" \
+            timeout 120 python3 ruwac/tests/integration/render_cells.py --binary "$CARGO_TARGET_DIR/debug/ruwac" --legacy "$viewer/pre-viewer-target/debug/ruwac" --evidence "$viewer/palette-evidence"
+          python3 - "$viewer" <<'PY'
+          import json, sys
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          sizing = json.loads((root / 'sizing-evidence/result.json').read_text())
+          legacy = json.loads((root / 'legacy-evidence/acceptance.json').read_text())
+          assert sizing['PASS'] is True, [c['id'] for c in sizing['cases'] if c['status'] != 'PASS']
+          assert legacy['PASS'] is True and legacy['no_attach_resize_or_input'] and legacy['tty_modes_preserved']
+          print(f"Viewer real-PTY cases: {len(sizing['cases'])} PASS; older-daemon refusal PASS")
+          PY
+          rm -rf "$viewer/tmp"
 
   advisories:
     runs-on: ubuntu-latest

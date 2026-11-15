@@ -17,6 +17,7 @@ REQUIRED = frozenset({
     'multi-tab-focus', 'agent-launch', 'png-attachment',
     'package-installation-rollback', 'original-endpoint-recovery',
     'primary-bridge', 'legacy-cli-comparison', 'idle-resources', 'privacy',
+    'terminal-desktop-ergonomics', 'rdp-clipboard-ordering', 'web-preview',
 })
 SHA = re.compile(r'[0-9a-f]{64}\Z')
 

@@ -264,7 +264,8 @@ async fn connection(
                     "request timed out; mutation outcome may be unknown",
                 ))
             });
-        let stopping = r.method == "daemon.stop" && result.is_ok();
+        let stopping =
+            matches!(r.method.as_str(), "daemon.stop" | "daemon.stopIfIdle") && result.is_ok();
         let value = response(&r.id, result);
         let bytes = ruwac_protocol::encode_frame(&value, response_limit).or_else(|_| {
             ruwac_protocol::encode_frame(&response(&r.id, Err(Error::new("LIMIT", "response exceeds the requested frame bound; terminal renders may opt in to max_response_bytes"))), ruwac_protocol::MAX_FRAME)

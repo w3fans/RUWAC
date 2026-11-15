@@ -53,7 +53,8 @@ try:
  controls=command('chrome');(root/'chrome-initial.json').write_text(json.dumps(controls,indent=2));command('snapshot');assert controls['header_height']<=33,{k:v for k,v in controls.items()if k!='header_tree'}
  assert controls['content_height']==controls['window_height']-controls['header_height'],controls
  command('chrome',collapse=True);time.sleep(.3)
- narrow=command('chrome');assert narrow['tab_bar_width']>=narrow['window_width']-220,{k:v for k,v in narrow.items()if k!='header_tree'}
+ narrow=command('chrome');last_tab=narrow['tab_layout']['tabs'][-1];plus=narrow['tab_new_terminal']
+ assert last_tab['inside_viewport']and plus['mapped']and 0<=plus['origin'][0]-(last_tab['origin'][0]+last_tab['width'])<=20
  command('chrome',collapse=False,open=True,width=800,height=600)
  eventually(lambda:command('chrome')['open'])
  command('chrome',open=False);eventually(lambda:not command('chrome')['open'])
@@ -194,9 +195,30 @@ try:
  final=rpc('session.create',{'name':'Generated final shell','argv':['/bin/bash','-l']})
  last=gui('--session',final['session']);eventually(lambda:command('inspect').get('target')==final['pane'],20)
  for letter in ['e','x','i','t','Return']:command('key',view=0,key=letter)
- eventually(lambda:last.poll() is not None,8)
- assert daemon.poll() is None and all(s['id']!=final['session'] for s in rpc('session.list'))
- checks.append('native-last-shell-exit-closes-GTK-window-and-removes-completed-session')
+ eventually(lambda:command('terminal-recovery')['ended'],8)
+ assert last.poll()is None and daemon.poll()is None and any(s['id']==final['session']for s in rpc('session.list'))
+ command('terminal-recovery',operation='terminal-new-ended')
+ eventually(lambda:command('inspect')['tabs']==2)
+ assert last.poll()is None and daemon.poll()is None
+ # Recreate the original ended local shell, then retain the independent new shell.
+ command('tab-select',tab=0)
+ command('terminal-recovery',operation='terminal-reconnect')
+ eventually(lambda:command('inspect')['tabs']==2 and not command('terminal-recovery')['ended'])
+ assert last.poll()is None and daemon.poll()is None
+ fresh=eventually(lambda:command('inspect',view=1).get('target'))
+ rpc('pane.sendText',{'pane':fresh,'text':'exit\n'})
+ eventually(lambda:command('terminal-recovery',view=1)['ended'])
+ # A failed creation must leave the only recovery view and its independent peer.
+ unavailable=sock.with_name('generated-unreachable-socket');sock.rename(unavailable)
+ try:
+  command('terminal-recovery',view=1,operation='terminal-replace-ended')
+  eventually(lambda:'New terminal failed' in command('inspect',view=1)['status'])
+  assert command('inspect')['tabs']==2 and last.poll()is None and daemon.poll()is None
+ finally:unavailable.rename(sock)
+ command('terminal-recovery',view=1,operation='terminal-replace-ended')
+ eventually(lambda:command('inspect')['tabs']==2 and (p:=command('inspect',view=1).get('target'))and p!=fresh)
+ assert last.poll()is None and daemon.poll()is None
+ checks.append('native-last-shell-exit-retains-window-and-can-create-or-recreate-a-terminal')
  receipt={'status':'PASS','checks':checks,'scope':'Actual GTK on owned Wayland, actual daemon/PTys/tmux and generated Remmina files; GTK callbacks are synthetic, not physical input or external SSH acceptance'}
  (root/'acceptance.json').write_text(json.dumps(receipt,indent=2)+'\n');print('Native terminal usability PASS',len(checks),'groups')
 finally:

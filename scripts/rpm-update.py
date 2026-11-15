@@ -227,11 +227,11 @@ class Updater:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group(required=True)
-    modes.add_argument('--enable-testing', action='store_true')
-    modes.add_argument('--disable', action='store_true')
+    modes.add_argument('-e', '--enable-testing', action='store_true')
+    modes.add_argument('-d', '--disable', action='store_true')
     modes.add_argument('-s', '--status', action='store_true')
     modes.add_argument('-i', '--install', action='store_true')
-    modes.add_argument('--install-auto', action='store_true')
+    modes.add_argument('-I', '--install-auto', action='store_true')
     args = parser.parse_args()
     if args.status:
         print(json.dumps({'distribution': 'rpm', 'automatic_install': policy()}))

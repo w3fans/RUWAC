@@ -1,8 +1,17 @@
-# Fedora 44 installation and automatic updates
+# Fedora installation and automatic updates
 
-Published releases include source, Fedora 44 x86_64 testing RPMs and checked per-user
-binary bundles. Full security qualification and a signed Fedora repository remain
-separate gates. Choose the installation mode that matches your update needs.
+COPR provides `ruwac` and `ruwac-desktop` for Fedora 43, 44, 45 and Rawhide on
+x86_64. Enable `zvegelj/ruwac` once with `sudo dnf copr enable zvegelj/ruwac`, then
+install the needed packages with DNF. One source package produces both binaries.
+Use `sudo dnf upgrade --refresh ruwac ruwac-desktop` to check new releases without
+waiting for cached repository metadata to expire. COPR packages use DNF and do
+not include the upstream testing-update timer. Reopen the GUI after updating;
+existing terminal engines and their programs remain running.
+
+Published releases also include source, upstream Fedora 44 x86_64 testing RPMs
+and checked per-user binary bundles. The following system timer instructions
+apply to those upstream testing RPMs, rather than the COPR packages. Official
+Fedora inclusion and full security qualification remain separate gates.
 
 For system installation, download the matching core and desktop RPMs from the
 same release and install them with DNF. Open /usr/bin/ruwac gui if a prior per-user
@@ -24,7 +33,7 @@ checks, all installed component assets, checksums, signed workflow provenance an
 matching RPM headers before one DNF upgrade. It does not add the desktop to a
 headless installation, restart sessions or modify user profiles/credentials.
 The separate dependency advisory remains open; this explicit opt-in accepts upstream
-testing packages, not complete security or signed Fedora repository qualification.
+testing packages, not complete security qualification or official Fedora inclusion.
 
 Manual installation and opt-out also support the desktop authorization agent:
 

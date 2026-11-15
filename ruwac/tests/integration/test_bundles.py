@@ -71,6 +71,8 @@ class Bundles(unittest.TestCase):
         def read(path, *args, **kwargs):
             if str(path) == '/etc/os-release':
                 return 'ID=fedora\nVERSION_ID=44\n'
+            if str(path) == '/usr/share/ruwac/rpm-installation.json':
+                raise FileNotFoundError(path)  # never the developer machine's COPR package
             return original(path, *args, **kwargs)
         with patch.object(sys, 'argv', ['installer', '--build-root', str(root), '--desktop', '--prefix', str(prefix)]), patch.object(Path, 'read_text', read), patch('platform.machine', return_value='x86_64'), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             result = runpy.run_path(str(ROOT / 'scripts/install-user.py'), run_name='__main__')
@@ -237,17 +239,20 @@ class Bundles(unittest.TestCase):
         checker = runpy.run_path(str(ROOT / 'scripts/privacy-check.py'))
         self.assertTrue(bundles.artifact_findings(self.relocation_elf(b'toy\x00'), checker, ['toy'])[0])
 
-    def branch_elf(self, literal=b'generated fixture', bad_target=False, unchecked=False):
+    def branch_elf(self, literal=b'generated fixture', bad_target=False, unchecked=False, fallback_tail=False):
         # The generated relative address happens to encode a short identifier.
         table, dispatch = 0x3000, 0x1000
         target = table + int.from_bytes(b'toy\0', 'little')
         code = (b'\x48\x8d\x41\xff\x48\x83\xf8\x02\x0f\x83'
-                + struct.pack('<i', 0) + b'\x48\x8d\x05'
+                + struct.pack('<i', target - dispatch - 14 if fallback_tail else 0) + b'\x48\x8d\x05'
                 + struct.pack('<i', table - dispatch - 21)
                 + b'\x48\x63\x0c\x88\x48\x01\xc1\xff\xe1')
         if unchecked:
             code = b'\x90' + code[1:]
         numbers = b'toy\0' * 3
+        if fallback_tail:
+            code += b'\x48\x8d\x05' + struct.pack('<i', table + 16 - dispatch - len(code) - 7)
+            numbers += b'toy\0'
         if bad_target:
             numbers = numbers[:8] + struct.pack('<i', -1)
         payloads = [code, b'\x90\xc3', numbers + literal]
@@ -274,6 +279,224 @@ class Bundles(unittest.TestCase):
         checker = runpy.run_path(str(ROOT / 'scripts/privacy-check.py'))
         for options in [{'unchecked': True}, {'bad_target': True}]:
             self.assertTrue(bundles.artifact_findings(self.branch_elf(**options), checker, ['toy'])[0])
+
+    def test_duplicate_branch_fallback_is_numeric_but_adjacent_text_is_not(self):
+        checker = runpy.run_path(str(ROOT / 'scripts/privacy-check.py'))
+        path = self.branch_elf(fallback_tail=True)
+        self.assertFalse(bundles.artifact_findings(path, checker, ['toy'])[0])
+        for literal in [b'toy\0', b'generated-private-host\0']:
+            with self.subTest(literal=literal):
+                path = self.branch_elf(literal, fallback_tail=True)
+                self.assertTrue(bundles.artifact_findings(path, checker, ['toy', 'generated-private-host'])[0])
+
+    def test_duplicate_fallback_requires_exact_guard_target_and_object_boundary(self):
+        def fixture():
+            data = bytearray(1024)
+            dispatch, table, fallback = 0x1000, 0x4000, 0x1080
+            code = (b'\x48\x8d\x41\xff\x48\x83\xf8\x02\x0f\x83'
+                    + struct.pack('<i', fallback - dispatch - 14)
+                    + b'\x48\x8d\x05' + struct.pack('<i', table - dispatch - 21)
+                    + b'\x48\x63\x0c\x88\x48\x01\xc1\xff\xe1')
+            data[:len(code)] = code
+            data[64:71] = b'\x48\x8d\x05' + struct.pack('<i', table + 16 - dispatch - 71)
+            for i, target in enumerate([0x1020, 0x1030, 0x1040, fallback]):
+                struct.pack_into('<i', data, 512 + 4 * i, target - table)
+            records = [(0, 1, 6, dispatch, 0, 256, 0, 0, 16, 0),
+                       (0, 1, 2, table, 512, 32, 0, 0, 4, 0)]
+            return data, records
+
+        data, records = fixture()
+        self.assertEqual(bundles.indexed_branch_slots(data, records), {0x4000, 0x4004, 0x4008, 0x400c})
+        mutations = [
+            ('different-valid-code-target', 524, struct.pack('<i', 0x1090 - 0x4000)),
+            ('text-word', 524, b'HOST'),
+            ('missing-next-reference', 64, b'\x90' * 7),
+            ('interior-reference', 67, struct.pack('<i', 0x400d - 0x1047)),
+            ('prefix-interior-reference', 67, struct.pack('<i', 0x4004 - 0x1047)),
+            ('reference-too-far', 67, struct.pack('<i', 0x4014 - 0x1047)),
+            ('unknown-dispatch', 27, b'\x90'),
+            ('invalid-prefix-target', 512, struct.pack('<i', 0x9000 - 0x4000)),
+            ('zero-index-bound', 7, b'\x00'),
+            ('sign-extended-index-bound', 7, b'\x80'),
+        ]
+        for name, offset, content in mutations:
+            with self.subTest(case=name):
+                data, records = fixture()
+                data[offset:offset + len(content)] = content
+                self.assertNotIn(0x400c, bundles.indexed_branch_slots(data, records))
+        for name in ['truncated-word', 'word-outside-section', 'nonallocated-data', 'executable-data']:
+            with self.subTest(case=name):
+                data, records = fixture()
+                section = list(records[1])
+                if name == 'truncated-word': data = data[:526]
+                if name == 'word-outside-section': section[5] = 12
+                if name == 'nonallocated-data': section[2] = 0
+                if name == 'executable-data': section[2] = 6
+                records[1] = tuple(section)
+                self.assertNotIn(0x400c, bundles.indexed_branch_slots(data, records))
+
+    def ranged_branch_elf(self, literal=b'generated fixture', mutation=None):
+        table, dispatch = 0x3000, 0x1000
+        target = table + int.from_bytes(b'toy\0', 'little')
+        code = bytearray(b'\x48\x8d\x4a\xfe\x48\x83\xf9\x02\x0f\x87'
+                         + struct.pack('<i', target - dispatch - 14)
+                         + b'\x48\x8d\x3d' + struct.pack('<i', table - dispatch - 21)
+                         + b'\x48\x63\x0c\x8f\x48\x01\xf9\xff\xe1')
+        code += b'\x48\x8d\x05' + struct.pack('<i', table + 12 - dispatch - len(code) - 7)
+        numbers = b'toy\0' * 3
+        if mutation is not None:
+            at, value = mutation
+            if at == 'table': numbers = numbers[:8] + struct.pack('<i', -1)
+            elif at == 'reference':
+                struct.pack_into('<i', code, 33, table + 8 - dispatch - 37)
+            else: code[at:at + len(value)] = value
+        payloads = [bytes(code), b'\x90\xc3', numbers + literal]
+        header = struct.pack('<16sHHIQQQIHHHHHH', b'\x7fELF\x02\x01' + bytes(10),
+                             3, 62, 1, 0, 0, 64, 0, 64, 0, 0, 64, 4, 0)
+        records = bytes(64); offset = 64 + 4 * 64
+        for address, flags, content in zip([dispatch, target, table], [6, 6, 2], payloads):
+            records += struct.pack('<IIQQQQIIQQ', 0, 1, flags, address, offset, len(content), 0, 0, 1, 0)
+            offset += len(content)
+        path = self.root / 'generated-range-elf'
+        path.write_bytes(header + records + b''.join(payloads))
+        return path
+
+    def test_unsigned_range_branch_addresses_are_numeric(self):
+        checker = runpy.run_path(str(ROOT / 'scripts/privacy-check.py'))
+        self.assertFalse(bundles.artifact_findings(self.ranged_branch_elf(), checker, ['toy'])[0])
+
+    def test_unsigned_range_branch_keeps_adjacent_private_text(self):
+        checker = runpy.run_path(str(ROOT / 'scripts/privacy-check.py'))
+        for literal in [b'toy\0', b'generated-private-host\0']:
+            with self.subTest(literal=literal):
+                self.assertTrue(bundles.artifact_findings(self.ranged_branch_elf(literal), checker, ['toy', 'generated-private-host'])[0])
+
+    def test_unsigned_range_requires_exact_guard_and_dispatch(self):
+        checker = runpy.run_path(str(ROOT / 'scripts/privacy-check.py'))
+        mutations = [(0,b'\x90'), (3,b'\xff'), (7,b'\x00'), (7,b'\x80'),
+                     (9,b'\x83'), (16,b'\x05'), (24,b'\x88'), (27,b'\xc1'),
+                     (29,b'\xe0'), (10,struct.pack('<i',0x2000-0x1000-14)),
+                     ('table',None), ('reference',None)]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.assertTrue(bundles.artifact_findings(self.ranged_branch_elf(mutation=mutation), checker, ['toy'])[0])
+
+    def test_unsigned_range_requires_bounded_readonly_table(self):
+        path=self.ranged_branch_elf();data=path.read_bytes()
+        header=struct.unpack_from('<16sHHIQQQIHHHHHH',data)
+        records=[struct.unpack_from('<IIQQQQIIQQ',data,header[6]+i*64) for i in range(header[12])]
+        self.assertEqual(bundles.indexed_branch_slots(data,records),{0x3000,0x3004,0x3008})
+        for field,value in [(1,8),(2,0),(2,3),(2,6),(3,0x3001),(5,8)]:
+            with self.subTest(field=field,value=value):
+                changed=list(records);section=list(changed[3]);section[field]=value;changed[3]=tuple(section)
+                self.assertNotIn(0x3008,bundles.indexed_branch_slots(data,changed))
+
+    def byte_branch_elf(self, literal=b'generated fixture', bad_target=False, unknown=False, spill=True, count=4, positive=False, writable=False, unaligned=False, wrong_jump=False, extra_reference=False, far=False, wide_displacement=False, bounded=None):
+        table = (1342177280 if far else 16777216) + (1 if unaligned else 0)
+        dispatch = 4096
+        numeric = b'toy' + (b'\xc3' if far else b'\x00' if positive else b'\xff')
+        target = table + int.from_bytes(numeric, 'little', signed=True)
+        load = b'\x0f\xb6\x83\x38\x01\x00\x00' if wide_displacement else b'\x0f\xb6F\x10'
+        if bounded is not None:
+            # movzbl (%rdi),%eax; cmp $bound,%rax; ja +0x10
+            load = b'\x0f\xb6\x07' + b'\x48\x83\xf8' + bytes([bounded]) + b'\x77\x10'
+        code = load + b'H\x8d\r' + struct.pack('<i', table - dispatch - len(load) - 7) + b'Hc\x04\x81H\x01\xc8' + (b'H\x89t$\x08' if spill else b'') + b'\xff\xe0'
+        if unknown:
+            code = b'\x90' + code[1:]
+        if wrong_jump:
+            code = code[:-1] + b'\xe1'
+        if extra_reference:
+            code += b'H\x8d\r' + struct.pack('<i', table + 16 - dispatch - len(code) - 7)
+        numbers = numeric * count
+        if bad_target:
+            numbers = numbers[:8] + b'toy\xfe' + numbers[12:]
+        payloads = [code, b'\x90' * 64 + b'\xc3', numbers + literal]
+        header = struct.pack('<16sHHIQQQIHHHHHH', b'\x7fELF\x02\x01' + bytes(10), 3, 62, 1, 0, 0, 64, 0, 64, 0, 0, 64, 4, 0)
+        records = bytes(64)
+        offset = 64 + 4 * 64
+        for address, flags, content in zip([dispatch, target, table], [6, 6, 3 if writable else 2], payloads):
+            records += struct.pack('<IIQQQQIIQQ', 0, 1, flags, address, offset, len(content), 0, 0, 1, 0)
+            offset += len(content)
+        path = self.root / 'synthetic-elf'
+        path.write_bytes(header + records + b''.join(payloads))
+        return path
+
+    def byte_branch_findings(self, **kw):
+        checker = runpy.run_path(str(ROOT / 'scripts/privacy-check.py'))
+        return bundles.artifact_findings(self.byte_branch_elf(**kw), checker, ['toy'])[0]
+
+    def test_byte_dispatch_numeric_prefix_with_and_without_spill(self):
+        for spill in [False, True]:
+            self.assertFalse(self.byte_branch_findings(spill=spill))
+
+    def test_byte_dispatch_disp32_numeric_prefix(self):
+        for spill in [False, True]:
+            self.assertFalse(self.byte_branch_findings(wide_displacement=True, spill=spill))
+
+    def test_byte_dispatch_disp32_preserves_negative_controls(self):
+        for options in [dict(literal=b'toy\x00'), dict(unknown=True),
+                        dict(wrong_jump=True), dict(bad_target=True),
+                        dict(positive=True), dict(writable=True),
+                        dict(unaligned=True), dict(count=257), dict(count=1),
+                        dict(far=True), dict(count=8, extra_reference=True)]:
+            with self.subTest(options=options):
+                self.assertTrue(self.byte_branch_findings(wide_displacement=True, **options))
+
+    def test_byte_dispatch_adjacent_literal_is_still_rejected(self):
+        self.assertTrue(self.byte_branch_findings(literal=b'toy\x00'))
+
+    def test_byte_dispatch_unknown_instruction_is_not_masked(self):
+        self.assertTrue(self.byte_branch_findings(unknown=True))
+
+    def test_byte_dispatch_wrong_jump_register_is_not_masked(self):
+        self.assertTrue(self.byte_branch_findings(wrong_jump=True))
+
+    def test_byte_dispatch_invalid_target_retains_the_finding(self):
+        self.assertTrue(self.byte_branch_findings(bad_target=True))
+
+    def test_byte_dispatch_positive_printable_word_is_not_masked(self):
+        self.assertTrue(self.byte_branch_findings(positive=True))
+
+    def test_byte_dispatch_writable_data_is_not_masked(self):
+        self.assertTrue(self.byte_branch_findings(writable=True))
+
+    def test_byte_dispatch_unaligned_table_is_not_masked(self):
+        self.assertTrue(self.byte_branch_findings(unaligned=True))
+
+    def test_bounded_rdi_byte_dispatch_numeric_prefix(self):
+        for spill in [False, True]:
+            self.assertFalse(self.byte_branch_findings(bounded=3, count=4, spill=spill))
+
+    def test_bounded_rdi_byte_dispatch_caps_slots_at_the_bound(self):
+        # Words beyond cmp's bound are not table slots and stay scanned.
+        self.assertTrue(self.byte_branch_findings(bounded=1, count=4))
+
+    def test_bounded_rdi_byte_dispatch_preserves_negative_controls(self):
+        for options in [dict(literal=b'toy\x00'), dict(unknown=True), dict(wrong_jump=True),
+                        dict(bad_target=True), dict(positive=True), dict(writable=True),
+                        dict(unaligned=True), dict(far=True), dict(count=8, extra_reference=True)]:
+            with self.subTest(options=options):
+                self.assertTrue(self.byte_branch_findings(bounded=7, **{'count': 4, **options}))
+
+    def test_byte_dispatch_byte_index_bounds_256_slots(self):
+        self.assertFalse(self.byte_branch_findings(count=256))
+        self.assertTrue(self.byte_branch_findings(count=257))
+
+    def test_byte_dispatch_one_offset_is_insufficient(self):
+        self.assertTrue(self.byte_branch_findings(count=1))
+
+    def test_byte_dispatch_far_negative_offsets_remain_fully_scanned(self):
+        self.assertTrue(self.byte_branch_findings(far=True))
+
+    def test_byte_dispatch_independent_reference_stops_numeric_prefix(self):
+        self.assertTrue(self.byte_branch_findings(count=8, extra_reference=True))
+
+    def test_byte_dispatch_key_material_is_still_rejected(self):
+        checker = runpy.run_path(str(ROOT / 'scripts/privacy-check.py'))
+        # Generated fake PEM; construct markers as in the existing key fixture.
+        value = b'-----BEGIN ' + b'PRIVATE KEY-----\n' + b'A' * 64 + b'\n-----END ' + b'PRIVATE KEY-----'
+        found = bundles.artifact_findings(self.byte_branch_elf(literal=value), checker, [])[0]
+        self.assertTrue(any((rule == 'private-key-material' for rule, _ in found)))
 
     def unwind_elf(self, literal=b'generated fixture', invalid_range=False):
         path = self.root / 'unwind-elf'

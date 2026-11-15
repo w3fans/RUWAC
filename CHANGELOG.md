@@ -2,6 +2,636 @@
 
 ## Unreleased
 
+## v0.4.81 — 2026-11-15 — Stable source release
+
+- Prevent a wide Unicode character in a one-column split from stopping the
+  terminal engine. Keep the PTY and emulator at their shared two-column minimum,
+  preserving text and child processes while the view is narrower. Clip GTK
+  painting and pointer hits to each pane's rectangle so the hidden column does
+  not cover or capture clicks in the divider.
+
+## v0.4.80 — 2026-11-15 — Stable source release
+
+- Reuse checkpoint history row scratch storage to reduce typing stalls while
+  many history-filled terminals continuously change. Preserve independently
+  owned row text, byte budgets, whitespace/wrap rules, styles and recovery
+  format. Controlled local TUI p99 improved from 34.9–36.4 to 16.6 ms;
+  physical GTK/RDP/WAN latency remains outside that measurement.
+
+## v0.4.79 — 2026-11-15 — Stable source release
+
+- Flexible tabs fill the available row, including when only a few are open.
+  Pinned tabs keep icon width; hover, title, status and selection changes retain
+  their tab geometry, font sizes, status icons and visible close buttons.
+- Recognize another bounded LLVM relative jump-table form during binary privacy
+  checks. Validate the complete guard, dispatch, table bounds and executable
+  targets; keep rejecting adjacent private text and malformed tables.
+- Remove generated bulk-transfer payloads after successful SFTP regression runs,
+  retaining receipts and diagnostics. Failed runs retain their test payloads.
+
+## v0.4.78 — 2026-11-14 — Stable source release
+
+- Update rustix from 1.1.5 to 1.1.6 to address RUSTSEC-2026-0486, an
+  uninitialized-buffer defect in extended-attribute size queries. Cargo also
+  reselects existing Windows-only dependency edges within their upstream
+  version ranges; other package versions and checksums are unchanged.
+  The separate desktop RSA advisory remains visible and unsuppressed.
+
+## v0.4.77 — 2026-11-14 — Stable source release
+
+- Recognize a compiler-generated duplicate jump-table fallback address during
+  binary privacy checks. The dispatch, preceding entries, exact fallback and
+  next object boundary must all validate; actual private text and unrecognized
+  data remain subject to the same policy. Add complete-ELF and malformed-table
+  regressions for the false positive observed during release verification.
+
+## v0.4.76 — 2026-11-14 — Stable source release
+
+- A stalled RDP clipboard no longer closes an otherwise healthy desktop.
+  Clipboard transfers stop for that connection until explicit Reconnect;
+  late data, acknowledgements and new offers cannot satisfy a newer request.
+  The connection status explains the clipboard timeout.
+- Add an authenticated native regression with a delayed clipboard response,
+  a full minute of continued connection, framebuffer and keyboard checks,
+  stale clipboard rejection and normal saved-profile reconnect. Existing
+  text, PNG, clipboard-policy and ownership regressions remain required.
+  This fixes a reproduced clipboard-triggered drop, not every GNOME handover
+  or external network failure.
+
+## v0.4.75 — 2026-11-13 — Stable source release
+
+- Ctrl+Shift+C and desktop Ctrl+C can copy a nested terminal application's
+  mouse selection to the regular clipboard. The copied text must still belong
+  to the focused pane and its current PRIMARY owner; typing, focus changes
+  and a replacement selection invalidate the keyboard-copy fallback. Copy while
+  that approved selection is still loading waits for it instead of sending an
+  interrupt to the application.
+- Reserve plain Alt+M for Machines and Alt+digits for tabs. Alt+A now reaches
+  the terminal or remote application; Agents remains available from its button.
+  Native tests also verify that Alt+X and Alt+S reach the terminal unchanged.
+- Add a native real-PTY regression for nested selection copy, interrupt
+  restoration and stale-owner rejection. Retain the existing Shift-selection,
+  word-selection and host-menu tests. Repeated GNOME RDP handover failures
+  remain under investigation; this release does not claim to fix them.
+
+## v0.4.74 — 2026-11-09 — Stable source release
+
+- Ctrl+V of a clipboard image into Claude Code running behind a nested RUWAC
+  session (a GUI tab that runs `ruwac -r NAME`) now attaches the image to the
+  draft. The desktop recognized only Codex's input box there, so it fell back to
+  a text paste of an image-only clipboard and nothing was sent.
+- Saved SSH machines can run a **Startup command** when a terminal opens (Machine
+  editor → Advanced), for example `su` or `sudo -i`. It runs in the remote shell
+  after login; when it ends, your login shell continues instead of the tab
+  disconnecting. Passwords are typed in the terminal and never stored. Agent
+  launches, file transfer and connection checks are unaffected.
+- New windows open inside the running RUWAC (window button, Ctrl+Shift+N, or the
+  launcher's New Window), so tabs can be dragged between any windows. Every
+  window has its own "+" for a new terminal.
+- Saved workspaces gain **New window**: the saved layout opens in a separate
+  window and its terminals continue where they stopped. Terminals of that
+  layout that are already open move into the new window with their running
+  programs (a session has one view per window set); nothing is closed,
+  restarted or reconnected.
+- Tabs no longer squeeze together: with few tabs each gets an equal, roomy share
+  of the row (at most about a fifth of its width), and tabs shrink evenly as more
+  are opened, down to a readable minimum. Beyond that the row scrolls, with left
+  and right arrows that appear only when needed and a sideways mouse wheel.
+  Widths still never change on hover, selection, title or status updates. Tabs
+  drop the full frame: a rounded bottom border (accent on the selected tab) and a
+  faint divider between tabs.
+- Upgrades now reach new work without stopping anything. After a package
+  update, a new terminal, `ruwac -S NAME`, `ruwac start` or the GUI uses an
+  engine of the installed version: an older engine that is completely idle (no
+  running program, no attached window) is retired safely and replaced on the
+  default socket, keeping its ended history readable; an older engine that still
+  runs programs is preserved untouched and the installed engine starts beside it.
+  Existing named sessions are still found and attached wherever they live, and
+  `ruwac -ls` lists sessions of every engine, labelled by engine version.
+- New `daemon.stopIfIdle` request and `ruwac engine stop`: stop an engine only
+  if it runs no program and no other client is attached, decided atomically by
+  the engine, so a terminal can never be ended by a lifecycle action. Engines
+  from before this release are never stopped automatically; stopping one
+  explicitly requires naming its PID and re-checks for running programs.
+  `daemon.stop` remains the explicit, destructive stop.
+- Fedora machines can be set up once and then update RUWAC on their own:
+  `/usr/libexec/ruwac/fleet-setup --ring canary|standard|disabled` (also
+  runnable over SSH before installation) enables exactly the RUWAC COPR with
+  five-minute metadata, installs the CLI (and the desktop only on graphical
+  machines) and enables a package-only update timer with a per-machine spread.
+  Re-running it changes nothing. The timer updates only the installed RUWAC
+  packages, defers while an offline system update is queued, never touches
+  running engines or terminals, and `ruwac update status` shows the result.
+  Remote agent launches on such machines no longer run a DNF check first, so
+  they never wait for the network or a sudo prompt.
+- `ruwac engine show` summarizes the installed RPM, this CLI, every running
+  engine (version, live/ended terminals, clients, PID, whether its binary was
+  updated on disk) and GUI, and which engine new sessions use;
+  `ruwac engine status --json` adds the same under `machine`, keeping the
+  original fields. Engine `health` reports live and ended terminals and the PID.
+- The desktop's SQLite binding moves to rusqlite 0.41.1 / libsqlite3-sys
+  0.39.1, clearing RUSTSEC-2026-0459. RUWAC links the system SQLite and never
+  compiled the affected bundled copy; the inventory store is unchanged.
+- Rsync transfers read progress from rsync 3.5.2, which prints the byte count
+  with a "B" suffix; previously every update was dropped, so progress stayed
+  at zero.
+- Remote agent tabs on COPR-provisioned Fedora machines no longer print
+  `grep: warning: stray \ before "` lines (GNU grep 3.8+), and launch the
+  packaged /usr/bin/ruwac instead of a stale per-user copy that came first on
+  PATH.
+- Function keys F1–F12 (with Shift/Alt/Ctrl) and Insert now send xterm
+  sequences to terminal programs; previously they sent nothing. F10 still
+  opens session controls, except with Map keys on, where it reaches the
+  program or remote desktop; Ctrl+. always opens the controls.
+## v0.4.73 — 2026-11-08 — Stable source release
+
+- Keep a tab-menu parent alive until popover cleanup completes, preventing a
+  closing RDP tab from leaving GTK with a finalized menu parent.
+- Add **Open updated engine** to Updates, including COPR installations, so new
+  work can use the installed engine without ending existing terminals.
+- Preserve terminal colors and text attributes while scrolling or selecting live
+  history, using bounded style runs and visible-row rendering. Older engines and
+  previously plain recovery history remain compatible; reopen on the updated
+  engine for styled history.
+- Report failed COPR update queries explicitly, use enabled Fedora/Rawhide
+  dependency repositories, and refuse a parallel per-user install after Fedora
+  package errors. Document permanent COPR setup with a five-minute metadata cache
+  and safe default-engine replacement without automatic session termination.
+
+## v0.4.72 — 2026-11-07 — Stable source release
+
+- Dispatch tab context-menu actions before popover cleanup, restoring Reconnect,
+  Disconnect and Close tab. Native-input coverage checks cancellation, the target
+  page and neighboring connections.
+
+- Keep tab widths steady during hover, selection and title/status changes. Restore
+  visible close buttons, inactive borders and readable fonts/status icons in both
+  layouts; show the first ten shortcut numbers while Alt is held. Preserve native
+  close cancellation, pinning, drag/detach and crowded-row navigation.
+- Keep the ended last local terminal open with Recreate, New terminal and New &
+  close controls. Create a replacement before closing the old tab, and preserve
+  the old tab if creation fails.
+
+## v0.4.71 — 2026-11-07 — Stable source release
+
+- Build and test a headless Linux x86_64 CLI archive and Debian package with
+  every tagged release, alongside Fedora. Verify the same binary on Ubuntu
+  22.04/24.04 and Debian 12/13 before publishing checksums and provenance.
+- Avoid rebuilding decoded terminal cells into a second JSON value tree. Reduce
+  frontend allocations and measured typing latency while preserving cell styles,
+  Unicode, selection, validation budgets and older-engine compatibility.
+
+## v0.4.70 — 2026-11-07 — Stable source release
+
+- Reuse immutable checkpoint snapshots for unchanged terminal panes, reducing
+  long typing stalls and repeated allocation with many history-filled terminals.
+  Preserve checkpoint contents, validation, file format and persistence timing.
+
+## v0.4.69 — 2026-11-07 — Stable source release
+
+- Preserve terminal foreground/background colors and emphasis in opt-in ANSI
+  captures for non-sizing mobile observers. Default capture and waits stay plain;
+  saved history retains its plain fallback. No attach, resize or terminal input.
+
+## v0.4.68 — 2026-11-06 — Stable source release
+
+- Double-click terminal words in the GUI or an ordinary shell in the terminal
+  client. Preserve Unicode graphemes and soft-wrapped words; use Shift in the
+  GUI when the application owns mouse input.
+- Use each source pane’s history geometry when selecting words in fresh or
+  populated splits.
+- Keep application mouse handling, held-drag scrollback and persistent sessions.
+  Refuse oversized word copies without detaching the terminal or replacing its
+  previous copy buffer.
+
+## v0.4.67 — 2026-11-06 — Stable source release
+
+- Attach clipboard PNGs to a local nested RUWAC agent through a private,
+  bounded frontend handoff, including persisted agents without desktop clipboard
+  access. Keep the running engine and agent alive, and never send Enter.
+- Revalidate the selected pane and foreground process before delivery; cancel
+  unfinished image handoffs on input, navigation or GUI focus loss. Retain
+  ordinary native Ctrl+V, older frontend behavior and SSH image transfer.
+
+## v0.4.66 — 2026-11-06 — Stable source release
+
+- Wake terminal views promptly after input using the engine's existing change
+  notifications. Bound extra render work to two wakeups per input batch, retaining
+  polling fallback for older engines and disconnected notification streams.
+- Preserve Unicode input, bracketed paste, selection, scrollback and persistent
+  terminal processes. Record measured latency and resource tradeoffs in the
+  typing-wakeup report.
+
+## v0.4.65 — 2026-11-06 — Stable source release
+
+- Keep scrolling terminal history when a drag starts on the live shell and is
+  held at the top or bottom edge. Preserve application mouse handling and the
+  existing terminal processes.
+- Require movement toward an edge before scrolling; horizontal first-row
+  selections stay on their original text.
+
+## v0.4.64 — 2026-11-06 — Stable source release
+
+- Fit desktop tabs to the available header width. Add **Two rows of tabs** and
+  **Compact tabs** under Controls, retaining the visible new-terminal + action,
+  full titles in tooltips, keyboard navigation, menus and tab transfer.
+- Keep the selected tab visible when a crowded row needs horizontal scrolling.
+  Tab layout changes preserve existing views, connections and terminal processes.
+- Document COPR installation and explicit DNF metadata refresh for CLI/GUI updates.
+
+## v0.4.63 — 2026-11-06 — Stable source release
+
+- Scroll GUI terminal history while holding a selection in the first or last
+  visible row. Keep selection scrolling beyond the pane and with the mouse wheel;
+  stop when the pointer returns to the middle or the button is released.
+
+## v0.4.62 — 2026-11-06 — Stable source release
+
+- Avoid sleeping past a due terminal-viewer frame while waiting for input. Keep
+  the existing active and quiet refresh budgets, input handling and scrollback.
+
+## v0.4.61 — 2026-11-05 — Stable source release
+
+- Add an always-visible + button after the tabs to open and focus a new terminal,
+  including when the toolbar actions are collapsed. It shares the existing
+  terminal-creation action and busy state.
+
+## v0.4.60 — 2026-11-05 — Stable source release
+
+- Make engine-coexistence acceptance choose the backend socket explicitly,
+  retaining lifecycle and namespace checks when the GUI API socket sorts first.
+
+- Recognize a validated LLVM byte-indexed branch-table encoding in the artifact
+  privacy scan. Keep real private strings, malformed tables and key material
+  rejected; avoid mistaking numeric branch offsets for a private hostname.
+
+- Clarify that qualified development patch releases continue independently of
+  broader stable milestones, using the existing controller and release gates.
+
+- Copy styled hyperlinks wrapped by terminal applications as one URL, removing
+  only their display margin. Apply this to pinned mouse selections as well as
+  live terminal cells; preserve ordinary text, code and genuine hard newlines.
+
+- Open remote localhost web services from an existing verified SSH terminal.
+  Keep load and certificate errors visible, offer explicit certificate-fingerprint
+  review for that preview, and refuse approval after its SSH identity or view
+  changes. Isolate HTTPS preview identities so certificate approval cannot carry
+  into a different preview.
+- Add RDP, Term, Codex and Claude choices to the Machines filter, including linked
+  endpoints. Keep All machines, Favorites, Recent and Alt+M behavior available.
+- Explain that COPR's `ruwac` source package supplies both CLI and GUI RPMs, with
+  desktop installation, DNF updates and per-user migration instructions.
+
+## v0.4.59 — 2026-11-05 — Stable source release
+
+- Bound retries of Linux ETXTBSY when spawning copied test executables in agent
+  attachment tests. Other launch errors still fail immediately; production
+  process launching is unchanged. Verify the retry with a real open writer and
+  enforce its deadline for a persistent busy error.
+
+- Report installed CLI and running daemon versions separately with `engine
+  status`, including discovery through an updated remote CLI. Show the local
+  engine version in the GUI terminal footer without querying it during rendering.
+  `engine gui` opens new work on an independent updated engine, preserving the
+  original window, terminals and history. `engine new` provides terminal-only
+  launch arguments with a separate durable checkpoint; no sessions are migrated.
+  Clear the engine checkpoint override from new PTY shells so independent nested
+  daemons cannot reuse its history file. Keep the socket for normal client routing.
+
+## v0.4.58 — 2026-11-04 — Stable source release
+
+- Reduce full terminal-frame traffic using an optional palette encoding shared
+  by the GUI and TUI. Older clients still receive plain cells, and newer clients
+  accept plain replies from preserved engines. Decode exact glyphs and styles
+  before selection/drawing, with cell and byte budgets checked before expansion.
+  Large views spanning independently zoomed canonical grids keep plain frames
+  when their combined cells exceed the palette expansion budget.
+
+- Add explicit-target tmux-style window/pane controls and Screen-style literal
+  input, split and buffer operations. Stable target identities and strict flags
+  prevent ambiguous input; literal text is never submitted automatically. The
+  command compatibility inventory records supported subsets and remaining gaps.
+- Add a comparative typing benchmark for generated PTY, SSH, Screen, tmux and
+  RUWAC paths. GUI measurements read terminal glyphs rather than JSON syntax,
+  and silent RPC/probe waits have deadlines. Physical display latency is excluded.
+
+- "Open remote web service…" in the context menu of a terminal opened through
+  a saved SSH machine previews a web app listening on that machine's localhost:
+  enter its port and an optional path (HTTPS optional). It uses that terminal's
+  own verified SSH connection and the same temporary local-loopback forward as
+  Ctrl+click on a `localhost` link, so no `ssh -L`, no new connection and no
+  other machine or network address is involved. It is not offered on local or
+  unverified terminals, and a path cannot point the preview at another host.
+
+## v0.4.57 — 2026-11-04 — Stable source release
+
+- Pasting an image into Claude Code now also works in sessions whose RUWAC
+  daemon is older than v0.4.54 (only Codex could receive images there).
+  Running daemons are kept, so after updating the packages, Ctrl+V into Claude
+  Code in an existing session works without restarting it: the updated client
+  checks on the daemon's machine that Claude Code is the selected foreground
+  program and ready, then pastes the image path, which Claude Code turns into
+  `[Image #N]`. Nothing is submitted.
+- Image paste into Claude Code no longer waits forever when Claude Code shows a
+  shortened footer, such as `⏵⏵ auto mode on · 1 shell` while background work
+  is listed: the permission-mode line now also counts as Claude Code being
+  ready for input.
+- Ordinary commits and pull-request merges on `main` no longer fail the
+  Source release workflow: it classifies each push and, without the
+  controller-assigned tag at that exact commit, ends successfully without
+  publishing (quality and privacy still run in Fedora source checks). Tagged
+  releases keep every publication check; a tag that does not match the package
+  version or the pushed commit is refused.
+
+## v0.4.56 — 2026-11-04 — Stable source release
+
+- Remote RUWAC updates from Fedora COPR no longer miss a new build or touch other
+  repositories: the update check and installation refresh DNF metadata (a stale
+  cache used to report "Nothing to do" for up to two days), and DNF uses only
+  RUWAC's COPR and Fedora's own repositories, so a third-party repository's
+  signing key is never accepted on your behalf by `dnf -y`.
+
+## v0.4.55 — 2026-11-03 — Stable source release
+
+- "Copy machine…" is now a button in the machine properties dialog's action
+  bar, beside Save, instead of inside the form. It saves the copy with new
+  machine and endpoint identities and opens that copy in the editor, so you can
+  adjust it right away.
+- Installing and updating RUWAC on remote Fedora machines ("Install / update
+  remote RUWAC CLI…" and agent launches with automatic RUWAC installation) now
+  uses the Fedora COPR packages (`zvegelj/ruwac`) through DNF. Machines without
+  the package enable COPR and install it, replacing a GitHub testing RPM of the
+  same version and retiring a per-user copy; `ruwac-desktop` moves along when
+  installed. Machines with the package upgrade only when DNF reports a newer
+  build, so routine launches ask for no password. Other systems, and Fedora
+  releases COPR does not build for, keep the verified per-user installation.
+
+## v0.4.54 — 2026-11-03 — Stable source release
+
+- Paste images into Claude Code the way you already can into Codex: with Claude
+  Code running in a local RUWAC terminal, Ctrl+V with an image in the clipboard
+  attaches it to the Claude Code draft (it appears as `[Image #N]`; nothing is
+  submitted). Claude Code is recognized as its native binary or its npm package,
+  and only once its input box is ready. Remote targets need RUWAC updated on that
+  machine too. "Attach PNG to remote agent…" now lists Claude Code panes as well.
+- Add from-source Fedora/COPR packaging in `ruwac/packaging/fedora`: a spec that
+  builds both packages from source with vendored crates, a script producing the
+  SRPM, a COPR "make srpm" entry point and AppStream metadata. Packages built
+  this way are updated only by DNF: `ruwac update` and the desktop update button
+  say so and never contact GitHub. The GitHub testing RPMs are unchanged.
+- Keep a single RUWAC installation once the DNF package is installed: the
+  per-user installer and updater no longer install, update or check a second
+  copy beside it, and `ruwac update` (from the package) retires a leftover
+  per-user copy by removing only its own command links, launcher and update
+  timer. Its files stay in `~/.local/lib/ruwac`, so a running daemon and its
+  sessions (including Codex/Claude Code) keep working and are reused by the
+  packaged client. Replacing a GitHub testing RPM also removes its stale update
+  timer link.
+
+## v0.4.53 — 2026-10-31 — Stable source release
+
+- Add explicit non-sizing terminal viewers with `attach --viewer` (`-O`), locally
+  and over SSH. Keep canonical PTY dimensions through viewer resize, navigation,
+  zoom and reattachment; clip larger grids to the local terminal and show cropping.
+  Refuse unsupported older daemons without a sizing fallback and prevent viewer
+  layout edits or automatic ended-pane cleanup from resizing shared work.
+- Update desktop crypto-bigint to 0.7.10 and ctutils to 0.4.7. The known RSA
+  RUSTSEC-2023-0071 advisory remains unresolved and unsuppressed.
+
+## v0.4.52 — 2026-10-30 — Stable source release
+
+- Keep a live terminal's green health indicator when an old operation warning
+  remains. Show that warning with a small amber marker; disconnected and starting
+  terminals retain their own states. Warning text stays available in the tooltip.
+- Retain RDP wheel deltas in the bounded, ordered input queue under congestion;
+  only pure pointer movement may be discarded. Preserve focus/transport
+  cancellation and report queue exhaustion instead of silently losing gestures.
+- Defer mouse-selection copying when canonical history is still loading. Bind
+  the copy to the original pane/request, validate its starting viewport, cancel
+  it on typing or focus changes, and report unavailable or timed-out history.
+  Refuse incomplete history prefixes with an explicit 8 MiB limit message.
+- Reject release notes that do not match the controller-allocated tag and its
+  changelog section before local acceptance and GitHub publication. Reconcile
+  the public acceptance ledger with completed v0.4.51 qualification.
+
+## v0.4.51 — 2026-10-29 — Stable source release
+
+- Update libz-sys to 1.1.31 to stop its compiler probe from logging the build
+  environment (RUSTSEC-2026-0418).
+- Avoid rebuilding and transmitting quiet terminal frames when output changes
+  only in hidden panes. Track each client's visible projection while retaining
+  explicit refresh and visible output, focus, resize, status and input-mode updates.
+  This daemon-side change takes effect when a new daemon starts; installed-file
+  updates continue to preserve existing daemons and their running programs.
+
+## v0.4.50 — 2026-10-28 — Stable source release
+
+- Extend terminal mouse selection through history with edge dragging and wheel
+  scrolling while retaining its anchor. The attached CLI's copy view supports
+  held-edge dragging too; its own history opens with Ctrl+A then [.
+- Keep a selection's starting-screen colours while output changes, and cancel
+  pending selection snapshots when typing or changing panes.
+- Reduce ordinary attached-client redraw traffic by repainting changed rows;
+  retain complete repainting after geometry and copy-mode changes. Coalesce
+  copy-view colour sequences, reuse bounded GUI glyph layouts, avoid cloning
+  screen grids for input mode checks, and wake the GUI when worker output arrives.
+- Show a verified Codex process behind generic Node launchers in window labels;
+  suppress runtime-version labels when no application can be verified. Limit
+  optional process probes to one per refresh and cache them by process identity
+  so background agent windows do not add a request burst to the input loop.
+
+## v0.4.49 — 2026-10-28 — Stable source release
+
+- Put Copy machine at the top of machine properties and offer existing categories alongside an editable category path. Up/Down changes the focused connection dropdown; Tab moves between fields.
+- Add host-only SSH machine creation to terminal context menus, New term's right-click menu and the Agents menu. Save an alias and connect without configuring RDP; unspecified SSH login, port and keys follow OpenSSH settings.
+- Restore safe scrollback against preserved older daemons without restarting their applications. Legacy unpinned history is checked for output/resize races; the v0.1.x text-only format is explicitly limited to the newest 500 rows.
+- Document terminal-only automatic updates in terminal help and the README (`ruwac update -a on|off|status`), including preservation of installed components and running sessions.
+
+## v0.4.48 — 2026-10-27 — Stable source release
+
+- Refresh About / Support with native grouped information, project links and an optional QR expander, matching the desktop preferences style.
+- Add a newcomer README guide covering first use, source builds, isolated development sessions, repository structure and contribution/feedback steps.
+
+## v0.4.47 — 2026-10-26 — Stable source release
+
+- Reduce terminal echo delay with a short faster refresh window after typing,
+  retaining the existing quiet and hidden-tab polling intervals.
+
+- Preserve Shift, Alt and Control on terminal navigation keys. Shift+Left now
+  reaches applications as its own chord, including through nested terminal
+  multiplexers, instead of becoming plain Left.
+
+- Recognize validated byte-indexed relative branch addresses during artifact
+  privacy scanning. Keep literals, keys, invalid targets and independently
+  referenced neighboring data subject to the ordinary checks.
+
+- Keep a clean Right Alt tap local to the current RUWAC window, preventing a
+  nested remote GUI from toggling Map keys at the same time. Forward AltGr key
+  and pointer chords with balanced releases, and cancel pending taps on focus
+  changes in both main and detached windows.
+
+## v0.4.46 — 2026-10-26 — Stable source release
+
+- Preserve screenshot Ctrl+V through a local nested RUWAC terminal session.
+  The GUI forwards the native paste key to the nested application instead of
+  rejecting its RUWAC foreground as though Codex were running directly in the tab.
+  Direct PNG attachments keep their process and focus checks; no draft is submitted.
+
+## v0.4.45 — 2026-10-26 — Stable source release
+
+- Pass Ctrl+Shift+T and Ctrl+Shift+R to the focused application while Map keys is enabled, including applications inside RDP desktops.
+- Route PNG-only clipboard paste in local Codex terminal panes through the guarded draft attachment path in both terminal shortcut modes. Preserve focus, target and image validation checks, including compatibility with older persistent engines; never submit the draft automatically.
+
+## v0.4.44 — 2026-10-25 — Stable source release
+
+- Let recognized GDM user-list clicks pass through the automatic sign-in path;
+  manual input remains paused and stale/cancelled clicks are rejected.
+- Ignore credential lookup callbacks from superseded sign-in attempts so they
+  cannot cancel a newer reconnect or overwrite an explicit cancellation.
+- Prevent failed GNOME handovers from silently starting another service login.
+  Cancel transport retries when automatic sign-in stops, and wait for the prior
+  RDP worker to close before an explicit reconnect. Redirect setup uses a short
+  deadline. Desktops that already rendered a frame retain ordinary network
+  recovery; existing remote desktop processes are preserved.
+
+- Reserve Machines search for Alt+M; deliver Ctrl+K to terminal applications such
+  as nano instead of opening the sidebar. Update shortcut labels and help.
+- Preserve matching live-screen colours and text attributes when entering terminal
+  copy/selection mode. Repaint selection without clearing the whole screen, and
+  retain the continuous light-blue status background while selecting.
+- Remove grey seams between GUI terminal cell backgrounds at fractional font
+  widths and display scales without changing text antialiasing.
+- Report bounded, allowlisted diagnostics when GitHub refuses contribution labels,
+  including the request ID and accepted-permission fields when available. Preserve
+  the original HTTP failure, trusted-base execution and existing token permissions;
+  never print arbitrary response bodies or authorization headers.
+- Reconcile the acceptance ledger with delivered v0.4.43 evidence while retaining
+  physical, external-host, endurance and security qualification limits.
+
+## v0.4.43 — 2026-10-25 — Stable source release
+
+- Add optional GNOME Shell 50 native mouse-selection delivery with desktop
+  permission and explicit approval for each connection. Include managed companion
+  installation, status, preferences and removal in the GUI and `-G` CLI.
+- Preserve newer local and remote selections across delayed replies and helper
+  restarts. Confirm remote ownership before dispatching paste input; keep the
+  Ctrl+C/V clipboard independent and require fresh approval after recovery.
+- Bound selection-helper startup, metadata and X11 read failures. Selection-only
+  retry recovers temporary failures without reconnecting the RDP desktop.
+- Include companion setup instructions, license and notice, with a reproducible
+  standalone archive check. Support long Unicode connection names within the
+  remote approval label's UTF-8 byte limit.
+
+## v0.4.42 — 2026-10-25 — Stable source release
+
+- Give new local CLI, TUI and GUI terminals their creating frontend's display and
+  clipboard environment, including when an older daemon remains running. Remove
+  stale values absent from the frontend; preserve existing processes and keep
+  remote launches independent of the local desktop.
+
+## v0.4.41 — 2026-10-24 — Stable source release
+
+- Update crypto-bigint to 0.7.6 for RUSTSEC-2026-0387 and its compatible ctutils
+  dependency to 0.4.5. The existing RSA advisory remains unresolved.
+- Preserve the first new remote mouse selection after returning to an RDP tab.
+  Correlate its epoch with actual X11 ownership notifications, so it can replace
+  an older terminal/tab selection while initial GDK notifications, background
+  snapshots and late replies stay guarded.
+
+## v0.4.40 — 2026-10-23 — Stable source release
+
+- Forward wheel events to full-screen mouse applications such as Codex even when
+  Wayland supplies no event position; use widget-local pointer coordinates in tabs
+  and splits.
+
+- Add command-scoped short forms for CLI, desktop and installed updater options,
+  including `ruwac update -i -p -H`; preserve literal option values and existing
+  Screen-style commands.
+- Add desktop/traditional terminal shortcut preferences, selection-aware Ctrl+C,
+  protected text/image Ctrl+V, optional terminal copy-on-select to CLIPBOARD,
+  inline canonical mouse-wheel history with wrapped-command/Unicode reflow and
+  bounded, generation-checked history request/handler lifetimes.
+- Serialize CLIPRDR offers and acknowledgments, bind asynchronous data delivery
+  to its exact pending request/transport, balance intercepted paste keys and
+  bound input queues before insertion with stale-input cancellation.
+- Retain simultaneous remote image/text formats with lazy format reads and
+  preserve clipboard ownership while keyboard focus moves within the toolbar.
+  Other applications can read both formats from an existing owned offer after
+  focus moves away, without allowing a new background clipboard promotion.
+- Present linked SSH login settings separately from shared machine agent options;
+  save agent settings consistently across the machine's connection profiles.
+- Add explicit GNOME login recovery choices: retry saved sign-in, reconnect the
+  saved profile, or cancel automation and use manual login.
+- Add native ephemeral Web Preview tabs/splits, conservative terminal URL actions,
+  original-master-only SSH loopback forwarding and disconnected workspace restore.
+  Close page networking on SSH identity loss, block stale-forward navigation,
+  and refuse browser-session reuse for changed connection identities. Browser
+  downloads/uploads remain disabled; the headless engine needs no WebKit.
+- Patch rustls-webpki, ctutils and Tokio; keep the unresolved RSA advisory visible and
+  refresh the acceptance delta. Distribution requires all nineteen frozen gates;
+  physical/external-host qualification remains separate.
+
+## v0.4.39 — 2026-10-23 — Stable source release
+
+- Check the selected remote RUWAC CLI version on every agent connection, including
+  reattachment. Automatic RUWAC installation now checks verified releases even when
+  RUWAC already exists, updates the per-user installation, and preserves running
+  engines and sessions. Report an older selected CLI and its executable path; an
+  unavailable updater allows attachment with an existing valid CLI.
+- Keep the actual tab popup menu current when switching between terminal and
+  RDP tabs. Expose automatic sign-in retry there, including after a stopped
+  attempt reaches a later verified GNOME greeter.
+- Preserve a tab’s explicit “Trust once” certificate approval when refreshing
+  options for the same verified endpoint.
+- Load saved selection and sign-in options when reconnecting an unchanged
+  endpoint. Preserve manually edited fields, and require reopening a saved
+  machine if its host, user, credential reference or certificate trust changed.
+- Keep native selection paste working within its source RDP desktop without
+  requiring the cross-desktop receiver. On connections with mouse-selection
+  sharing enabled, refuse outside selections when selection paste is disabled
+  instead of forwarding a click that pastes unrelated remote text.
+- Recheck a small, low-confidence GDM “Not listed?” button in a local crop while
+  retaining the original confidence, field and ordered-password guards.
+
+## v0.4.38 — 2026-10-22 — Stable source release
+
+- Keep deliberate terminal and RDP mouse selections pasteable between tabs. Middle-click pastes an application-owned selection directly into terminal tabs, including nested RUWAC sessions on preserved older engines that cannot exchange desktop selections through OSC 52. Ctrl+C/V stays separate, and other applications retain normal mouse routing when the selection comes from outside RUWAC.
+- Count connection setup as part of RDP's one-minute foreground recovery budget, then keep retrying the saved connection quietly with short setup limits. Reconnect remains available immediately while recovery or automatic sign-in is pending; failed authentication and certificate checks still stop retries.
+- Restart enabled GNOME automatic sign-in after a completed desktop later reconnects through a new authenticated service handover. Network recovery no longer consumes the login-recognition time limit, and stable connections renew the per-outage handover limit instead of exhausting it over a tab's lifetime. Explicit cancellation, current-profile checks and recognized-field/password guards remain enforced.
+
+## v0.4.37 — 2026-10-22 — Stable source release
+
+- GNOME automatic sign-in now completes in every tab, not just the selected one. With several machines connecting at once, unselected tabs used to wait for focus until their 90-second limit expired and then showed GDM; they now sign in on their own, because credentials go only over that tab's own verified connection and your input to it stays paused until sign-in finishes. Switching tabs or focus no longer cancels it. If the connection drops and reconnects before the password is submitted, sign-in starts over on the new login screen instead of stopping. The manual "GNOME sign-in" dialog still requires the selected, focused tab.
+- RDP tabs recover from more kinds of network failure instead of staying disconnected: a connection that times out (setup limit now 30 seconds), is reset during security negotiation, or closes during session setup is retried with the usual backoff. A GNOME login handover that cannot be completed in time is restarted from the beginning instead of being abandoned. Authentication, certificate and server-initiated disconnects are still not retried.
+
+## v0.4.36 — 2026-10-22 — Stable source release
+
+- Updating RUWAC on a remote machine ("Install / update remote RUWAC CLI…" and agent launches that install RUWAC) now works where the RUWAC desktop is also installed for that user: the command-line update brings the existing desktop along instead of refusing with "Retain the desktop installation with --desktop". A refused installation no longer leaves a partial version folder behind that blocked the next attempt with "Existing immutable installation differs".
+
+## v0.4.35 — 2026-10-22 — Stable source release
+
+- RDP connections no longer drop when the link is briefly slow. A full input queue used to close the whole connection with "CLIPRDR queue full; transfer not sent"; now pointer motion is skipped while the queue is busy and other commands wait in order, and only a connection that accepts nothing for 30 seconds is closed. Reconnection after network loss retries for about a minute and a half with growing backoff (previously three tries in about 3.5 seconds, once per tab lifetime); the budget renews after a connection has been up for 30 seconds, and GNOME login handovers no longer use it. RDP sockets use TCP keepalive, and write, reactivation and clipboard response time limits are longer.
+- GNOME automatic sign-in no longer stalls silently. Clicking the "Signing in to GNOME…" cover gives it focus (clicks there used to be ignored entirely, so a sign-in opened from the sidebar waited until it timed out), and a selected tab takes focus itself before any input is sent. The cover says what it is waiting for; why sign-in stopped, or which setting is missing (automatic sign-in off, no Linux username, no saved Linux password), is shown on the remote screen; and "Retry automatic sign-in" restarts it on the same login screen. GDM's "Not listed?" username page and greeters without a user list are recognized without the Fedora logo (only the login name is typed there; passwords still need the recognized sequence), and large HiDPI framebuffers are analysed in a full-resolution centred crop instead of being refused.
+- Mouse selection in a nested `ruwac` session (inside a RUWAC terminal tab, including over SSH) now reaches the desktop selection, and middle-click or three-finger tap pastes the desktop selection there; RUWAC's session buffer remains the fallback for terminals without OSC 52. The nested client uses OSC 52 PRIMARY; the RUWAC desktop accepts an offer only right after your own mouse release in that pane and answers a read only right after your own middle-click, so programs cannot silently read or replace your selection.
+
+## v0.4.34 — 2026-10-21 — Stable source release
+
+- Remote RUWAC installation (Install / update remote RUWAC CLI…, and agent launches with automatic RUWAC installation) installs its own dependencies first: missing `python3` or GitHub CLI (`gh`, which verifies the signed prebuilt package) come from the system's signed repositories via `sudo dnf install`, which may ask for the password in the SSH terminal. The verified prebuilt per-user installation then runs unchanged. If dependencies cannot be installed, nothing is installed.
+
+- Windows RDP no longer drops with "RDP decode failed … Progressive: SRL stream → SRL: missing terminator": Progressive (RemoteFX) upgrade passes accept SRL streams without the trailing zero byte, and empty streams, as Windows sends them; bits past the end read as zero, matching FreeRDP. Previously the whole connection failed and later input was refused.
+
+## v0.4.33 — 2026-10-21 — Stable source release
+
+- GNOME automatic sign-in works on login screens without the Fedora logo: GDM's own user list ("Not listed?" exactly once and no focused input field of any kind) now identifies the login screen and leads only to the "Not listed?" click; the username and password fields are then accepted within that same sign-in. Screens with the logo work as before; nothing is typed into an unrecognized screen.
+
+- Password boxes in the machine editor show whether a password (RDP, GNOME, SSH key passphrase) is already saved in Secret Service, and update after Set or Forget, so nothing has to be re-entered to find out.
+
+- SSH login choice per endpoint: saved key / agent / `~/.ssh`, saved password, or "Install my SSH key on this machine now…", which starts the confirmed `ssh-copy-id` action for the endpoint's saved, explicitly chosen key (choose one under Detected keys first). The login method itself stays unchanged, so cancelling changes nothing.
+
+- Mouse-wheel scrollback in `ruwac -r`/`-S` sessions works in wide terminals (over 200 columns, up to the engine's 1024) and long-lived sessions: it opens the newest 50,000 lines / 8 MiB instead of silently refusing; failures are shown in the status bar.
+
+- Vivid terminal colours (Controls, on by default) render the 16 standard colours with GNOME Terminal's palette, so programs such as btm look as they do elsewhere; switch it off for the scheme's softer colours.
+
 ## v0.4.32 — 2026-10-20 — Stable source release
 
 - Replace startup/periodic SSH discovery with explicit public-key checks. Require selection, separate confirmation and fresh source/key/trust inputs before adding endpoints; preserve existing credentials and manual identities. Bound output, cancellation, jump helpers and batch lifetime.

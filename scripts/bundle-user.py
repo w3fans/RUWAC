@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Assemble a tested Fedora candidate from built artifacts; never assigns versions."""
 import argparse
+from bisect import bisect_right
 import gzip
 import hashlib
 import json
@@ -252,13 +253,28 @@ def unwind_index_data(content, address, frame_address, frames, executable):
 def indexed_branch_slots(data, records):
     """Recognize a bounded x86_64 relative branch table emitted by LLVM.
 
-    This deliberately handles only one fully checked instruction form. Unknown
-    forms remain ordinary scanned data. The index is checked as index-1 < count;
-    every slot, including the unused zero slot, must target executable bytes.
-    No text/section-name allowlist or private matching value is involved.
+    The first form checks index-1 < count, including its unused zero slot.
+    The second has a byte index, independent-reference boundaries and a short
+    negative target prefix whose high byte cannot be UTF-8 text. Unrecognized
+    words retain the ordinary scan. Neither form uses a text/section-name
+    allowlist or a matching private value.
     """
     executable = [(s[3], s[3] + s[5]) for s in records if s[2] & 4]
     slots = set()
+    # An independently referenced object starts a new conservative boundary,
+    # even when its instruction form is unknown. Do not let recognition of one
+    # table classify a neighboring table whose own dispatch was not validated.
+    references = set()
+    rip_lea = re.compile(rb'[\x48-\x4f]\x8d[\x05\x0d\x15\x1d\x25\x2d\x35\x3d](.{4})', re.S)
+    for section in records:
+        if not section[2] & 4:
+            continue
+        start, size = section[4:6]
+        if start + size > len(data):
+            raise ValueError('Executable section exceeds artifact bounds')
+        for match in rip_lea.finditer(data[start:start + size]):
+            references.add(section[3] + match.start() + 7 + struct.unpack('<i', match[1])[0])
+    ordered_references = sorted(references)
     # lea -1(%rcx),%rax; cmp $count,%rax; jae fallback;
     # lea table(%rip),%rax; movslq (%rax,%rcx,4),%rcx;
     # add %rax,%rcx; jmp *%rcx
@@ -291,6 +307,106 @@ def indexed_branch_slots(data, records):
                        for i in range(count + 1)]
             if all(any(a <= target < b for a, b in executable) for target in targets):
                 slots.update(range(table, table + length, 4))
+                # LLVM can retain one duplicate fallback word after this table.
+                # Classify it only when the proven guard's exact target matches
+                # and the next independent object bounds this single word.
+                end = table + length
+                next_index = bisect_right(ordered_references, table)
+                if (table % 4 == 0 and next_index < len(ordered_references)
+                        and ordered_references[next_index] == end + 4
+                        and end + 4 <= source[3] + source[5]
+                        and offset + length + 4 <= len(data)
+                        and table + struct.unpack_from('<i', data, offset + length)[0] == fallback):
+                    slots.add(end)
+    # A second LLVM range dispatch computes RCX = RDX - 2, rejects RCX >
+    # an unsigned imm8 bound, then uses RDI as the relative table base.
+    # Unsigned subtraction also rejects inputs below two. Match the complete
+    # guard and dispatch: a different condition/register is not interchangeable.
+    ranged = re.compile(rb'\x48\x8d\x4a\xfe\x48\x83\xf9(.)\x0f\x87(.{4})'
+                        rb'\x48\x8d\x3d(.{4})\x48\x63\x0c\x8f\x48\x01\xf9\xff\xe1', re.S)
+    for section in records:
+        if not section[2] & 4:
+            continue
+        start, size = section[4:6]
+        for match in ranged.finditer(data[start:start + size]):
+            bound = match[1][0]
+            if not 1 <= bound <= 127:
+                continue
+            pc = section[3] + match.start()
+            fallback = pc + 14 + struct.unpack('<i', match[2])[0]
+            table = pc + 21 + struct.unpack('<i', match[3])[0]
+            length = (bound + 1) * 4  # JA permits the upper bound itself.
+            candidates = [s for s in records if s[1] == 1 and s[2] & 2
+                          and not s[2] & 5 and s[3] <= table
+                          and table + length <= s[3] + s[5]]
+            next_index = bisect_right(ordered_references, table)
+            if (table % 4 or len(candidates) != 1
+                    or not any(a <= fallback < b for a, b in executable)
+                    or (next_index < len(ordered_references)
+                        and ordered_references[next_index] < table + length)):
+                continue
+            source = candidates[0]
+            offset = source[4] + table - source[3]
+            if offset + length > len(data):
+                raise ValueError('Range branch table exceeds artifact bounds')
+            targets = [table + struct.unpack_from('<i', data, offset + i * 4)[0]
+                       for i in range(bound + 1)]
+            if all(any(a <= target < b for a, b in executable) for target in targets):
+                slots.update(range(table, table + length, 4))
+    # LLVM also emits byte-discriminant tables without an explicit comparison.
+    # movzbl bounds the index to 0..255. Accept the observed RSI+disp8 and
+    # RBX+disp32 loads into EAX; calculate RIP from the displacement end, not
+    # an assumed instruction length. Recognize only this exact load/relative
+    # dispatch form (with one optional stack spill that preserves RAX/RCX).
+    # Classify only the contiguous prefix of negative offsets that actually
+    # target executable bytes; text, positive words, unknown instructions and
+    # the first invalid target remain scanned. No matching policy value, text
+    # hash, symbol/section name or externally supplied exception is consulted.
+    # Also the RDI-indirect byte load with an explicit index bound
+    # (cmp $imm8,%rax; ja rel8/rel32) before the same dispatch; the bound then
+    # caps the slots at imm8+1.
+    byte_dispatch = re.compile(
+        rb'(?:\x0f\xb6\x46.|\x0f\xb6\x83.{4}|\x0f\xb6\x07)'
+        rb'(?:\x48\x83\xf8(.)(?:\x77.|\x0f\x87.{4}))?\x48\x8d\x0d(.{4})'
+        rb'\x48\x63\x04\x81\x48\x01\xc8'
+        rb'(?:\x48\x89\x74\x24.)?\xff\xe0', re.S)
+    for section in records:
+        if not section[2] & 4:
+            continue
+        start, size = section[4:6]
+        if start + size > len(data):
+            raise ValueError('Executable section exceeds artifact bounds')
+        for match in byte_dispatch.finditer(data[start:start + size]):
+            table = section[3] + match.start(2) + 4 + struct.unpack('<i', match[2])[0]
+            candidates = [s for s in records if s[1] == 1 and s[2] & 2
+                          and not s[2] & 5 and s[3] <= table < s[3] + s[5]]
+            if table % 4 or len(candidates) != 1:
+                continue
+            source = candidates[0]
+            offset = source[4] + table - source[3]
+            boundary_index = bisect_right(ordered_references, table)
+            boundary = source[3] + source[5]
+            if boundary_index < len(ordered_references):
+                boundary = min(boundary, ordered_references[boundary_index])
+            count = min(256, (boundary - table) // 4)
+            if match[1] is not None:
+                if match[1][0] > 127:  # cmp imm8 is sign extended: not an index bound.
+                    continue
+                count = min(count, match[1][0] + 1)
+            if offset + count * 4 > len(data):
+                raise ValueError('Byte-indexed branch table exceeds artifact bounds')
+            numeric = []
+            for i in range(count):
+                relative = struct.unpack_from('<i', data, offset + i * 4)[0]
+                target = table + relative
+                # FE/FF cannot occur in valid UTF-8. Longer negative offsets
+                # remain scanned rather than consuming potentially readable text.
+                if (data[offset + i * 4 + 3] not in {0xfe, 0xff} or relative >= 0
+                        or not any(a <= target < b for a, b in executable)):
+                    break
+                numeric.append(table + i * 4)
+            if len(numeric) >= 2:
+                slots.update(numeric)
     return slots
 
 
@@ -525,7 +641,7 @@ def assemble(root, output, require_private=False):
         (destination / 'README.txt').write_text('''RUWAC Fedora 44 x86_64 testing candidate
 
 Install runtime prerequisites:
-  sudo dnf install gh gtk4 libadwaita openssl-libs libssh2 sqlite-libs python3 python3-pillow tesseract tesseract-langpack-eng
+  sudo dnf install gh gtk4 libadwaita webkitgtk6.0 openssl-libs libssh2 sqlite-libs python3 python3-pillow tesseract tesseract-langpack-eng
 Inside this extracted directory:
   python3 install-user.py --build-root . --desktop
   "$HOME/.local/bin/ruwac-desktop"

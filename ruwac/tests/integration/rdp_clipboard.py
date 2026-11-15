@@ -39,6 +39,20 @@ def focus(who):
    focus_keys();time.sleep(.06);return
   focus_keys(True);time.sleep(.3)
  raise AssertionError('Isolated compositor focus failed')
+def native_tab_action(tab,choice):
+ header=command('gui','chrome')['tab_layout']['tabs'][tab];x,y=header['origin']
+ mutter_input('NotifyPointerMotionRelative',GLib.Variant('(dd)',(-10000.,-10000.)))
+ mutter_input('NotifyPointerMotionRelative',GLib.Variant('(dd)',(x+header['width']/2,y+header['height']/2)))
+ for down in [True,False]:mutter_input('NotifyPointerButton',GLib.Variant('(ib)',(273,down)))
+ time.sleep(.2)
+ menu=command('gui','chrome')['tab_layout']['menu_items']
+ label={'reconnect':'Reconnect','disconnect':'Disconnect','close':'Close tab'}[choice]
+ item=next(i for i in menu if i['label']==label);assert item['sensitive'],item
+ x,y=item['origin'];(root/('native-menu-'+choice+'.json')).write_text(json.dumps(menu,indent=2))
+ mutter_input('NotifyPointerMotionRelative',GLib.Variant('(dd)',(-10000.,-10000.)))
+ mutter_input('NotifyPointerMotionRelative',GLib.Variant('(dd)',(x+item['width']/2,y+item['height']/2)))
+ for down in [True,False]:mutter_input('NotifyPointerButton',GLib.Variant('(ib)',(272,down)))
+ time.sleep(.2)
 def case(name,fn):
  if a.case and name not in a.case and name!='RDP-NATIVE-AUTH-3':return
  if a.mixed_only and name not in {'RDP-NATIVE-AUTH-3','MIXED-NATIVE-RDP-TERMINAL','FILES-CLIPBOARD-OWNERSHIP','GUI-IPC-BACKGROUND-RDP-OWNERSHIP'}:return
@@ -334,6 +348,88 @@ try:
   return {'first_response_delay_ms':800,'newest_copy_received':True,'explicit_receive_actions':0}
  case('RDP-NATIVE-SUPERSEDED-CLIPBOARD-READ',newer_offer_during_read)
 
+ def clipboard_timeout_preserves_desktop():
+  extra=root/'clipboard-timeout-peer';extra.mkdir(mode=0o700)
+  for name in ['cert.pem','key.pem']:(extra/name).write_bytes((root/name).read_bytes());(extra/name).chmod(0o600)
+  endpoint=start([a.server,str(extra)],'clipboard-timeout-peer')
+  spike.eventually(lambda:(extra/'server-ready.json').exists(),10)
+  port=json.loads((extra/'server-ready.json').read_text())['ports'][0]
+  reference='generated-timeout-'+root.name
+  subprocess.run(['secret-tool','store','--label=RUWAC generated timeout test','application','RUWAC','profile',reference],input=b'generated-local-only',env=env,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
+  command('gui','profile-editor',operation='new',response='keep',fields={'0':'Generated timeout peer','3':'127.0.0.1:'+str(port),'4':'fixture','9':reference,'10':str(root/'cert.pem'),'13':0})
+  spike.eventually(lambda:any(d['width']>0 and d['height']>0 for d in command('gui','profile-editor',operation='layout')['dialogs']),10)
+  saved=command('gui','profile-editor',operation='inspect',response='connect');assert not saved['error'],saved
+  spike.eventually(lambda:r if (r:=command('gui','rdp-inspect',rdp=3))['status'].startswith('Connected')and r['size']==[320,180]else False,20)
+  seq=0
+  def remote_command(**kw):
+   nonlocal seq
+   seq+=1;tmp=extra/'command.tmp';tmp.write_text(json.dumps({'seq':seq,**kw}));tmp.replace(extra/'server-0-request.json')
+   def response():
+    try:r=json.loads((extra/'server-0-response.json').read_text());return r['result']if r['seq']==seq else None
+    except(OSError,ValueError):return None
+   return spike.eventually(response,8)
+  try:
+   focus('gui');command('gui','rdp-switch',rdp=3);command('gui','rdp-policy',rdp=3,policy=0)
+   # A responsive display/input transport whose CLIPRDR data reply is delayed.
+   # Responses have no request ID, so a timed-out channel must remain disabled
+   # even after that late response and a different offer arrive.
+   sentinel=b'LOCAL-CLIPBOARD-MUST-SURVIVE-TIMEOUT'
+   (root/'timeout-local.txt').write_bytes(sentinel)
+   (root/'timeout-late.txt').write_bytes(b'LATE-REMOTE-CLIPBOARD-MUST-NOT-APPEAR')
+   for name in ['timeout-local.txt','timeout-late.txt']:(extra/name).write_bytes((root/name).read_bytes())
+   focus('peer');command('peer','set-text',file='timeout-local.txt');focus('gui')
+   before=command('gui','rdp-inspect',rdp=3)
+   pending=extra/'server-0-pending.json'
+   requests=json.loads(pending.read_text())['requests']if pending.exists()else 0
+   remote_command(format='text',file='timeout-late.txt',delay_ms=18000)
+   spike.eventually(lambda:pending.exists()and json.loads(pending.read_text())['requests']>requests,8)
+   started=time.monotonic();trace=[]
+   while time.monotonic()-started<61:
+    time.sleep(.5);now=command('gui','rdp-inspect',rdp=3);trace.append(now)
+    (root/'clipboard-timeout-trace.json').write_text(json.dumps(trace,indent=2))
+    assert now['transport_id']==before['transport_id']and now['size']==before['size'],now
+    assert not now['reconnect_visible'],now
+    if time.monotonic()-started>12:
+     assert now.get('clipboard_suspended')is True,now
+   # A changed framebuffer and native keyboard input must still cross the
+   # same authenticated transport after a full minute of clipboard suspension.
+   command('gui','rdp-display',rdp=3,mode='fit',width=640,height=480)
+   updated=spike.eventually(lambda:r if (r:=command('gui','rdp-inspect',rdp=3))['size']==[640,480]and r['metrics']['decoded_updates']>before['metrics']['decoded_updates']else False,15)
+   assert updated['transport_id']==before['transport_id']and updated['clipboard_suspended'],updated
+   assert mutter_input is not None,'Native keyboard acceptance requires owned Mutter input'
+   from gi.repository import GLib
+   keys=extra/f"input-{port}.keys.json"
+   key_count=len(json.loads(keys.read_text())['events'])if keys.exists()else 0
+   mutter_input('NotifyKeyboardKeycode',GLib.Variant('(ub)',(30,True)))
+   mutter_input('NotifyKeyboardKeycode',GLib.Variant('(ub)',(30,False)))
+   spike.eventually(lambda:keys.exists()and len(json.loads(keys.read_text())['events'])>=key_count+2,8)
+   assert any(x['code']==30 and x['down']for x in json.loads(keys.read_text())['events'][key_count:])
+
+   assert not now['pending'],now
+   focus('peer');assert command('peer','read-text')['sha256']==digest(sentinel)
+   focus('gui');remote_command(format='text',file='timeout-late.txt')
+   time.sleep(.5)
+   assert json.loads(pending.read_text())['requests']==requests+1
+   focus('peer');assert command('peer','read-text')['sha256']==digest(sentinel)
+   # Explicit reconnect creates a fresh channel and permits clipboard again.
+   focus('gui');tab=command('gui','rdp-inspect',rdp=3)['tab'];command('gui','rdp-tab-menu',tab=tab,control='reconnect')
+   fresh=spike.eventually(lambda:r if (r:=command('gui','rdp-inspect',rdp=3))['transport_id']!=before['transport_id']and min(r['size'])>0 and r['status'].startswith('Connected')else False,20)
+   assert not fresh['clipboard_suspended'],fresh
+   focus('peer');command('peer','set-text',file='timeout-local.txt');focus('gui')
+   before_received=json.loads((extra/'server-0-receipt.json').read_text()).get('received',0)
+   command('gui','rdp-send',rdp=3)
+   def delivered():
+    data=json.loads((extra/'server-0-receipt.json').read_text())
+    return data if data.get('received',0)>before_received and data.get('sha256')==digest(sentinel)else None
+   spike.eventually(delivered,12)
+   return {'healthy_transport_preserved_seconds':61,'late_reply_delay_ms':18000,'late_reply_and_new_offer_ignored':True,'local_clipboard_preserved':True,'explicit_reconnect_restores_clipboard':True,'native_keyboard_and_changed_frame_after_minute':True,'scope':'Generated authenticated loopback peer; not physical GNOME greeter acceptance'}
+  finally:
+   command('gui','close-rdp',rdp=3)
+   subprocess.run(['secret-tool','clear','application','RUWAC','profile',reference],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
+   endpoint.terminate();endpoint.wait(timeout=5)
+ case('RDP-NATIVE-CLIPBOARD-TIMEOUT',clipboard_timeout_preserves_desktop)
+
+
 
  def reconnect():
   # This case can run independently of the policy case that uses the same file.
@@ -468,6 +564,8 @@ try:
   command('gui','profiles',search='R5 renamed');r=command('gui','profile-editor',operation='edit',response='endpoint',fields={'13':0,'3':'127.0.0.1:3389'});siblings=[p for p in r['items'] if p['machine_id']==original['machine_id']];assert len(siblings)==2 and len({p['id'] for p in siblings})==2
   before=len(r['items']);r=command('gui','profile-editor',operation='new',response='cancel',fields={'0':'Cancelled','3':'localhost:22'});assert len(r['items'])==before
   r=command('gui','profile-editor',operation='edit',response='duplicate');assert len(r['items'])==before+2
+  # Copy machine then opens the copy in the editor; close it like a user would.
+  time.sleep(.3);command('gui','profile-editor',operation='apply',response='cancel')
   r=command('gui','profile-editor',operation='edit',response='delete-machine',confirm=True);assert len(r['items'])==before
   stored=root/'config/RUWAC/machines.json';on_disk=json.loads(stored.read_text());assert on_disk['schema']==1 and len(on_disk['items'])==before
   assert (stored.parent/'machines.previous.json').stat().st_mode&0o777==0o600
@@ -504,6 +602,39 @@ try:
   after=command('gui','inspect');assert before['tabs']==after['tabs']
   return {'native_dialog':True,'explicit_agents':opened['agents'],'cancel_creates_no_session':True,'SSH_profiles':opened['SSH_profiles'],'external_agent_launch':'not performed in this UI fixture'}
  case('MACHINES-REMOTE-AGENT-LAUNCHER',agent_launcher)
+ def automatic_gdm_pointer():
+  extra=root/'gdm-pointer-server';extra.mkdir(mode=0o700)
+  for name in ['cert.pem','key.pem']:(extra/name).write_bytes((root/name).read_bytes());(extra/name).chmod(0o600)
+  start([a.server,str(extra)],'gdm-pointer-server');spike.eventually(lambda:(extra/'server-ready.json').exists(),10)
+  port=json.loads((extra/'server-ready.json').read_text())['ports'][0];ref='generated-gdm-pointer-'+root.name
+  subprocess.run(['secret-tool','store','--label=RUWAC disposable GDM pointer fixture','application','RUWAC','profile',ref],input=b'generated-local-only',env=env,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
+  try:
+   command('gui','profile-editor',operation='new',response='keep',fields={'0':'Generated GDM pointer','3':'127.0.0.1:'+str(port),'4':'fixture','9':ref,'10':str(root/'cert.pem'),'13':0},named={'rdp-connection-mode':1,'gnome-username':'generated-linux-user','gnome-auto-login':True})
+   spike.eventually(lambda:any(d['fields'] and d['width']>0 for d in command('gui','profile-editor',operation='layout')['dialogs']),10)
+   command('gui','profile-editor',operation='inspect',response='connect')
+   frame=spike.eventually(lambda:r if (r:=command('gui','rdp-inspect',rdp=3)).get('size')==[320,180] and r['gnome_auto']['armed'] else False,20)
+   epoch=frame['gnome_auto']['input_epoch'];mouse_path=extra/f'input-{port}.mouse.json'
+   def mouse():
+    try:return json.loads(mouse_path.read_text())['events']
+    except (FileNotFoundError,ValueError):return []
+   before=len(mouse());denied=command('gui','rdp-assist',rdp=3,operation='automatic-pointer',stale=True)
+   assert not denied['queued'] and denied['epoch_unchanged'],denied
+   stale_lookup=command('gui','rdp-assist',rdp=3,operation='stale-lookup-target')
+   assert not stale_lookup['accepted'] and stale_lookup['armed'] and stale_lookup['epoch_unchanged'],stale_lookup
+   command('gui','rdp-pointer',rdp=3,x=100,y=90,button=1)
+   command('gui','rdp-pointer',rdp=3,x=100,y=90,button=1,release=True)
+   time.sleep(.15);assert len(mouse())==before,'manual click bypassed automatic input shield'
+   queued=command('gui','rdp-assist',rdp=3,operation='automatic-pointer')
+   assert queued['queued'] and queued['epoch_unchanged'],queued
+   actual=spike.eventually(lambda:m[before:] if 'LeftPressed' in (m:=mouse())[before:] and m[-1]=='LeftReleased' else False,8)
+   assert command('gui','rdp-inspect',rdp=3)['gnome_auto']['input_epoch']==epoch
+   command('gui','rdp-assist',rdp=3,operation='cancel-automatic')
+   assert not command('gui','rdp-assist',rdp=3,operation='automatic-pointer')['queued']
+   return {'authenticated_peer_mouse_events':actual,'stale_credential_callback_preserves_new_attempt':True,'manual_shield_preserved':True,'stale_and_cancelled_clicks_rejected':True,'epoch_preserved':True,'scope':'Real GTK frontend and loopback RDP input; no owner login or credentials'}
+  finally:
+   command('gui','close-rdp',rdp=3)
+   subprocess.run(['secret-tool','clear','application','RUWAC','profile',ref],env=env,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
+ case('RDP-NATIVE-GDM-AUTOMATIC-POINTER',automatic_gdm_pointer)
  def save_connect():
   extra=root/'save-connect-server';extra.mkdir(mode=0o700)
   for name in ['cert.pem','key.pem']:(extra/name).write_bytes((root/name).read_bytes());(extra/name).chmod(0o600)
@@ -519,10 +650,24 @@ try:
   assert [command('gui','rdp-inspect',rdp=i)['transport_id']for i in range(3)]==transports
   assert frame['gnome_auto']['armed'],frame
   epoch=frame['gnome_auto']['input_epoch']
+  # The real manual input shield must not swallow the recognized automatic
+  # user-list click. Inspect the authenticated peer, not a queue counter.
+  mouse_path=extra/f'input-{port}.mouse.json'
+  def auto_mouse():
+   try:return json.loads(mouse_path.read_text())['events']
+   except (FileNotFoundError,ValueError):return []
+  start_mouse=len(auto_mouse())
+  denied=command('gui','rdp-assist',rdp=3,operation='automatic-pointer',stale=True)
+  assert not denied['queued'] and denied['epoch_unchanged'],denied
+  queued=command('gui','rdp-assist',rdp=3,operation='automatic-pointer')
+  assert queued['queued'] and queued['epoch_unchanged'],queued
+  actual=spike.eventually(lambda:m[start_mouse:] if 'LeftPressed' in (m:=auto_mouse())[start_mouse:] and m[-1]=='LeftReleased' else False,8)
+  assert command('gui','rdp-inspect',rdp=3)['gnome_auto']['input_epoch']==epoch
   for x in range(600,610):subprocess.run(['xdotool','mousemove',str(x),'450'],env={**env,'DISPLAY':env['RUWAC_XTEST_DISPLAY']},check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
   time.sleep(.2);shield=command('gui','rdp-inspect',rdp=3);assert shield['gnome_auto']['armed']and shield['gnome_auto']['input_epoch']==epoch,shield
   subprocess.run(['import','-display',env['RUWAC_XTEST_DISPLAY'],'-window','root',str(root/'gnome-sign-in-shield.png')],env=env,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
   command('gui','rdp-assist',rdp=3,operation='cancel-automatic');cancelled=command('gui','rdp-inspect',rdp=3);assert not cancelled['gnome_auto']['armed']and cancelled['status'].startswith('Automatic sign-in cancelled'),cancelled
+  assert not command('gui','rdp-assist',rdp=3,operation='automatic-pointer')['queued']
   command('gui','close-rdp',rdp=3);time.sleep(.2)
   command('gui','profiles',search='Generated Save Connect')
   edited=command('gui','profile-editor',operation='edit',response='connect',fields={'0':'Generated Save Connect edited'},named={'gnome-auto-login':False})
@@ -532,7 +677,7 @@ try:
   command('gui','profiles',search='Generated Save Connect')
   removed=command('gui','profile-editor',operation='edit',response='delete',confirm=True);assert not any(p['id']==item['id']for p in removed['items'])
   subprocess.run(['secret-tool','clear','application','RUWAC','profile',ref],env=env,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
-  return {'new_and_edited_profile_saved_before_connect':True,'real_loopback_CredSSP_frame':[320,180],'neighbor_transports_preserved':True,'existing_credential_acquisition_path':True,'owner_credentials_accessed':False,'GNOME_input_shield':{'actual_GTK_motion_epoch_preserved':True,'native_cancel_reveals_frame':True,'screenshot':'gnome-sign-in-shield.png','GDM_authentication':'separate real-host evidence'}}
+  return {'new_and_edited_profile_saved_before_connect':True,'real_loopback_CredSSP_frame':[320,180],'neighbor_transports_preserved':True,'existing_credential_acquisition_path':True,'owner_credentials_accessed':False,'GNOME_input_shield':{'automatic_user_list_click_received_by_authenticated_peer':actual,'stale_and_cancelled_clicks_rejected':True,'actual_GTK_motion_epoch_preserved':True,'native_cancel_reveals_frame':True,'screenshot':'gnome-sign-in-shield.png','GDM_authentication':'separate real-host evidence'}}
  case('MACHINES-SAVE-CONNECT',save_connect)
  def resize():
   focus('gui');command('gui','rdp-switch',rdp=0)
@@ -578,9 +723,102 @@ try:
   assert mutter_input,'Owned Mutter input fixture required'
   focus('gui');command('gui','chrome',open=False);command('gui','rdp-switch',rdp=0)
   before=command('gui','rdp-inspect',rdp=0);assert before['gnome_auto']['guards']['canvas_focus']
+  text='Multi-format remote clipboard ž 🦀';(root/'multi-text.txt').write_text(text)
+  png=Image.new('RGBA',(12,9),(30,80,150,255));png.save(root/'multi-image.png');pixels=digest(png.tobytes())
+  previous=command('gui','rdp-inspect',rdp=0)['received_generation'];command('server-0',format='both',file='multi-image.png',text_file='multi-text.txt')
+  spike.eventually(lambda:command('gui','rdp-inspect',rdp=0)['received_generation']>previous,10)
+  focus('peer');formats=command('peer','inspect')['formats'];assert 'image/png'in formats and 'text/plain;charset=utf-8'in formats,formats
+  assert command('peer','read-png')['pixel_sha256']==pixels
+  answer=command('peer','read-text',timeout=15);assert answer.get('sha256')==digest(text.encode()),answer
+  focus('gui');command('gui','rdp-switch',rdp=0)
+
   def chord(key):
    for k in [65507,65513,key]:mutter_input('NotifyKeyboardKeysym',GLib.Variant('(ub)',(k,True)))
    for k in [key,65513,65507]:mutter_input('NotifyKeyboardKeysym',GLib.Variant('(ub)',(k,False)))
+  def keys():
+   try:return json.loads((root/f"input-{ready['ports'][0]}.keys.json").read_text())['events']
+   except (OSError,ValueError):return []
+  def native_chord(mods,key):
+   for k in mods+[key]:mutter_input('NotifyKeyboardKeysym',GLib.Variant('(ub)',(k,True)));time.sleep(.04)
+   for k in [key]+list(reversed(mods)):mutter_input('NotifyKeyboardKeysym',GLib.Variant('(ub)',(k,False)));time.sleep(.04)
+  tabs_before=command('gui','inspect')['tabs']
+  def map_toggle():
+   for down in [True,False]:mutter_input('NotifyKeyboardKeycode',GLib.Variant('(ub)',(100,down)));time.sleep(.06)
+  tap_start=len(keys());map_toggle();time.sleep(.2)
+  assert not any(k['code']==0x38 and k['extended'] for k in keys()[tap_start:]), 'Clean Right Alt tap reached the remote; a nested GUI would toggle too'
+  for symbol,code in [(116,20),(114,19)]:
+   baseline=len(keys());native_chord([65507,65505],symbol)
+   spike.eventually(lambda:len([k for k in keys()[baseline:]if k['code']==code])>=2)
+   assert [k['down']for k in keys()[baseline:]if k['code']==code]==[True,False],keys()[baseline:]
+   assert command('gui','inspect')['tabs']==tabs_before,'Mapped tab shortcut executed on host'
+   assert command('gui','rdp-inspect',rdp=0)['gnome_auto']['guards']['canvas_focus']
+  # AltGr typing remains a balanced remote chord and must not toggle the host.
+  baseline=len(keys())
+  for code,down in [(100,True),(47,True),(47,False),(100,False)]:
+   mutter_input('NotifyKeyboardKeycode',GLib.Variant('(ub)',(code,down)));time.sleep(.06)
+  spike.eventually(lambda:len([k for k in keys()[baseline:] if k['code']==0x38 and k['extended']])==2)
+  assert [k['down'] for k in keys()[baseline:] if k['code']==0x38 and k['extended']]==[True,False]
+  baseline=len(keys());native_chord([65507,65505],116)
+  spike.eventually(lambda:len([k for k in keys()[baseline:] if k['code']==20])>=2)
+  assert command('gui','inspect')['tabs']==tabs_before
+  # Genuine compositor pointer events preserve a clean tap on ordinary motion,
+  # but flush AltGr before an actual remote button chord.
+  def native_key(code,down):
+   mutter_input('NotifyKeyboardKeycode',GLib.Variant('(ub)',(code,down)));time.sleep(.06)
+  def mouse_events():
+   try:return json.loads((root/f"input-{ready['ports'][0]}.mouse.json").read_text())['events']
+   except (OSError,ValueError):return []
+  pointer_layout=command('gui','chrome')
+  command('gui','rdp-display',rdp=0,mode='fit',zoom=1.0)
+  command('gui','chrome',fullscreen=True)
+  full=spike.eventually(lambda:c if (c:=command('gui','chrome'))['fullscreen'] and c['window_width']>pointer_layout['window_width'] else False,8)
+  command('gui','rdp-switch',rdp=0)
+  # A fullscreen owned fixture has a known global origin on every test display.
+  # Earlier resize cases may leave a small centered window on a 4K compositor.
+  mutter_input('NotifyPointerMotionRelative',GLib.Variant('(dd)',(-10000.,-10000.)))
+  mutter_input('NotifyPointerMotionRelative',GLib.Variant('(dd)',(float(full['window_width'])/2,float(full['window_height'])/2)));time.sleep(.15)
+  baseline=len(keys());moving=len(mouse_events());native_key(100,True)
+  mutter_input('NotifyPointerMotionRelative',GLib.Variant('(dd)',(8.,2.)));time.sleep(.1)
+  native_key(100,False)
+  spike.eventually(lambda:len(mouse_events())>moving)
+  assert not any(k['code']==0x38 and k['extended'] for k in keys()[baseline:]), 'Pointer motion leaked a clean host tap'
+  # That clean tap turned Map keys off; turn it on again before the button chord.
+  map_toggle();baseline=len(keys());mouse_start=len(mouse_events());native_key(100,True)
+  for down in [True,False]:
+   mutter_input('NotifyPointerButton',GLib.Variant('(ib)',(272,down)));time.sleep(.08)
+  native_key(100,False)
+  spike.eventually(lambda:len([k for k in keys()[baseline:] if k['code']==0x38 and k['extended']])==2)
+  assert [k['down'] for k in keys()[baseline:] if k['code']==0x38 and k['extended']]==[True,False]
+  spike.eventually(lambda:'LeftPressed' in mouse_events()[mouse_start:] and mouse_events()[-1]=='LeftReleased')
+  baseline=len(keys());native_chord([65507,65505],116)
+  spike.eventually(lambda:len([k for k in keys()[baseline:] if k['code']==20])>=2)
+  assert command('gui','inspect')['tabs']==tabs_before,'Pointer chord toggled host Map keys'
+  command('gui','chrome',fullscreen=pointer_layout['fullscreen'])
+  spike.eventually(lambda:command('gui','chrome')['window_height']==pointer_layout['window_height'],8)
+  command('gui','rdp-switch',rdp=0)
+  # Focus loss releases a delivered AltGr chord once, without changing Map keys.
+  baseline=len(keys())
+  for code,down in [(100,True),(47,True),(47,False)]:
+   mutter_input('NotifyKeyboardKeycode',GLib.Variant('(ub)',(code,down)));time.sleep(.06)
+  spike.eventually(lambda:any(k['code']==0x38 and k['extended'] and k['down'] for k in keys()[baseline:]))
+  chord(65360)
+  spike.eventually(lambda:not command('gui','rdp-inspect',rdp=0)['gnome_auto']['guards']['canvas_focus'])
+  mutter_input('NotifyKeyboardKeycode',GLib.Variant('(ub)',(100,False)))
+  spike.eventually(lambda:len([k for k in keys()[baseline:] if k['code']==0x38 and k['extended']])==2)
+  assert [k['down'] for k in keys()[baseline:] if k['code']==0x38 and k['extended']]==[True,False]
+  command('gui','rdp-switch',rdp=0);baseline=len(keys());native_chord([65507,65505],116)
+  spike.eventually(lambda:len([k for k in keys()[baseline:] if k['code']==20])>=2)
+  assert command('gui','inspect')['tabs']==tabs_before
+  map_toggle()
+  baseline=len(keys())
+  native_chord([65507],118)
+  time.sleep(.3)
+  events=keys()[baseline:];v=[k['down']for k in events if k['code']==47]
+  assert v in [[],[True,False]],events
+  for modifiers in [[65507,65513],[65507,65505]]:
+   baseline=len(keys());native_chord(modifiers,118)
+   spike.eventually(lambda:len([k for k in keys()[baseline:]if k['code']==47])>=2)
+   assert [k['down']for k in keys()[baseline:]if k['code']==47]==[True,False],keys()[baseline:]
   chord(65360)
   spike.eventually(lambda:not command('gui','rdp-inspect',rdp=0)['gnome_auto']['guards']['canvas_focus'])
   local=command('gui','chrome')
@@ -590,7 +828,30 @@ try:
   spike.eventually(lambda:command('gui','chrome')['window_height']==local['window_height'],8)
   assert command('gui','rdp-inspect',rdp=0)['transport_id']==before['transport_id']
   command('gui','rdp-switch',rdp=0)
-  return {'real_GDK_key_events':True,'Ctrl_Alt_Home_releases_remote_focus':True,'Ctrl_Alt_Enter_fullscreen_and_restore':True,'transport_preserved':True,'physical_keyboard':False}
+  # The same host-only tap rule applies after a live tab is moved to a new window.
+  tab=command('gui','rdp-inspect',rdp=0)['tab']
+  command('gui','detach-tab',operation='detach',tab=tab)
+  for _ in range(12):
+   command('gui','rdp-switch',rdp=0)
+   if command('gui','rdp-inspect',rdp=0)['gnome_auto']['guards']['window_active']:break
+   focus_keys(True);time.sleep(.15)
+  assert command('gui','rdp-inspect',rdp=0)['gnome_auto']['guards']['window_active']
+  assert command('gui','rdp-inspect',rdp=0)['gnome_auto']['guards']['canvas_focus']
+  baseline=len(keys());map_toggle();time.sleep(.2)
+  assert not any(k['code']==0x38 and k['extended'] for k in keys()[baseline:])
+  baseline=len(keys());native_chord([65513],49)
+  spike.eventually(lambda:len([k for k in keys()[baseline:] if k['code']==2])>=2)
+  assert [k['down']for k in keys()[baseline:] if k['code']==2]==[True,False]
+  baseline=len(keys());map_toggle();time.sleep(.2)
+  assert not any(k['code']==0x38 and k['extended'] for k in keys()[baseline:])
+  baseline=len(keys());native_chord([65513],49);time.sleep(.2)
+  assert not any(k['code']==2 for k in keys()[baseline:]), 'Detached host mode did not reclaim Alt+digit'
+  command('gui','detach-tab',operation='return',window=1)
+  focus('gui');command('gui','rdp-switch',rdp=0)
+  assert command('gui','rdp-inspect',rdp=0)['transport_id']==before['transport_id']
+  # Later RPC-only pointer cases must not inherit a live hover over the canvas.
+  mutter_input('NotifyPointerMotionRelative',GLib.Variant('(dd)',(-10000.,-10000.)));time.sleep(.2)
+  return {'right_alt_tap_host_only':True,'altgr_chord_and_focus_cancel_balanced':True,'native_pointer_motion_and_button_chord':True,'detached_mapping_independent':True,'mapped_Ctrl_Shift_T_R_reach_authenticated_RDP_peer_balanced':True,'no_host_tab_or_sidebar_action':True,'real_GDK_key_events':True,'paste_key_down_up_balanced':True,'simultaneous_text_PNG_lazy_read_from_independent_GTK_peer':True,'Ctrl_Alt_V_and_Ctrl_Shift_V_forwarded':True,'Ctrl_Alt_Home_releases_remote_focus':True,'Ctrl_Alt_Enter_fullscreen_and_restore':True,'transport_preserved':True,'physical_keyboard':False}
  if mutter_input:case('RDP-NATIVE-HOST-SHORTCUTS',host_shortcuts)
 
  def pointer_drag():
@@ -641,6 +902,7 @@ try:
 
 
  def center_reconnect():
+  if mutter_input:command('gui','chrome',maximized=True);time.sleep(.3)
   extra=root/'center-reconnect-server';extra.mkdir(mode=0o700)
   for name in ['cert.pem','key.pem']:(extra/name).write_bytes((root/name).read_bytes());(extra/name).chmod(0o600)
   start([a.server,str(extra)],'center-reconnect-server');spike.eventually(lambda:(extra/'server-ready.json').exists(),10)
@@ -659,13 +921,39 @@ try:
    saved=command('gui','profile-editor',operation='inspect',response='connect');assert not saved['error'],saved
    frame=spike.eventually(decoded,20)
    before=frame['transport_id'];tab=frame['tab'];viewport=frame['viewport']
-   menu=command('gui','rdp-tab-menu',tab=tab,control='disconnect');assert menu['title']=='Generated reconnect host',menu
+   item=next(p for p in saved['items']if p['name']=='Generated reconnect host')
+   assert frame['selection_settings']=={'enabled':False,'paste':False}
+   # Production settings changes must reach this existing view on Reconnect.
+   # Port1 deliberately refuses the unrelated SSH bridge; this case exercises
+   # saved settings and the real RDP connection, not a remote desktop account.
+   subprocess.run([a.gui,'--receive-primary',item['id'],'fixture','wayland-77','1'],env=env,check=True,stdout=subprocess.DEVNULL)
+   subprocess.run([a.gui,'--paste-primary',item['id']],env=env,check=True,stdout=subprocess.DEVNULL)
+   if mutter_input:native_tab_action(tab,'disconnect')
+   else:
+    menu=command('gui','rdp-tab-menu',tab=tab,control='disconnect');assert menu['title']=='Generated reconnect host',menu
    lost=spike.eventually(lambda:r if (r:=command('gui','rdp-inspect',rdp=3)).get('reconnect_visible') else False,8)
    assert lost['viewport']==viewport
-   command('gui','rdp-tab-menu',tab=tab,control='reconnect')
+   if mutter_input:native_tab_action(tab,'reconnect')
+   else:command('gui','rdp-tab-menu',tab=tab,control='reconnect')
    fresh=spike.eventually(lambda:r if (r:=decoded()) and r['transport_id']!=before and not r['reconnect_visible'] else None,20)
+   assert fresh['selection_settings']=={'enabled':True,'paste':True},fresh
    assert [command('gui','rdp-inspect',rdp=i)['transport_id']for i in range(3)]==neighbors
-   command('gui','close-rdp',rdp=3)
+   if mutter_input:
+    count=command('gui','inspect')['tabs'];native_tab_action(tab,'close');spike.eventually(lambda:command('gui','inspect')['tabs']==count-1,5)
+    assert 'Finalizing GtkToggleButton'not in(root/'gui.log').read_text(),'Tab menu finalized its parent with the popover still attached'
+   else:command('gui','close-rdp',rdp=3)
+   # A status message may belong to an earlier write (or earlier test). Wait
+   # for the actual editor snapshot to include BOTH external CLI changes.
+   # Cancel stale forms without saving; retain the production stale-save guard.
+   def editor_has_current_options():
+    command('gui','profiles',search='Generated reconnect host')
+    command('gui','profile-editor',operation='edit',response='keep')
+    try:
+     layouts=command('gui','profile-editor',operation='layout')['dialogs']
+     (root/'center-options-probe.json').write_text(json.dumps(layouts,indent=2)+'\n')
+     return any(d.get('selection_options')=={'primary-sync':True,'primary-paste':True}for d in layouts)
+    finally:command('gui','profile-editor',operation='inspect',response='cancel')
+   spike.eventually(editor_has_current_options,8)
    for _ in range(3):
     command('gui','profiles',search='Generated reconnect host')
     command('gui','profile-editor',operation='edit',response='keep');spike.eventually(mapped,10)
@@ -673,9 +961,13 @@ try:
     again=spike.eventually(decoded,20)
     assert [command('gui','rdp-inspect',rdp=i)['transport_id']for i in range(3)]==neighbors
     command('gui','close-rdp',rdp=3)
-   return {'editor_connect_cycles':4,'configured_profile':True,'center_card_visible_when_disconnected':True,'overlay_preserves_viewport':True,'tab_reconnect_actual_CredSSP_and_frame':True,'neighbors_preserved':True}
+   return {'native_popup_mouse_disconnect_reconnect_close':bool(mutter_input),'editor_connect_cycles':4,'configured_profile':True,'center_card_visible_when_disconnected':True,'overlay_preserves_viewport':True,'tab_reconnect_actual_CredSSP_and_frame':True,'neighbors_preserved':True,'saved_selection_options_reloaded':True}
+  except Exception:
+   (root/'center-reconnect-failure.json').write_text(json.dumps({'frame':command('gui','rdp-inspect',rdp=3),'editor':command('gui','profile-editor',operation='inspect'),'last_save':saved},indent=2)+'\n')
+   raise
   finally:
    command('gui','close-rdp',rdp=3)
+   if mutter_input:command('gui','chrome',maximized=False)
  case('RDP-NATIVE-CENTER-RECONNECT',center_reconnect)
 
  def profile_keyring_preferences():

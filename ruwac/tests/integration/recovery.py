@@ -5,7 +5,7 @@ from pathlib import Path
 from spike import Client,eventually
 p=argparse.ArgumentParser();p.add_argument('--binary',required=True);p.add_argument('--evidence',required=True);a=p.parse_args()
 binary=Path(a.binary).resolve();root=Path(tempfile.mkdtemp(prefix='recovery-',dir=a.evidence));root.chmod(0o700)
-sock=root/'control.sock';state=root/'durable.json';env={**os.environ,'RUWAC_STATE_FILE':str(state)};server=None;owned=[];results=[]
+sock=root/'control.sock';state=root/'durable.json';env={**os.environ,'RUWAC_STATE_FILE':str(state)};server=None;owned=[];results=[];checkpoint_client=None
 def start(name='daemon',socket_path=None,configuration=None):
  global server
  server=subprocess.Popen([str(binary),'--socket',str(socket_path or sock),'serve'],env=configuration or env,stdout=(root/(name+'.log')).open('wb'),stderr=subprocess.STDOUT)
@@ -31,6 +31,9 @@ def page(pane):
   if r['next_offset']>=r['total_lines']or r['next_offset']==offset:break
   offset=r['next_offset']
  return {'text':''.join(r['text']for r in out),'wrapped':sum((r['wrapped']for r in out),[]),'total':out[-1]['total_lines']}
+def checkpoint_current():
+ h=rpc('health');persistence=h['persistence']
+ return not persistence['pending'] and persistence['checkpoint_revision']==h['revision'] and persistence['error']is None
 def reject(name,path,configuration=None):
  before=path.read_bytes()if path.is_file()else None
  proc=subprocess.Popen([str(binary),'--socket',str(root/(name+'.sock')),'serve'],env=configuration or {**env,'RUWAC_STATE_FILE':str(path)},stdout=(root/(name+'.log')).open('wb'),stderr=subprocess.STDOUT)
@@ -54,16 +57,19 @@ try:
  rpc('window.rename',{'window':one['window'],'name':'restored layout'})
  rpc('pane.select',{'pane':one['pane']})
  rpc('buffer.set',{'session':one['session'],'text':'PRIVATE-REGISTER-SENTINEL-DO-NOT-PERSIST'})
- with Client(sock)as c:
-  c.call('session.attach',{'session':one['session'],'rows':24,'cols':80})
-  before=c.call('client.render');before_ids=[x['id']for x in before['panes']]
+ # Keep the sizing client attached through snapshot/checkpoint/SIGKILL.
+ # Closing it here races the baseline against an asynchronous detach resize.
+ checkpoint_client=Client(sock)
+ checkpoint_client.call('session.attach',{'session':one['session'],'rows':24,'cols':80})
+ before=checkpoint_client.call('client.render');before_ids=[x['id']for x in before['panes']]
+ (root/'recovery-grid-before.json').write_text(json.dumps(before)+'\n')
  captures={pid:rpc('pane.capture',{'pane':pid,'lines':2000})['text']for pid in before_ids}
  histories={pid:page(pid)for pid in before_ids}
  assert '\t'not in histories[one['pane']]['text'] and 'TAB'in histories[one['pane']]['text']
  rpc('daemon.checkpoint');data=state.read_bytes();assert stat.S_IMODE(state.stat().st_mode)==0o600
  assert b'PRIVATE-REGISTER-SENTINEL-DO-NOT-PERSIST'not in data
  assert not any(key in json.loads(data)for key in ['clients','argv','input','cache'])
- stop(crash=True);start('after-crash')
+ stop(crash=True);checkpoint_client.close();checkpoint_client=None;start('after-crash')
  panes=rpc('pane.list',{'session':one['session']});assert {p['id']for p in panes}==set(before_ids)
  assert all(p['ended']and p['restored']and p['pid']is None for p in panes),panes
  assert next(p for p in panes if p['id']==third['pane'])['exit_code']==23
@@ -74,15 +80,18 @@ try:
  assert rpc('buffer.get',{'session':one['session']})['text']==''
  with Client(sock)as c:
   c.call('session.attach',{'session':one['session'],'rows':24,'cols':80});after=c.call('client.render')
+  (root/'recovery-grid-after.json').write_text(json.dumps(after)+'\n')
   assert after['layout']==before['layout']and after['active_pane']==before['active_pane']
   for old,new in zip(before['panes'],after['panes']):
    assert old['grid']['cells']==new['grid']['cells']
    assert new['grid']['restored']and not new['grid']['mouse']and not new['grid']['bracketed_paste']
   c.call('client.resize',{'rows':30,'cols':100});render=c.call('client.render')
   assert all(len(p['grid']['cells'])==p['rect']['rows']for p in render['panes'])
+  c.call('session.detach')  # Acknowledge layout changes before checking idle writes.
  results.append({'id':'DAEMON-SIGKILL-RECOVERY','status':'PASS','panes':3,'stable_ids':True,'history_rows':histories[one['pane']]['total'],'canonical_cells_equal':True,'wrapped_unicode_history_equal':True,'tab_cells_restored':True,'plain_tabs_expanded_once':True,'clipboard_register_excluded':True,'restored_input_refused':True,'exit_code':23,'checkpoint_bytes':len(data)})
  # Read-only queries do not trigger recurring disk writes once the checkpoint is current.
- rpc('daemon.checkpoint');time.sleep(.3);original=state.stat().st_mtime_ns
+ rpc('daemon.checkpoint');eventually(checkpoint_current,10);original=state.stat().st_mtime_ns
+ (root/'idle-checkpoint-ready.json').write_text(json.dumps(rpc('health'))+'\n')
  for _ in range(12):rpc('health');rpc('session.list');time.sleep(.2)
  assert state.stat().st_mtime_ns==original
  results.append({'id':'CHECKPOINT-IDLE','status':'PASS','read_only_queries_do_not_write':True})
@@ -100,6 +109,7 @@ try:
  rpc('pane.list',{'session':live['session']},error='STALE_ID')
  results.append({'id':'DURABLE-CLOSE','status':'PASS','closed_resources_not_restored':True})
  # A failed write preserves the last checkpoint and surfaces its status.
+ rpc('daemon.checkpoint');eventually(checkpoint_current,10)
  original=state.read_bytes();state.chmod(0o644)
  rpc('window.rename',{'window':one['window'],'name':'write failure recovered'})
  rpc('daemon.checkpoint',error='CHECKPOINT')
@@ -154,6 +164,7 @@ try:
  reject('oversized',large)
  results.append({'id':'CHECKPOINT-BOUNDARIES','status':'PASS','negative_cases':['parallel owner','corrupt','graph','cell control','schema','mode','symlink','hardlink','fifo','oversized'],'original_files_preserved':True})
 finally:
+ if checkpoint_client is not None:checkpoint_client.close()
  if server and server.poll()is None:
   server.kill();server.wait(timeout=5)
  # Only fixture-owned child PIDs are touched; avoid recycled PIDs via session identity.
