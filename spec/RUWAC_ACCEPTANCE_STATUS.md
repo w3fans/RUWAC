@@ -1,5 +1,37 @@
 # RUWAC acceptance status
 
+## Published reconciliation — v0.4.81, 2026-11-15
+
+[v0.4.81](https://github.com/w3fans/RUWAC/releases/tag/v0.4.81), commit
+`b4a64eb048c396268a3fb535345c8b880b63e8cf`, is delivered. The normal release
+workflow passed all 19 required source gates, verified 18 published assets and
+qualified the CLI/desktop pair and repository metadata on Fedora 43, 44, 45 and
+Rawhide. An authorized Fedora 45 desktop update preserved active GUI, engine
+and agent process identities; post-install verification checked 1,117 pinned
+proofs. Installed files and running GUI/engine versions can still differ.
+
+The tab-row fill, structural scanner correction and successful SFTP fixture
+cleanup described below as the next batch shipped in v0.4.79. v0.4.80 added
+checkpoint row reuse for the measured busy-history typing workload. v0.4.81
+prevents wide Unicode output in one-column views from stopping the engine and
+clips GTK painting and pointer hits to each pane's visible rectangle.
+
+The actual published Fedora CLI and portable CLI each passed 40 narrow/wide
+real-PTY cycles with the same child process. Isolated GTK controls verify the
+divider paint/hit correction. Published portable packages also passed install,
+PTY, persistence, reinstall and removal checks in Debian 12/13 and Ubuntu
+22.04/24.04 userspaces. The 2,400-key frontend and busy-history comparisons
+passed their recorded latency, CPU and memory gates; these are generated local
+measurements, not physical GTK, RDP or WAN latency claims.
+
+The headless advisory check is clean. The desktop RSA finding
+`RUSTSEC-2023-0071` and three maintenance warnings remain unsuppressed; the
+advisory job is not green. Physical clipboard/input, real GNOME handover,
+Windows acceptance on the established validation path and an actual Proxmox
+host remain unqualified. These outstanding acceptance scopes do not impose a
+blanket development-release freeze. The dated historical sections below are
+retained unchanged.
+
 ## Published reconciliation and next maintenance — 2026-11-15
 
 v0.4.78, commit `b5474d26913aba3380feddef36724453894a57a4`, is delivered.
