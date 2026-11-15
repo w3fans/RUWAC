@@ -335,6 +335,62 @@ class Bundles(unittest.TestCase):
                 records[1] = tuple(section)
                 self.assertNotIn(0x400c, bundles.indexed_branch_slots(data, records))
 
+    def ranged_branch_elf(self, literal=b'generated fixture', mutation=None):
+        table, dispatch = 0x3000, 0x1000
+        target = table + int.from_bytes(b'toy\0', 'little')
+        code = bytearray(b'\x48\x8d\x4a\xfe\x48\x83\xf9\x02\x0f\x87'
+                         + struct.pack('<i', target - dispatch - 14)
+                         + b'\x48\x8d\x3d' + struct.pack('<i', table - dispatch - 21)
+                         + b'\x48\x63\x0c\x8f\x48\x01\xf9\xff\xe1')
+        code += b'\x48\x8d\x05' + struct.pack('<i', table + 12 - dispatch - len(code) - 7)
+        numbers = b'toy\0' * 3
+        if mutation is not None:
+            at, value = mutation
+            if at == 'table': numbers = numbers[:8] + struct.pack('<i', -1)
+            elif at == 'reference':
+                struct.pack_into('<i', code, 33, table + 8 - dispatch - 37)
+            else: code[at:at + len(value)] = value
+        payloads = [bytes(code), b'\x90\xc3', numbers + literal]
+        header = struct.pack('<16sHHIQQQIHHHHHH', b'\x7fELF\x02\x01' + bytes(10),
+                             3, 62, 1, 0, 0, 64, 0, 64, 0, 0, 64, 4, 0)
+        records = bytes(64); offset = 64 + 4 * 64
+        for address, flags, content in zip([dispatch, target, table], [6, 6, 2], payloads):
+            records += struct.pack('<IIQQQQIIQQ', 0, 1, flags, address, offset, len(content), 0, 0, 1, 0)
+            offset += len(content)
+        path = self.root / 'generated-range-elf'
+        path.write_bytes(header + records + b''.join(payloads))
+        return path
+
+    def test_unsigned_range_branch_addresses_are_numeric(self):
+        checker = runpy.run_path(str(ROOT / 'scripts/privacy-check.py'))
+        self.assertFalse(bundles.artifact_findings(self.ranged_branch_elf(), checker, ['toy'])[0])
+
+    def test_unsigned_range_branch_keeps_adjacent_private_text(self):
+        checker = runpy.run_path(str(ROOT / 'scripts/privacy-check.py'))
+        for literal in [b'toy\0', b'generated-private-host\0']:
+            with self.subTest(literal=literal):
+                self.assertTrue(bundles.artifact_findings(self.ranged_branch_elf(literal), checker, ['toy', 'generated-private-host'])[0])
+
+    def test_unsigned_range_requires_exact_guard_and_dispatch(self):
+        checker = runpy.run_path(str(ROOT / 'scripts/privacy-check.py'))
+        mutations = [(0,b'\x90'), (3,b'\xff'), (7,b'\x00'), (7,b'\x80'),
+                     (9,b'\x83'), (16,b'\x05'), (24,b'\x88'), (27,b'\xc1'),
+                     (29,b'\xe0'), (10,struct.pack('<i',0x2000-0x1000-14)),
+                     ('table',None), ('reference',None)]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.assertTrue(bundles.artifact_findings(self.ranged_branch_elf(mutation=mutation), checker, ['toy'])[0])
+
+    def test_unsigned_range_requires_bounded_readonly_table(self):
+        path=self.ranged_branch_elf();data=path.read_bytes()
+        header=struct.unpack_from('<16sHHIQQQIHHHHHH',data)
+        records=[struct.unpack_from('<IIQQQQIIQQ',data,header[6]+i*64) for i in range(header[12])]
+        self.assertEqual(bundles.indexed_branch_slots(data,records),{0x3000,0x3004,0x3008})
+        for field,value in [(1,8),(2,0),(2,3),(2,6),(3,0x3001),(5,8)]:
+            with self.subTest(field=field,value=value):
+                changed=list(records);section=list(changed[3]);section[field]=value;changed[3]=tuple(section)
+                self.assertNotIn(0x3008,bundles.indexed_branch_slots(data,changed))
+
     def byte_branch_elf(self, literal=b'generated fixture', bad_target=False, unknown=False, spill=True, count=4, positive=False, writable=False, unaligned=False, wrong_jump=False, extra_reference=False, far=False, wide_displacement=False, bounded=None):
         table = (1342177280 if far else 16777216) + (1 if unaligned else 0)
         dispatch = 4096

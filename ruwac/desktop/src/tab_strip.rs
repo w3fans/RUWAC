@@ -573,9 +573,9 @@ impl TabStrip {
             strip.queue_reveal();
         });
     }
-    /// Equal tab widths per row: at most about a fifth of the row while few
-    /// tabs are open, shrinking as tabs are added down to a readable minimum,
-    /// beyond which the row scrolls with arrows. Pinned tabs keep icon width.
+    /// Flexible tabs share the available row width, shrinking as tabs are
+    /// added down to a readable minimum, beyond which the row scrolls with
+    /// arrows. Pinned tabs keep icon width.
     fn allocate_widths(&self) {
         let inner = &self.0;
         let compact = inner.compact.get();
@@ -593,18 +593,24 @@ impl TabStrip {
                 .collect::<Vec<_>>();
             let pinned = |t: &&Tab| t.page.upgrade().is_some_and(|p| p.is_pinned());
             let flexible = members.iter().filter(|t| !pinned(t)).count();
+            // A newly pinned tab still has its former expanded request. Clear
+            // it before measuring the icon so that request cannot reserve space.
+            for tab in members.iter().filter(|t| pinned(t)) {
+                tab.button.set_size_request(-1, -1);
+            }
             let fixed: i32 = members
                 .iter()
                 .filter(|t| pinned(t))
                 .map(|t| t.button.measure(gtk::Orientation::Horizontal, -1).1 + 2)
                 .sum();
-            // Everything in the row except the "+" action belongs to tabs/arrows.
+            // Reserve the action's whole themed extent. Its content width omits
+            // padding/borders and would clip otherwise fully expanded tabs.
             let action = inner
                 .end
                 .borrow()
                 .as_ref()
                 .filter(|e| e.parent().as_ref() == Some(host.upcast_ref()))
-                .map_or(0, |e| e.width());
+                .map_or(0, |e| e.measure(gtk::Orientation::Horizontal, -1).1);
             let full = host.width() - action;
             if full <= 0 {
                 continue;
@@ -629,13 +635,8 @@ impl TabStrip {
             } else {
                 space / flexible as i32 - 2
             };
-            let cap = ((full as f64) * 0.22) as i32;
             let overflow = flexible > 0 && per < minimum;
-            let width = if overflow {
-                minimum
-            } else {
-                per.min(cap.max(minimum))
-            };
+            let width = if overflow { minimum } else { per };
             for tab in &members {
                 tab.button
                     .set_size_request(if pinned(tab) { -1 } else { width }, -1);
@@ -847,7 +848,7 @@ impl TabStrip {
         }
         let mut menu_items = Vec::new();
         items(self.0.root.upcast_ref(), window, &mut menu_items);
-        serde_json::json!({"menu_items":menu_items,"row_widths":self.0.scroll.iter().map(|s|s.width()).collect::<Vec<_>>(),"available":self.0.hosts.iter().map(|h|h.width()-self.0.end.borrow().as_ref().filter(|e|e.parent().as_ref()==Some(h.upcast_ref())).map_or(0,|e|e.width())).collect::<Vec<_>>(),"scroll":self.0.scroll.iter().map(|s|{let a=s.hadjustment();serde_json::json!({"value":a.value(),"upper":a.upper(),"page":a.page_size()})}).collect::<Vec<_>>(),"arrows":self.0.arrows.iter().map(|(l,r)|serde_json::json!({"visible":l.is_visible()&&r.is_visible(),"left_sensitive":l.is_sensitive(),"right_sensitive":r.is_sensitive(),"left_origin":l.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"right_origin":r.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"width":l.width(),"height":l.height()})).collect::<Vec<_>>(),"two_rows":self.0.two.get(),"compact":self.0.compact.get(),"rows":self.0.hosts.iter().filter(|h|h.is_visible()).count(),"tabs":self.0.tabs.borrow().iter().map(|tab|{
+        serde_json::json!({"menu_items":menu_items,"row_widths":self.0.scroll.iter().map(|s|s.width()).collect::<Vec<_>>(),"available":self.0.hosts.iter().map(|h|h.width()-self.0.end.borrow().as_ref().filter(|e|e.parent().as_ref()==Some(h.upcast_ref())).map_or(0,|e|e.measure(gtk::Orientation::Horizontal,-1).1)).collect::<Vec<_>>(),"scroll":self.0.scroll.iter().map(|s|{let a=s.hadjustment();serde_json::json!({"value":a.value(),"upper":a.upper(),"page":a.page_size()})}).collect::<Vec<_>>(),"arrows":self.0.arrows.iter().map(|(l,r)|serde_json::json!({"visible":l.is_visible()&&r.is_visible(),"left_sensitive":l.is_sensitive(),"right_sensitive":r.is_sensitive(),"left_origin":l.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"right_origin":r.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"width":l.width(),"height":l.height()})).collect::<Vec<_>>(),"two_rows":self.0.two.get(),"compact":self.0.compact.get(),"rows":self.0.hosts.iter().filter(|h|h.is_visible()).count(),"tabs":self.0.tabs.borrow().iter().map(|tab|{
             let page=tab.page.upgrade();let row=usize::from(tab.button.parent().as_ref()==Some(self.0.rows[1].upcast_ref()));
             let bounds=tab.button.compute_bounds(&self.0.scroll[row]);
             serde_json::json!({"id":page.as_ref().map(|p|p.child().widget_name().to_string()),"title":page.as_ref().map(|p|p.title().to_string()),"selected":tab.button.is_active(),"close_visible":tab.close.is_visible(),"close_width":tab.close.width(),"close_height":tab.close.height(),"close_pick":tab.close.compute_point(window,&gtk::graphene::Point::new(tab.close.width() as f32/2.,tab.close.height() as f32/2.)).and_then(|p|window.pick(p.x()as f64,p.y()as f64,gtk::PickFlags::DEFAULT)).map(|w|w.type_().name().to_string()),"close_origin":tab.close.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"font_size":tab.label.pango_context().font_description().map(|d|d.size()),"icon_size":tab.icon.pixel_size(),"indicator_size":tab.indicator.pixel_size(),"hint":tab.number.text().to_string(),"hint_visible":tab.hint.reveals_child(),"role":format!("{:?}",tab.button.accessible_role()),"row":row,"width":tab.button.width(),"width_request":tab.button.width_request(),"height":tab.button.height(),"origin":tab.button.compute_point(window,&gtk::graphene::Point::new(0.,0.)).map(|p|[p.x(),p.y()]),"inside_viewport":bounds.is_some_and(|r|r.x()>=-0.5&&r.y()>=-0.5&&r.x()+r.width()<=self.0.scroll[row].width() as f32+0.5&&r.y()+r.height()<=self.0.scroll[row].height() as f32+0.5)})

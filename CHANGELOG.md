@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## v0.4.79 — 2026-11-15 — Stable source release
+
+- Flexible tabs fill the available row, including when only a few are open.
+  Pinned tabs keep icon width; hover, title, status and selection changes retain
+  their tab geometry, font sizes, status icons and visible close buttons.
+- Recognize another bounded LLVM relative jump-table form during binary privacy
+  checks. Validate the complete guard, dispatch, table bounds and executable
+  targets; keep rejecting adjacent private text and malformed tables.
+- Remove generated bulk-transfer payloads after successful SFTP regression runs,
+  retaining receipts and diagnostics. Failed runs retain their test payloads.
+
 ## v0.4.78 — 2026-11-14 — Stable source release
 
 - Update rustix from 1.1.5 to 1.1.6 to address RUSTSEC-2026-0486, an

@@ -318,6 +318,41 @@ def indexed_branch_slots(data, records):
                         and offset + length + 4 <= len(data)
                         and table + struct.unpack_from('<i', data, offset + length)[0] == fallback):
                     slots.add(end)
+    # A second LLVM range dispatch computes RCX = RDX - 2, rejects RCX >
+    # an unsigned imm8 bound, then uses RDI as the relative table base.
+    # Unsigned subtraction also rejects inputs below two. Match the complete
+    # guard and dispatch: a different condition/register is not interchangeable.
+    ranged = re.compile(rb'\x48\x8d\x4a\xfe\x48\x83\xf9(.)\x0f\x87(.{4})'
+                        rb'\x48\x8d\x3d(.{4})\x48\x63\x0c\x8f\x48\x01\xf9\xff\xe1', re.S)
+    for section in records:
+        if not section[2] & 4:
+            continue
+        start, size = section[4:6]
+        for match in ranged.finditer(data[start:start + size]):
+            bound = match[1][0]
+            if not 1 <= bound <= 127:
+                continue
+            pc = section[3] + match.start()
+            fallback = pc + 14 + struct.unpack('<i', match[2])[0]
+            table = pc + 21 + struct.unpack('<i', match[3])[0]
+            length = (bound + 1) * 4  # JA permits the upper bound itself.
+            candidates = [s for s in records if s[1] == 1 and s[2] & 2
+                          and not s[2] & 5 and s[3] <= table
+                          and table + length <= s[3] + s[5]]
+            next_index = bisect_right(ordered_references, table)
+            if (table % 4 or len(candidates) != 1
+                    or not any(a <= fallback < b for a, b in executable)
+                    or (next_index < len(ordered_references)
+                        and ordered_references[next_index] < table + length)):
+                continue
+            source = candidates[0]
+            offset = source[4] + table - source[3]
+            if offset + length > len(data):
+                raise ValueError('Range branch table exceeds artifact bounds')
+            targets = [table + struct.unpack_from('<i', data, offset + i * 4)[0]
+                       for i in range(bound + 1)]
+            if all(any(a <= target < b for a, b in executable) for target in targets):
+                slots.update(range(table, table + length, 4))
     # LLVM also emits byte-discriminant tables without an explicit comparison.
     # movzbl bounds the index to 0..255. Accept the observed RSI+disp8 and
     # RBX+disp32 loads into EAX; calculate RIP from the displacement end, not

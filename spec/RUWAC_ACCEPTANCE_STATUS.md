@@ -1,5 +1,24 @@
 # RUWAC acceptance status
 
+## Published reconciliation and next maintenance — 2026-11-15
+
+v0.4.78, commit `b5474d26913aba3380feddef36724453894a57a4`, is delivered.
+All 19 source gates, 18 published assets, 24 runtime/native phases, four COPR
+targets and four portable CLI userspaces passed. The 2,400-key comparison
+passed latency, CPU and memory limits. A verified Fedora desktop update
+preserved nine existing process identities; 947 pinned proofs verified after
+installation. The rustix warning is resolved; RSA and maintenance findings
+remain unsuppressed. Physical clipboard, GNOME handover, Windows and Proxmox
+acceptance remain separate open requirements.
+
+The next maintenance batch addresses the owner's unused tab-row space,
+publishes the qualified structural scanner correction used to distinguish
+0.4.78's numeric-address false positive, and removes successful SFTP fixtures'
+repeatable bulk data. The published 0.4.78 GUI reproduces the unused-row case
+in an isolated native compositor. Candidate native, source, package and
+published-artifact checks are required before claiming these changes delivered.
+Historical sections below retain their original evidence and limitations.
+
 ## Published reconciliation and dependency maintenance — 2026-11-14
 
 v0.4.77, commit `11eee6fa0d1570106da4f73424418067ba106321`, is delivered.
