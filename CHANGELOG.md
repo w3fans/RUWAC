@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.4.80 — 2026-11-15 — Stable source release
+
+- Reuse checkpoint history row scratch storage to reduce typing stalls while
+  many history-filled terminals continuously change. Preserve independently
+  owned row text, byte budgets, whitespace/wrap rules, styles and recovery
+  format. Controlled local TUI p99 improved from 34.9–36.4 to 16.6 ms;
+  physical GTK/RDP/WAN latency remains outside that measurement.
+
 ## v0.4.79 — 2026-11-15 — Stable source release
 
 - Flexible tabs fill the available row, including when only a few are open.

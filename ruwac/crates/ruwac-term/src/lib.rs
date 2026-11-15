@@ -447,8 +447,12 @@ impl Terminal {
         let bottom = g.bottommost_line().0;
         let mut history = Vec::new();
         let mut bytes = 0usize;
+        // Reuse scratch storage while visiting history. The retained rows below
+        // still own only their text, so blank/short rows do not retain a full
+        // terminal-width allocation in every checkpoint.
+        let mut row = String::with_capacity(self.cols as usize);
         for r in (top..=bottom).rev().take(50000) {
-            let mut row = String::new();
+            row.clear();
             for c in 0..self.cols as usize {
                 let cell = &g[Point::new(Line(r), Column(c))];
                 if !cell
@@ -464,12 +468,12 @@ impl Terminal {
             let wrap = g[Point::new(Line(r), Column(self.cols as usize - 1))]
                 .flags
                 .contains(Flags::WRAPLINE);
-            let row = if wrap { row } else { row.trim_end().to_owned() };
-            if bytes + row.len() > budget {
+            let text = if wrap { row.as_str() } else { row.trim_end() };
+            if bytes + text.len() > budget {
                 break;
             }
-            bytes += row.len();
-            history.push((row, wrap));
+            bytes += text.len();
+            history.push((text.to_owned(), wrap));
         }
         history.reverse();
         Archive {
@@ -1645,6 +1649,85 @@ mod tests {
             restored.archive().primary.unwrap().grid["cells"],
             plain.primary.unwrap().grid["cells"]
         );
+    }
+    #[test]
+    fn reused_history_row_matches_legacy_encoding_at_budget_boundaries() {
+        // Frozen pre-optimization row encoder: compare content and byte-budget
+        // decisions across wraps, Unicode spacers/combining marks and blanks.
+        fn legacy(t: &Terminal, g: &Grid<Cell>, budget: usize) -> Vec<(String, bool)> {
+            let mut history = Vec::new();
+            let mut bytes = 0usize;
+            for r in (g.topmost_line().0..=g.bottommost_line().0)
+                .rev()
+                .take(50000)
+            {
+                let mut row = String::new();
+                for c in 0..t.cols as usize {
+                    let cell = &g[Point::new(Line(r), Column(c))];
+                    if !cell
+                        .flags
+                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    {
+                        row.push(if cell.c == '\t' { ' ' } else { cell.c });
+                        if let Some(z) = cell.zerowidth() {
+                            row.extend(z.iter());
+                        }
+                    }
+                }
+                let wrap = g[Point::new(Line(r), Column(t.cols as usize - 1))]
+                    .flags
+                    .contains(Flags::WRAPLINE);
+                let row = if wrap { row } else { row.trim_end().to_owned() };
+                if bytes + row.len() > budget {
+                    break;
+                }
+                bytes += row.len();
+                history.push((row, wrap));
+            }
+            history.reverse();
+            history
+        }
+        for cols in [1, 2, 7, 80, 1024] {
+            let mut t = Terminal::new(6, cols);
+            for _ in 0..40 {
+                let text = if cols == 1 {
+                    "\x1b[31mASCII e\u{301}  \r\n\r\n"
+                } else {
+                    "\x1b[31mASCII \t界e\u{301}🙂\u{2003}  \r\n\r\n"
+                };
+                t.feed(text.as_bytes());
+            }
+            for step in 0..4 {
+                match step {
+                    1 => {
+                        t.feed(b"\x1b[?1049hAlt buffer \t\r\n");
+                    }
+                    2 => {
+                        t.feed(b"\x1b[?1049l");
+                    }
+                    3 => {
+                        t.resize(4, cols);
+                    }
+                    _ => {}
+                }
+                let grid = t.term.grid();
+                for budget in [0, 1, 2, 3, 4, 7, 17, 80, 511, 4096, 512 * 1024] {
+                    let expected = legacy(&t, grid, budget);
+                    for compact in [false, true] {
+                        let actual = t.archive_grid_encoded(grid, false, budget, compact);
+                        assert_eq!(
+                            actual.history, expected,
+                            "cols={cols} step={step} budget={budget}"
+                        );
+                        assert_eq!(
+                            actual.dropped_lines,
+                            (grid.bottommost_line().0 - grid.topmost_line().0 + 1) as usize
+                                - expected.len()
+                        );
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn compact_unique_cells_keep_plain_encoding() {

@@ -1,24 +1,16 @@
-RUWAC v0.4.79 — full-width tabs and bounded test data
+RUWAC v0.4.80 — fewer typing stalls with busy terminal history
 
-Flexible tabs share the whole available row, even with one or two tabs open.
-Pinned tabs retain their icon width. Existing font and status-icon sizes,
-inactive close buttons and stable geometry during hover, title, status and
-selection changes are preserved. Readable minimum widths and overflow arrows
-still apply when a row cannot fit all tabs.
+Reuse the temporary row buffer while encoding checkpoint history. Retained
+history rows still own their text; byte limits, whitespace/wrap semantics,
+styles, persistence intervals and canonical recovery format remain unchanged.
 
-The binary privacy scanner recognizes a second bounds-checked LLVM jump-table
-form, fixing a numeric-address false positive observed in the published 0.4.78
-desktop executable. The full guard, instruction form, read-only table bounds
-and every branch target must validate. Actual private text and unknown data
-remain subject to the unchanged policy; no artifact or term exception is added.
+In a controlled local TUI comparison with twenty busy, history-filled windows,
+p99 echo latency was 34.9–36.4 ms on the original engine and 16.6 ms on the
+candidate. All 2,400 measured keys completed without timeouts; quiet latency
+was essentially unchanged. These measurements exclude physical GTK painting,
+RDP and WAN delay, and do not claim Screen/tmux parity.
 
-Successful SFTP regression fixtures remove their generated transfer payloads
-while retaining receipts and diagnostics, preventing repeated runs from
-accumulating hundreds of megabytes per fixture. Failed fixtures keep their
-payloads for diagnosis. Application terminal history is unaffected.
-
-The desktop RSA advisory and maintenance warnings remain visible. Windows
-acceptance remains pending on the established R7 path. This patch follows the
-existing source, runtime, package and publication gates.
-Installing packages preserves running engines and terminal programs; existing
-sessions are not migrated or restarted.
+Recovery and Unicode/blank/wrapped-row budget regressions are retained.
+The desktop RSA advisory remains visible; Windows acceptance remains pending
+on R7. Existing engines and active terminal programs survive package updates.
+They retain their loaded code until the owner opens an updated engine.

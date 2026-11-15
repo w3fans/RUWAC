@@ -1,5 +1,50 @@
 # Checkpoint snapshots and typing tails — 2026-11-07
 
+## Busy-history row scratch reuse — 2026-11-15 (release candidate)
+
+Continuously changing panes cannot reuse a whole cached checkpoint. Encoding each
+history row previously grew a fresh temporary string, then usually allocated its
+trimmed copy. The candidate reuses one temporary row buffer per archive and still
+copies each retained row into independent text storage. Empty/short rows do not
+retain terminal-width allocations. History budgets, whitespace/wrap rules, styles,
+checkpoint intervals, canonical file format and active PTYs are unchanged.
+
+A bounded Linux A/B/A comparison kept the published v0.4.79 frontend fixed. Both
+uninstrumented engine builds used the same compiler/toolchain. Twenty windows each
+had 5,000 generated history lines and busy output; each deep run measured 600 keys.
+Two shallow quiet controls measured 300 keys each. The existing public timing loop
+and glyph detector were unchanged; persistence remained enabled. All 2,400 measured
+keys completed without timeouts, with no cgroup CPU throttling.
+
+| Deep-history run | p50 / p95 / p99, ms | Maximum, ms | Whole-fixture CPU seconds | Sampled engine RSS, KiB |
+| --- | ---: | ---: | ---: | ---: |
+| Original A1 | 2.625 / 4.408 / 36.430 | 54.332 | 17.08 | 339664 |
+| Candidate | 2.507 / 3.766 / 16.569 | 30.912 | 16.07 | 335824 |
+| Original A2 | 2.472 / 3.858 / 34.918 | 58.791 | 16.31 | 341116 |
+
+Quiet p50 was 2.276 / 2.262 ms and p99 4.394 / 4.439 ms for original/candidate;
+CPU was 1.77 / 1.76 seconds. Sampled RSS is not peak memory: deep-run high-water
+marks were 339960 / 340248 / 341116 KiB. Checkpoint output remained about 5.8 MB/s
+into private runtime tmpfs; this is not a disk-write reduction. These local TUI
+measurements do not establish physical GTK, RDP, WAN or Screen/tmux parity.
+
+All 164 headless workspace unit tests and real-PTY checkpoint-consistency,
+primary-history and history-snapshot suites passed. The added regression compares
+the old encoder's content and byte-budget decisions across blank/Unicode/wrapped
+rows, alternate screens, resizing and 1/2/7/80/1024-column fixtures. One-column
+fixtures use ASCII/combining text; width-two glyph input at one column exposed a
+separate pre-archive panic and needs unchanged-baseline reproduction.
+
+Baseline source commit: `d51e32be9c7d075996e5f3de3a9d3700fa23d7ef`.
+Fixed public frontend SHA-256:
+`350b38484b8de79c0e12298d48cb4fe01ef7db7a2ab52d2e771efd7069de9862`.
+Original same-toolchain engine SHA-256:
+`7708746bd8f312bf9aed31620a2333cdf6ae720dddb4acbe61f6b34c162d6971`.
+Candidate engine SHA-256:
+`eb987f912d6a4fc25bf243d09a321cf9359886de528d9dfffebfb4a1d266aea6`.
+Release-version builds and downloadable artifacts still require the normal
+independent qualification; these candidate receipts do not certify publication.
+
 Periodic persistence reconstructs canonical history for every pane before its
 background writer starts. With many history-filled panes, that synchronous work
 can delay input even when most panes have not changed.
