@@ -613,11 +613,15 @@ impl State {
             }
             for (id, r) in minimum {
                 if let Some(p) = self.panes.get_mut(&id) {
-                    if p.term.rows != r.rows || p.term.cols != r.cols {
+                    // Split rectangles may be one column wide. Keep the PTY and
+                    // emulator in agreement at the library's Unicode minimum;
+                    // clients clip the larger grid to the visible rectangle.
+                    let cols = r.cols.max(ruwac_term::MIN_COLUMNS);
+                    if p.term.rows != r.rows || p.term.cols != cols {
                         if let Some(pty) = &p.pty {
-                            let _ = pty.resize(r.rows, r.cols);
+                            let _ = pty.resize(r.rows, cols);
                         }
-                        p.term.resize(r.rows, r.cols);
+                        p.term.resize(r.rows, cols);
                     }
                 }
             }

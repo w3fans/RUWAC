@@ -8,6 +8,13 @@ Local Unix stream: unsigned 32-bit big-endian payload length, then exactly that 
 
 Responses contain version, matching id and exactly one of result/error. Errors carry code and message. Version mismatch is VERSION; malformed typed target INVALID_ID; absent typed target STALE_ID. IDs are opaque `session_`, `window_`, `pane_`, `client_` plus 32 random hexadecimal digits. Names are display labels and never implicit targets.
 
+Narrow split geometry (2026-11-15): a split's visible rectangle can be one column wide, but its canonical terminal
+and PTY retain at least two columns, as required for fullwidth Unicode characters.
+`pane.list` and the rendered grid report that canonical size; the frame's `rect`
+reports the available view. Clients must clip painting and pointer hits to the
+rectangle. Widening reveals the retained grid without replacing the child process.
+This floor does not change the existing session-size voting or viewer roles.
+
 | Method | Params | Result/behavior |
 | --- | --- | --- |
 | health/version/capabilities/schema | {} | status, version, explicit limitations, discovery |

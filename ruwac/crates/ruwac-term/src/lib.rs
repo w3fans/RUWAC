@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex};
 type Formatter = Arc<dyn Fn(&str) -> String + Sync + Send>;
 /// Largest OSC 52 mouse selection a program may offer to the desktop.
 pub const MAX_SELECTION: usize = 128 * 1024;
+/// Fullwidth characters need a leading cell and a spacer, even in a narrow view.
+pub const MIN_COLUMNS: u16 = alacritty_terminal::term::MIN_COLUMNS as u16;
 #[derive(Default)]
 struct Pending {
     replies: Vec<String>,
@@ -272,6 +274,7 @@ pub struct Terminal {
 }
 impl Terminal {
     pub fn new(rows: u16, cols: u16) -> Self {
+        let cols = cols.max(MIN_COLUMNS);
         let events = Events::default();
         let config = Config {
             scrolling_history: history_limit(cols),
@@ -344,6 +347,7 @@ impl Terminal {
         Some(format(text))
     }
     pub fn resize(&mut self, rows: u16, cols: u16) {
+        let cols = cols.max(MIN_COLUMNS);
         self.history_epoch = self.history_epoch.wrapping_add(1);
         self.rows = rows;
         self.cols = cols;
@@ -1193,6 +1197,32 @@ fn color(c: Color) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn narrow_terminal_keeps_wide_characters_and_valid_cursor() {
+        for initial in [1, 2, 80] {
+            let mut t = Terminal::new(4, initial);
+            for requested in [1, 2, 80, 1] {
+                t.resize(4, requested);
+                assert_eq!(t.cols, requested.max(MIN_COLUMNS));
+                for alternate in [false, true] {
+                    t.feed(if alternate {
+                        b"\x1b[?1049h"
+                    } else {
+                        b"\x1b[?1049l"
+                    });
+                    t.feed("\x1b[2J\x1b[H界e\u{301}".as_bytes());
+                    assert!(t.capture(20).contains('界'));
+                    assert!(t.capture(20).contains("e\u{301}"));
+                    let grid = t.snapshot();
+                    assert_eq!(grid["cols"], t.cols);
+                    assert!(grid["cursor"]["col"].as_u64().unwrap() < u64::from(t.cols));
+                    assert_eq!(grid["cells"][0].as_array().unwrap().len(), t.cols as usize);
+                    let archive = t.archive();
+                    assert_eq!(archive.cols, t.cols);
+                }
+            }
+        }
+    }
     #[test]
     fn styled_history_preserves_scrolled_unicode_and_snapshot_identity() {
         let mut t = Terminal::new(3, 20);

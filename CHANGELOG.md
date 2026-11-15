@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.4.81 — 2026-11-15 — Stable source release
+
+- Prevent a wide Unicode character in a one-column split from stopping the
+  terminal engine. Keep the PTY and emulator at their shared two-column minimum,
+  preserving text and child processes while the view is narrower. Clip GTK
+  painting and pointer hits to each pane's rectangle so the hidden column does
+  not cover or capture clicks in the divider.
+
 ## v0.4.80 — 2026-11-15 — Stable source release
 
 - Reuse checkpoint history row scratch storage to reduce typing stalls while

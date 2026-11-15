@@ -2516,8 +2516,8 @@ impl View {
         let frame = self.frame.borrow();
         let frame = frame.as_ref()?;
         for p in frame["panes"].as_array()? {
-            let rows = p["grid"]["rows"].as_u64()? as usize;
-            let cols = p["grid"]["cols"].as_u64()? as usize;
+            let rows = p["grid"]["rows"].as_u64()?.min(p["rect"]["rows"].as_u64()?) as usize;
+            let cols = p["grid"]["cols"].as_u64()?.min(p["rect"]["cols"].as_u64()?) as usize;
             let px = p["rect"]["x"].as_f64().unwrap_or(0.0) * self.cell_width.get();
             let py = p["rect"]["y"].as_f64().unwrap_or(0.0) * self.cell_height.get();
             if y >= py
@@ -3484,6 +3484,13 @@ impl View {
                 p["rect"]["x"].as_f64().unwrap_or(0.0) * self.cell_width.get(),
                 p["rect"]["y"].as_f64().unwrap_or(0.0) * self.cell_height.get(),
             );
+            cr.rectangle(
+                0.0,
+                0.0,
+                p["rect"]["cols"].as_f64().unwrap_or(0.0) * self.cell_width.get(),
+                p["rect"]["rows"].as_f64().unwrap_or(0.0) * self.cell_height.get(),
+            );
+            cr.clip();
             let y = 0.0;
             let viewport = ((self.history_offset.get() > 0
                 || self.history_lines.borrow().is_frozen())

@@ -1,16 +1,21 @@
-RUWAC v0.4.80 — fewer typing stalls with busy terminal history
+RUWAC v0.4.81 — keep narrow Unicode panes alive
 
-Reuse the temporary row buffer while encoding checkpoint history. Retained
-history rows still own their text; byte limits, whitespace/wrap semantics,
-styles, persistence intervals and canonical recovery format remain unchanged.
+Prevent wide Unicode output in a one-column split from stopping the terminal
+engine. The PTY and emulator now share the terminal library's two-column
+minimum, while a smaller visible rectangle clips the retained grid. Widening
+the pane keeps the same child process and preserves its Unicode text.
 
-In a controlled local TUI comparison with twenty busy, history-filled windows,
-p99 echo latency was 34.9–36.4 ms on the original engine and 16.6 ms on the
-candidate. All 2,400 measured keys completed without timeouts; quiet latency
-was essentially unchanged. These measurements exclude physical GTK painting,
-RDP and WAN delay, and do not claim Screen/tmux parity.
+GTK painting and pointer hits stay within each pane's visible rectangle;
+the hidden column cannot cover or capture clicks in the split divider.
+The existing session-size voting and non-sizing viewer roles are unchanged.
 
-Recovery and Unicode/blank/wrapped-row budget regressions are retained.
+Candidate verification covers 165 headless and 277 desktop unit tests,
+40 real-PTY narrow/wide resize cycles, the 100-cycle viewer regression,
+checkpoint preservation, maximum grids and an isolated GTK comparison.
+The published previous GUI reproduces divider painting and hit errors;
+the candidate fixes both. This does not claim physical hardware acceptance.
+
 The desktop RSA advisory remains visible; Windows acceptance remains pending
-on R7. Existing engines and active terminal programs survive package updates.
-They retain their loaded code until the owner opens an updated engine.
+on R7. Package updates preserve active engines and programs. Open Updates →
+Open updated engine, or run `ruwac engine gui`, to test the new engine without
+closing existing terminal processes.
