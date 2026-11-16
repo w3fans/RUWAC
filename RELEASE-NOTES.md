@@ -1,21 +1,31 @@
-RUWAC v0.4.81 — keep narrow Unicode panes alive
+RUWAC v0.4.82 — image paste to npm Claude Code and opt-in controller sizing
 
-Prevent wide Unicode output in a one-column split from stopping the terminal
-engine. The PTY and emulator now share the terminal library's two-column
-minimum, while a smaller visible rectangle clips the retained grid. Widening
-the pane keeps the same child process and preserves its Unicode text.
+Ctrl+V of a clipboard image now reaches Claude Code installed through npm,
+whose native program runs as `.../@anthropic-ai/claude-code/bin/claude.exe`.
+A nested RUWAC session previously refused the handoff with "PNG handoff
+requires the selected local agent" while Codex in the same session worked.
+An unrelated program named `claude.exe` is still not treated as an agent.
 
-GTK painting and pointer hits stay within each pane's visible rectangle;
-the hidden column cannot cover or capture clicks in the split divider.
-The existing session-size voting and non-sizing viewer roles are unchanged.
+Sessions can opt in to controller-owned sizing: create one with
+`ruwac session create --size-policy controller_owned` (or `size_policy` in
+`session.create`). Only the client that explicitly claims control resizes it;
+every attachment, including older clients, starts as a viewer whose window
+never resizes the shared terminal. The TUI offers `size claim`, `size
+takeover` and `size release` in command mode and shows Controller or Viewer in
+its status bar. The GTK terminal shows "Take sizing control…" with Cancel as
+the default, or "Release sizing control". Detaching or losing the connection
+releases control and keeps the last size. Existing and ordinary sessions keep
+their current sizing.
 
-Candidate verification covers 165 headless and 277 desktop unit tests,
-40 real-PTY narrow/wide resize cycles, the 100-cycle viewer regression,
-checkpoint preservation, maximum grids and an isolated GTK comparison.
-The published previous GUI reproduces divider painting and hit errors;
-the candidate fixes both. This does not claim physical hardware acceptance.
+Verification covers headless and desktop unit tests, real-PTY sizing and
+compatibility suites with actual 0.4.49 and 0.4.81 terminals, and an isolated
+GTK comparison where the published 0.4.81 desktop fails the new checks. GTK
+pan/fit, SSH host acceptance of controlled sessions and physical
+two-workstation acceptance remain open. The desktop RSA advisory remains
+visible.
 
-The desktop RSA advisory remains visible; Windows acceptance remains pending
-on R7. Package updates preserve active engines and programs. Open Updates →
-Open updated engine, or run `ruwac engine gui`, to test the new engine without
-closing existing terminal processes.
+Update a Fedora machine with:
+
+    sudo dnf upgrade --refresh ruwac ruwac-desktop
+
+Reopen the GUI to load the new client; running engines and terminals are kept.
