@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Ctrl+V of a clipboard image now reaches Claude Code installed through npm,
+  whose native binary runs as `.../@anthropic-ai/claude-code/bin/claude.exe`.
+  A nested RUWAC session refused the handoff with "PNG handoff requires the
+  selected local agent" while Codex in the same session worked.
 - Opt-in controller-owned sizing: a session created with
   `--size-policy controller_owned` (`session.create` `size_policy`) is sized
   only by the one client that explicitly claims it. Every attachment, including
