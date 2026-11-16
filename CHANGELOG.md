@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.4.82 — 2026-11-16 — Stable source release
+
 - Ctrl+V of a clipboard image now reaches Claude Code installed through npm,
   whose native binary runs as `.../@anthropic-ai/claude-code/bin/claude.exe`.
   A nested RUWAC session refused the handoff with "PNG handoff requires the
