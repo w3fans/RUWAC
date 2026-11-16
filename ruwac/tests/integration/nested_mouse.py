@@ -121,6 +121,78 @@ try:
     assert log.exists() and b'\x1b[<64;7;' in log.read_bytes(), log.read_bytes() if log.exists() else 'no log'
     checks.append('mouse-program-receives-wheel-in-pane-coordinates')
 
+    # Middle-click (three-finger tap) pastes even while a program tracks the
+    # mouse: the program gets the pasted text, never the button event.
+    before = log.read_bytes()
+    os.write(fd, b'\x1b[<1;5;5M\x1b[<1;5;5m')
+    for _ in range(100):
+        if word.encode() in log.read_bytes()[len(before):]:
+            break
+        time.sleep(.05)
+    delta = log.read_bytes()[len(before):]
+    assert word.encode() in delta and b'\x1b[<1;' not in delta, delta
+    checks.append('middle-click-pastes-into-mouse-program-without-forwarding-the-button')
+    os.write(fd, b'q')
+    for _ in range(100):
+        if capture().rstrip().endswith('$'):
+            break
+        time.sleep(.05)
+
+    # An agent (here a generated program named codex) that tracks all mouse
+    # motion on the alternate screen: a plain drag selects in the client, a
+    # plain click and the wheel still reach the agent.
+    import shutil
+    agent = root / 'codex'; shutil.copy2(sys.executable, agent); agent.chmod(0o700)
+    fixture = root / 'agent.py'; agent_log = root / 'agent.log'
+    fixture.write_text("import os,sys,tty\nlog=open(sys.argv[1],'ab',0)\ntty.setraw(0)\n"
+                       "os.write(1,b'\\x1b[?1049h\\x1b[?1000h\\x1b[?1002h\\x1b[?1003h\\x1b[?1006h\\x1b[2J\\x1b[3;1HAGENTWORD remainder\\x1b[5;1HAGENT_READY')\n"
+                       "while True:\n b=os.read(0,256)\n if not b or b'q' in b: break\n log.write(b)\n"
+                       "os.write(1,b'\\x1b[?1003l\\x1b[?1002l\\x1b[?1000l\\x1b[?1006l\\x1b[?1049l')\n")
+    os.write(fd, f'\x15{agent} {fixture} {agent_log}\r'.encode())
+    for _ in range(100):
+        if 'AGENT_READY' in capture():
+            break
+        time.sleep(.05)
+    assert 'AGENT_READY' in capture(), capture()[-200:]
+    probe = cli('rpc', 'agent.probe', '--params', json.dumps({'pane': pane}))['result']
+    assert probe['adapter'] == 'codex' and probe['process_detected'], probe
+    time.sleep(.5); drain(.5)
+    os.write(fd, b'\x1b[<0;1;3M\x1b[<32;5;3M\x1b[<32;9;3M\x1b[<0;9;3m')
+    for _ in range(100):
+        if cli('rpc', 'buffer.get', '--params', json.dumps({'session': session}))['result']['text'].strip() == 'AGENTWORD':
+            break
+        time.sleep(.05)
+    copied = cli('rpc', 'buffer.get', '--params', json.dumps({'session': session}))['result']['text']
+    assert copied.strip() == 'AGENTWORD', copied
+    seen = agent_log.read_bytes() if agent_log.exists() else b''
+    assert b'\x1b[<0;' not in seen and b'\x1b[<32;' not in seen, seen
+    checks.append('agent-pane-drag-selects-in-client-not-in-agent')
+    drain(.5)
+    os.write(fd, b'\x1b[<0;4;6M\x1b[<0;4;6m')
+    for _ in range(100):
+        seen = agent_log.read_bytes() if agent_log.exists() else b''
+        if b'\x1b[<0;4;6M' in seen and b'\x1b[<0;4;6m' in seen:
+            break
+        time.sleep(.05)
+    assert b'\x1b[<0;4;6M' in seen and b'\x1b[<0;4;6m' in seen, seen
+    checks.append('agent-pane-plain-click-still-reaches-agent')
+    os.write(fd, b'\x1b[<64;7;5M')
+    for _ in range(100):
+        if b'\x1b[<64;7;5M' in agent_log.read_bytes():
+            break
+        time.sleep(.05)
+    assert b'\x1b[<64;7;5M' in agent_log.read_bytes(), agent_log.read_bytes()
+    checks.append('agent-pane-wheel-still-reaches-agent')
+    before = agent_log.read_bytes()
+    os.write(fd, b'\x1b[<1;5;5M\x1b[<1;5;5m')
+    for _ in range(100):
+        if b'AGENTWORD' in agent_log.read_bytes()[len(before):]:
+            break
+        time.sleep(.05)
+    delta = agent_log.read_bytes()[len(before):]
+    assert b'AGENTWORD' in delta and b'\x1b[<1;' not in delta, delta
+    checks.append('agent-pane-middle-click-pastes-the-selection')
+
     (a.evidence / 'nested-mouse.json').write_text(json.dumps({'status': 'PASS', 'checks': checks}, indent=2))
     print(f'Nested mouse PASS {len(checks)} checks')
 finally:

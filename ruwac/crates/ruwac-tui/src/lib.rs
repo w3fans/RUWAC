@@ -1160,6 +1160,31 @@ impl Config {
         format!("^{}", (self.prefix + b'@') as char)
     }
 }
+/// A package update replaced this client's program on disk; it keeps running
+/// the old code until it is reattached. Checked at most every five seconds.
+fn update_notice() -> &'static str {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    static STALE: AtomicBool = AtomicBool::new(false);
+    static CHECKED: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    if !STALE.load(Ordering::Relaxed) && now.saturating_sub(CHECKED.load(Ordering::Relaxed)) >= 5 {
+        CHECKED.store(now, Ordering::Relaxed);
+        STALE.store(
+            replaced_on_disk(std::fs::read_link("/proc/self/exe").ok()),
+            Ordering::Relaxed,
+        );
+    }
+    if STALE.load(Ordering::Relaxed) {
+        " · UPDATE INSTALLED: detach (prefix d) and reattach to load it"
+    } else {
+        ""
+    }
+}
+fn replaced_on_disk(exe: Option<std::path::PathBuf>) -> bool {
+    exe.is_some_and(|path| path.to_string_lossy().ends_with(" (deleted)"))
+}
 struct WindowRow {
     id: String,
     name: String,
@@ -1576,7 +1601,11 @@ fn draw_mode(
     cache: &mut DrawCache,
 ) -> io::Result<()> {
     if matches!(mode, Mode::Live) {
-        return draw(snapshot, &format!("{} · {}", config.label(), status), cache);
+        return draw(
+            snapshot,
+            &format!("{}{} · {}", config.label(), update_notice(), status),
+            cache,
+        );
     }
     cache.clear();
     let height = size.0 as usize;
@@ -1782,6 +1811,10 @@ pub fn attach_with_role(
     let mut screen_size = terminal_dimensions();
     // Left-button press on a pane without mouse support: (pane, column, row).
     let mut drag: Option<(String, usize, usize)> = None;
+    // A left press held back from an agent (Codex, Claude Code) that tracks
+    // the mouse: a drag selects in this client, a plain click is delivered
+    // on release.
+    let mut agent_press: Option<(String, Value)> = None;
     let mut clicks = double_click::Clicks::default();
     // Middle-click awaiting the outer terminal's selection: (pane, asked at).
     let mut primary_paste: Option<(String, Instant)> = None;
@@ -1962,7 +1995,7 @@ pub fn attach_with_role(
                             &snapshot,
                             &b,
                             screen_size,
-                            &format!("{} · {}", config.label(), status),
+                            &format!("{}{} · {}", config.label(), update_notice(), status),
                         );
                         if bar {
                             clicks.clear();
@@ -1985,7 +2018,48 @@ pub fn attach_with_role(
                             call(&mut s, "pane.select", json!({"pane":pane}))?;
                             snapshot = call(&mut s, "client.render", json!({}))?;
                         }
-                        if wants {
+                        // Middle-click (touchpad three-finger tap) always
+                        // pastes; programs that track the mouse never use it
+                        // and would swallow the paste.
+                        let code = event["button"].as_u64().unwrap_or(0);
+                        let released = event["release"] == true;
+                        let middle = matches!(code, 1 | 33);
+                        // In an agent's pane a plain left drag selects text
+                        // here (their own highlight never reaches the desktop
+                        // selection); clicks, wheel and hover still reach the
+                        // agent. Other mouse programs keep their drags.
+                        if code == 0 && !released {
+                            agent_press = if wants {
+                                call(&mut s, "agent.probe", json!({"pane":pane}))
+                                    .ok()
+                                    .filter(|probe| {
+                                        probe["process_detected"] == true
+                                            && matches!(
+                                                probe["adapter"].as_str(),
+                                                Some("codex" | "claude")
+                                            )
+                                    })
+                                    .map(|_| (pane.clone(), event.clone()))
+                            } else {
+                                None
+                            };
+                        }
+                        let selecting = agent_press.is_some() && matches!(code, 0 | 32);
+                        if wants && code == 0 && released {
+                            if let Some((start, press)) = agent_press.take() {
+                                // No drag happened: deliver the held click.
+                                if start == pane && drag.is_some() {
+                                    for click in [press, event.clone()] {
+                                        let _ = call(
+                                            &mut s,
+                                            "client.input",
+                                            json!({"pane":pane,"kind":"mouse","text":"","mouse_event":click}),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        if wants && !middle && !selecting {
                             clicks.clear();
                             let result = call(
                                 &mut s,
@@ -3014,6 +3088,12 @@ mod display_identity_tests {
         assert_eq!(sgr(&json!(256), true), "39");
         assert_eq!(sgr(&json!(257), false), "49");
         assert_eq!(sgr(&json!(260), true), "38;5;1");
+    }
+    #[test]
+    fn a_replaced_program_file_is_recognized_as_an_installed_update() {
+        assert!(replaced_on_disk(Some("/usr/bin/ruwac (deleted)".into())));
+        assert!(!replaced_on_disk(Some("/usr/bin/ruwac".into())));
+        assert!(!replaced_on_disk(None));
     }
     #[test]
     fn status_names_the_sizing_role_of_this_connection() {

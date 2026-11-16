@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Middle-click (touchpad three-finger tap) in a RUWAC session now always
+  pastes, also while the program in the pane tracks the mouse (Codex, btm,
+  editors). Such programs received the button and nothing was pasted.
+- In a Codex or Claude Code pane a plain left drag selects text in RUWAC, so
+  it reaches the desktop selection and middle-click pastes it; clicks, the
+  wheel and pointer motion still reach the agent. Other mouse programs keep
+  their drags.
+- After a package update, a running RUWAC window shows "Restart to update" on
+  its Updates button and a RUWAC session shows "UPDATE INSTALLED" in its
+  status bar until it is reattached; both kept running old code silently.
+
 ## v0.4.82 — 2026-11-16 — Stable source release
 
 - Ctrl+V of a clipboard image now reaches Claude Code installed through npm,

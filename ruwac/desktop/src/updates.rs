@@ -319,6 +319,33 @@ fn flag_engine_state(button: &gtk::Button, socket: &std::path::Path) {
     );
 }
 
+fn replaced_on_disk(exe: Option<std::path::PathBuf>) -> bool {
+    exe.is_some_and(|path| path.to_string_lossy().ends_with(" (deleted)"))
+}
+/// A package update replaced this running GUI's program file. Say so in the
+/// header: the window keeps the old code until it is reopened. Terminals keep
+/// running in their engines either way.
+fn flag_replaced_program(button: &gtk::Button) {
+    let weak = button.downgrade();
+    glib::timeout_add_seconds_local(30, move || {
+        let Some(button) = weak.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        if !replaced_on_disk(std::fs::read_link("/proc/self/exe").ok()) {
+            return glib::ControlFlow::Continue;
+        }
+        button.set_child(Some(&crate::chrome::bar_child(
+            "software-update-available-symbolic",
+            "Restart to update",
+        )));
+        button.add_css_class("suggested-action");
+        button.set_tooltip_text(Some(
+            "A RUWAC update was installed while this window was open. Close and reopen RUWAC to load it; terminals keep running. Nested RUWAC sessions also need a detach and reattach.",
+        ));
+        glib::ControlFlow::Break
+    });
+}
+
 fn request(args: &[&str]) -> Result<Value, String> {
     let managed =
         std::env::current_exe().is_ok_and(|exe| ruwac_protocol::managed_rpm_installation(&exe));
@@ -423,6 +450,7 @@ pub fn attach(
     button.set_tooltip_text(Some("Check GitHub for RUWAC updates"));
     header.pack_end(&button);
     flag_engine_state(&button, socket);
+    flag_replaced_program(&button);
     if std::env::current_exe().is_ok_and(|exe| ruwac_protocol::distribution_installation(&exe)) {
         // Distribution packages never contact GitHub or start RUWAC's updater.
         button.set_tooltip_text(Some(ruwac_protocol::DISTRIBUTION_UPDATE_HINT));
@@ -825,6 +853,16 @@ pub fn fixture(window: &adw::ApplicationWindow, command: &Value) -> Value {
 
 #[cfg(test)]
 mod engine_tests {
+    #[test]
+    fn a_replaced_program_file_is_recognized_as_an_installed_update() {
+        assert!(super::replaced_on_disk(Some(
+            "/usr/bin/ruwac-desktop (deleted)".into()
+        )));
+        assert!(!super::replaced_on_disk(Some(
+            "/usr/bin/ruwac-desktop".into()
+        )));
+        assert!(!super::replaced_on_disk(None));
+    }
     use super::*;
     #[test]
     fn updated_engine_uses_current_installation_and_independent_state() {
