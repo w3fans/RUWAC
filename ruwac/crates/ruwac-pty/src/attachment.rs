@@ -25,8 +25,9 @@ impl Agent {
     }
 }
 /// Codex is its own `codex` executable. Claude Code is either the native
-/// binary (`claude`, or `.../claude/versions/<version>`) or the npm package run
-/// by Node/Bun.
+/// binary (`claude`, or `.../claude/versions/<version>`), the npm package's
+/// native binary (`.../@anthropic-ai/claude-code*/.../claude.exe`, also on
+/// Linux), or the npm package run by Node/Bun.
 fn agent_of(root: &str) -> Option<Agent> {
     let exe = fs::read_link(format!("{root}/exe")).ok()?;
     let name = exe.file_name()?.to_str()?;
@@ -34,7 +35,18 @@ fn agent_of(root: &str) -> Option<Agent> {
         return Some(Agent::Codex);
     }
     let parent = exe.parent();
+    let npm_native = name == "claude.exe"
+        && exe.ancestors().any(|dir| {
+            dir.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("claude-code"))
+                && dir
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|n| n == "@anthropic-ai")
+        });
     if name == "claude"
+        || npm_native
         || (parent
             .and_then(Path::file_name)
             .is_some_and(|n| n == "versions")
@@ -289,6 +301,16 @@ mod tests {
             ("codex", Some(Agent::Codex)),
             ("claude", Some(Agent::Claude)),
             ("claude/versions/9.9.9", Some(Agent::Claude)),
+            // npm installs ship the native binary as bin/claude.exe on Linux.
+            (
+                "@anthropic-ai/claude-code/bin/claude.exe",
+                Some(Agent::Claude),
+            ),
+            (
+                "@anthropic-ai/claude-code-linux-x64/claude.exe",
+                Some(Agent::Claude),
+            ),
+            ("other/bin/claude.exe", None),
             ("other/versions/9.9.9", None),
             ("sleep", None),
         ];
