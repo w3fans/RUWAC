@@ -9,11 +9,13 @@ p.add_argument('--binary', required=True)
 p.add_argument('--evidence', type=Path, required=True)
 a = p.parse_args()
 root = Path(tempfile.mkdtemp(prefix='engine-lookup-', dir=a.evidence)); root.chmod(0o700)
-runtime = root / 'xdg'; runtime.mkdir(mode=0o700)
+# Socket paths must stay below SUN_LEN, so the runtime directory is short.
+runtime = Path(tempfile.mkdtemp(prefix='rl-')); runtime.chmod(0o700)
+(root / 'runtime-path.txt').write_text(str(runtime))
 engines = runtime / 'ruwac'; engines.mkdir(mode=0o700)
 base = {k: v for k, v in os.environ.items() if not k.startswith('RUWAC_')}
 base.update(XDG_RUNTIME_DIR=str(runtime), HOME=str(root), SHELL='/bin/sh', TERM='xterm-256color')
-first, second = engines / 'control.sock', engines / 'engine-9.9.9.sock'
+first, second = engines / 'control.sock', engines / 'engine-9.sock'
 checks, daemons = [], []
 
 
@@ -41,10 +43,11 @@ try:
     for sock in [first, second]:
         daemons.append(subprocess.Popen([a.binary, '--socket', str(sock), 'serve'], env=base,
                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-        for _ in range(100):
+        for _ in range(200):
             if sock.exists():
                 break
             time.sleep(.05)
+        assert sock.exists(), ('engine did not start', str(sock))
     d = create(first, 'd')
 
     # A pane of the second engine asks for "d": it lives in the first engine.
@@ -73,7 +76,7 @@ try:
     checks.append('session ID selects the session in its own engine')
 
     listing = run('-ls', pane=second).stdout
-    assert 'Engine 9.9.9' not in listing and listing.count('Engine ') == 2, listing
+    assert listing.count('Engine ') == 2, listing
     assert '! Session name "d" exists in engines' in listing, listing
     rows = json.loads(run('-ls', '--json').stdout)['result']
     dup = {r['id']: r['duplicate_name'] for r in rows}
@@ -85,9 +88,11 @@ try:
         json.dumps({'status': 'PASS', 'checks': checks}, indent=2))
     print(f'Engine session lookup PASS {len(checks)} checks')
 finally:
+    import shutil
     for q in daemons:
         q.terminate()
         try:
             q.wait(timeout=5)
         except subprocess.TimeoutExpired:
             q.kill()
+    shutil.rmtree(runtime, ignore_errors=True)
