@@ -209,8 +209,9 @@ try:
   time.sleep(1.5)
  assert command('inspect')['drawn'][0]==before_draw,'unrelated session redrew idle canvas'
  checks.append('idle-selected-canvas-does-not-redraw-for-other-session-output')
- command('focus-view');chord(19);eventually(lambda:command('sidebar-shell')['shown'])
- call('Stop');checks.append('real-GDK-Ctrl-Shift-T-new-terminal-and-Ctrl-Shift-R-machine-chooser')
+ # Ctrl+Shift+R is the program's key: the Machines panel must stay closed.
+ command('focus-view');chord(19);time.sleep(.6);assert not command('sidebar-shell')['shown'],'Ctrl+Shift+R opened the Machines panel'
+ call('Stop');checks.append('real-GDK-Ctrl-Shift-T-new-terminal-and-Ctrl-Shift-R-left-to-the-program')
  command('snapshot')
  command('sidebar-shell',shown=False)
  command('chrome',width=1240,height=880)

@@ -5,7 +5,8 @@ use std::{
     collections::HashSet,
 };
 
-/// Ctrl+Shift+T creates a terminal; Ctrl+Shift+R chooses a saved RDP host.
+/// Ctrl+Shift+T creates a terminal. Ctrl+Shift+R is not claimed: it belongs
+/// to the program (reverse search, browser reload in a remote desktop).
 pub fn new_tab(key: gdk::Key, mods: gdk::ModifierType) -> Option<bool> {
     if (mods - gdk::ModifierType::LOCK_MASK)
         != (gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK)
@@ -14,7 +15,6 @@ pub fn new_tab(key: gdk::Key, mods: gdk::ModifierType) -> Option<bool> {
     }
     match key.to_unicode()?.to_ascii_lowercase() {
         't' => Some(false),
-        'r' => Some(true),
         _ => None,
     }
 }
@@ -201,9 +201,13 @@ mod new_tab_tests {
         let chord = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK;
         assert_eq!(new_tab(gdk::Key::T, chord), Some(false));
         assert_eq!(
-            new_tab(gdk::Key::r, chord | gdk::ModifierType::LOCK_MASK),
-            Some(true)
+            new_tab(gdk::Key::t, chord | gdk::ModifierType::LOCK_MASK),
+            Some(false)
         );
+        // Ctrl+Shift+R belongs to the program, never to the Machines panel.
+        for key in [gdk::Key::r, gdk::Key::R] {
+            assert_eq!(new_tab(key, chord), None);
+        }
         assert_eq!(new_tab(gdk::Key::t, gdk::ModifierType::CONTROL_MASK), None);
         assert_eq!(
             new_tab(gdk::Key::R, chord | gdk::ModifierType::ALT_MASK),
@@ -291,13 +295,18 @@ mod mapped_tab_tests {
     #[test]
     fn mapped_tab_chords_are_not_host_actions() {
         let mods = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK;
-        for key in [gdk::Key::t, gdk::Key::T, gdk::Key::r, gdk::Key::R] {
+        for key in [gdk::Key::t, gdk::Key::T] {
             assert_eq!(local_new_tab(key, mods, true), None);
             assert_eq!(
                 local_new_tab(key, mods | gdk::ModifierType::LOCK_MASK, true),
                 None
             );
             assert!(local_new_tab(key, mods, false).is_some());
+        }
+        // Ctrl+Shift+R is never a host action, mapped or not.
+        for key in [gdk::Key::r, gdk::Key::R] {
+            assert_eq!(local_new_tab(key, mods, true), None);
+            assert_eq!(local_new_tab(key, mods, false), None);
         }
     }
 }

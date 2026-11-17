@@ -9,6 +9,8 @@
   it reaches the desktop selection and middle-click pastes it; clicks, the
   wheel and pointer motion still reach the agent. Other mouse programs keep
   their drags.
+- Ctrl+Shift+R no longer opens the Machines panel; the key reaches the
+  terminal program or remote desktop. Machines stays on Alt+M and its button.
 - After a package update, a running RUWAC window shows "Restart to update" on
   its Updates button and a RUWAC session shows "UPDATE INSTALLED" in its
   status bar until it is reattached; both kept running old code silently.
