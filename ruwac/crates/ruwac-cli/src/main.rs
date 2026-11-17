@@ -359,18 +359,83 @@ fn job_request(args: &[String]) -> io::Result<Request> {
     Ok(request(&format!("job.{verb}"), params))
 }
 
-// Exact identities take precedence; duplicate names never select an arbitrary session.
-/// The engine that already holds this exact session name or ID, searching the
-/// new-session route first. Read-only; unreachable engines are skipped.
-fn find_session(default: &std::path::Path, name: Option<&str>) -> Option<std::path::PathBuf> {
-    let name = name?;
-    engine::lookup_order(default).into_iter().find(|socket| {
-        startup::connect(socket).is_ok()
-            && rpc_quiet(socket, &request("session.list", json!({})))
+/// Every running engine (in lookup order) whose sessions include this exact
+/// name or ID, with its package version. Read-only; unreachable engines are
+/// skipped. An engine holding the name twice is still one match: attaching
+/// there reports that ambiguity itself.
+fn engines_with_session(
+    order: &[std::path::PathBuf],
+    name: &str,
+) -> Vec<(std::path::PathBuf, String)> {
+    order
+        .iter()
+        .filter(|socket| startup::connect(socket).is_ok())
+        .filter_map(|socket| {
+            let list = rpc_quiet(socket, &request("session.list", json!({}))).ok()?;
+            if matches!(named_session_id(&list, name), Ok(None)) {
+                return None;
+            }
+            let version = rpc_quiet(socket, &request("version", json!({})))
                 .ok()
-                .and_then(|list| named_session_id(&list, name).ok().flatten())
-                .is_some()
-    })
+                .and_then(|v| v["result"]["package"].as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unknown".into());
+            Some((socket.clone(), version))
+        })
+        .collect()
+}
+// Exact identities take precedence; duplicate names never select an arbitrary session.
+/// The engine that already holds this exact session name or ID. A name held
+/// by sessions in several engines is refused: attach by session ID instead.
+fn find_session(
+    order: &[std::path::PathBuf],
+    name: Option<&str>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(name) = name else { return Ok(None) };
+    let found = engines_with_session(order, name);
+    match found.as_slice() {
+        [] => Ok(None),
+        [(socket, _)] => Ok(Some(socket.clone())),
+        _ => {
+            let mut message = format!(
+                "Session name \"{name}\" exists in {} engines; choose one by ID:",
+                found.len()
+            );
+            for (socket, version) in &found {
+                let ids = rpc_quiet(socket, &request("session.list", json!({})))
+                    .ok()
+                    .and_then(|v| v["result"].as_array().cloned())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|row| row["name"] == name)
+                    .filter_map(|row| row["id"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>();
+                for id in ids {
+                    message.push_str(&format!("\n  ruwac -r {id}    (engine {version})"));
+                }
+            }
+            Err(message)
+        }
+    }
+}
+/// Status-bar note naming the engine an attachment lives in.
+fn engine_note(socket: &std::path::Path, others: &[(std::path::PathBuf, String)]) -> String {
+    let version = rpc_quiet(socket, &request("version", json!({})))
+        .ok()
+        .and_then(|v| v["result"]["package"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".into());
+    let elsewhere: Vec<_> = others
+        .iter()
+        .filter(|(s, _)| s != socket)
+        .map(|(_, v)| v.as_str())
+        .collect();
+    if elsewhere.is_empty() {
+        format!(" · engine {version}")
+    } else {
+        format!(
+            " · engine {version} · NAME ALSO IN {}",
+            elsewhere.join(", ")
+        )
+    }
 }
 fn rpc_quiet(socket: &std::path::Path, r: &Request) -> io::Result<Value> {
     let mut s = startup::connect(socket)?;
@@ -530,6 +595,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // explicit --socket, RUWAC_SOCKET (set inside every pane) or --host stays literal.
     let implicit =
         explicit_socket.is_none() && std::env::var_os("RUWAC_SOCKET").is_none() && host.is_none();
+    // Inside a pane RUWAC_SOCKET names that pane's engine. It stays the place
+    // for new work, but existing sessions are found by name in every engine
+    // of the same per-user directory (a pane of an older engine must not
+    // create a second "d" beside the one that already runs elsewhere).
+    let per_user_default = PathBuf::from(format!(
+        "{}/control.sock",
+        std::env::var("XDG_RUNTIME_DIR")
+            .map(|r| format!("{r}/ruwac"))
+            .unwrap_or_else(|_| format!("/tmp/ruwac-{}", unsafe { libc::geteuid() }))
+    ));
+    let pane_routed = !implicit
+        && explicit_socket.is_none()
+        && host.is_none()
+        && socket.parent().is_some()
+        && socket.parent() == per_user_default.parent();
     let remote = host.map(|host| remote::Remote {
         host,
         binary: remote_binary.unwrap_or_else(|| "ruwac".into()),
@@ -613,21 +693,46 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let mut listing_engines = Vec::new();
+    let mut session_engines = Vec::new();
+    if pane_routed {
+        let named = a.get(1).filter(|_| a.len() == 2).map(String::as_str);
+        let mut order = vec![socket.clone()];
+        order.extend(
+            engine::lookup_order(&per_user_default)
+                .into_iter()
+                .filter(|s| *s != socket),
+        );
+        match a.first().map(String::as_str) {
+            Some("-S" | "-R" | "-dmS" | "-r" | "-x") if named.is_some() => {
+                if let Some(found) = find_session(&order, named)? {
+                    socket = found;
+                }
+                session_engines = engines_with_session(&order, named.unwrap_or_default());
+            }
+            Some("-ls" | "-list") => listing_engines = order,
+            _ => (),
+        }
+    }
     if implicit {
         let default = socket.clone();
         let named = a.get(1).filter(|_| a.len() >= 2).map(String::as_str);
+        let order = engine::lookup_order(&default);
         match a.first().map(String::as_str) {
             // Existing named sessions are attached where they live; only a
             // genuinely new session goes to the installed engine.
             Some("-S" | "-R" | "-dmS") if a.len() == 2 => {
-                socket = match find_session(&default, named) {
+                socket = match find_session(&order, named)? {
                     Some(found) => found,
                     None => engine::route_for_new_work(&default)?,
                 };
+                session_engines = engines_with_session(&order, named.unwrap_or_default());
             }
             Some("-S" | "-r" | "-x" | "-R") => {
-                socket = find_session(&default, named)
-                    .unwrap_or_else(|| engine::current_route(&default));
+                socket =
+                    find_session(&order, named)?.unwrap_or_else(|| engine::current_route(&default));
+                if let Some(named) = named {
+                    session_engines = engines_with_session(&order, named);
+                }
             }
             Some("start" | "gui") => socket = engine::route_for_new_work(&default)?,
             Some("session") if a.get(1).map(String::as_str) == Some("create") => {
@@ -828,6 +933,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // Sessions of every running engine, each labelled with its engine.
                 let mut sections = Vec::new();
                 let mut all = Vec::new();
+                let mut running = 0usize;
                 for engine_socket in &listing_engines {
                     let Some(version) = rpc_quiet(engine_socket, &request("version", json!({})))
                         .ok()
@@ -835,6 +941,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     else {
                         continue;
                     };
+                    running += 1;
                     let mut reply = rpc_quiet(engine_socket, &request("session.list", json!({})))?;
                     if let Some(rows) = reply["result"].as_array_mut() {
                         for row in rows.iter_mut() {
@@ -855,13 +962,39 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         sections.push((version, engine_socket.clone(), reply));
                     }
                 }
+                // The same name in several engines: -S/-r NAME refuses it.
+                let mut engines_by_name: std::collections::BTreeMap<String, Vec<String>> =
+                    Default::default();
+                for row in &all {
+                    if let (Some(name), Some(version)) =
+                        (row["name"].as_str(), row["engine"].as_str())
+                    {
+                        engines_by_name
+                            .entry(name.into())
+                            .or_default()
+                            .push(version.into());
+                    }
+                }
+                engines_by_name.retain(|_, v| v.len() > 1);
+                for row in all.iter_mut() {
+                    row["duplicate_name"] = json!(
+                        row["name"]
+                            .as_str()
+                            .is_some_and(|n| engines_by_name.contains_key(n))
+                    );
+                }
                 if a.len() == 2 {
                     println!("{}", json!({"version":0,"result":all}));
-                } else if sections.len() <= 1 {
+                } else if sections.len() <= 1 && running <= 1 {
                     let reply = sections.pop().map(|s| s.2).unwrap_or(json!({"result":[]}));
                     println!("{}", session_listing(&reply)?);
                 } else {
-                    let route = engine::current_route(&socket);
+                    let route = engine::current_route(&per_user_default);
+                    if sections.is_empty() {
+                        println!(
+                            "No RUWAC sessions in {running} running engines. Create one with: ruwac -S NAME"
+                        );
+                    }
                     for (version, engine_socket, reply) in sections {
                         let role = if engine_socket == route {
                             "new sessions"
@@ -870,6 +1003,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         println!("Engine {version} ({role}) · {}", engine_socket.display());
                         println!("{}\n", session_listing(&reply)?);
+                    }
+                    for (name, versions) in &engines_by_name {
+                        println!(
+                            "! Session name \"{name}\" exists in engines {}; ruwac -r NAME refuses it, attach with ruwac -r SESSION_ID",
+                            versions.join(" and ")
+                        );
                     }
                 }
                 return Ok(());
@@ -952,7 +1091,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             match &remote {
                 Some(remote) => remote.attach(&id)?,
-                None => ruwac_tui::attach(&socket, &id)?,
+                None => {
+                    ruwac_tui::set_engine_note(engine_note(&socket, &session_engines));
+                    ruwac_tui::attach(&socket, &id)?
+                }
             }
         }
         Some("doctor") => {

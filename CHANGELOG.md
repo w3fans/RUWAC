@@ -14,6 +14,21 @@
 - After a package update, a running RUWAC window shows "Restart to update" on
   its Updates button and a RUWAC session shows "UPDATE INSTALLED" in its
   status bar until it is reattached; both kept running old code silently.
+- Copying in a program that uses OSC 52 for the clipboard (Claude Code, and
+  Neovim, tmux or remote shells set up for it) now reaches the desktop
+  clipboard, also through a nested RUWAC session. RUWAC dropped every such
+  write. The write is applied only right after your own click or key press
+  in that pane; programs still cannot read the clipboard. A session on an
+  engine older than 0.4.83 still drops these writes.
+- `ruwac -S NAME` and `ruwac -r NAME` typed inside a RUWAC pane now find the
+  named session in every running engine, not only in the pane's own engine,
+  and refuse a name that exists in more than one engine, listing the session
+  IDs to use instead. From a pane of an older engine, `-S d` created a second
+  "d" beside the existing one.
+- `ruwac -ls` names the engine of every session whenever more than one engine
+  runs, also inside a pane, and flags session names that exist in several
+  engines; `-ls --json` rows carry `duplicate_name`. The RUWAC session status
+  bar shows the engine version and any other engine using the same name.
 
 ## v0.4.82 — 2026-11-16 — Stable source release
 
