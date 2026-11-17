@@ -531,6 +531,11 @@ pub struct View {
     selection_serials: Cell<(u64, u64)>,
     /// The user's last forwarded left release (0) or middle press (1).
     mouse_gesture: Cell<Option<(u32, std::time::Instant)>>,
+    /// Last mouse release or key press delivered to the target pane: the
+    /// user gesture that may back a program's OSC 52 CLIPBOARD write.
+    copy_gesture: Cell<Option<std::time::Instant>>,
+    clipboard_serial_seen: RefCell<(String, u64)>,
+    program_clipboard_pending: RefCell<Option<(String, u64, u64)>>,
     selection_middle: Cell<bool>,
     primary_handler: RefCell<Option<glib::SignalHandlerId>>,
     drag_start: Cell<(f64, f64)>,
@@ -723,6 +728,9 @@ impl View {
             link_click: Cell::new(false),
             selection_serials: Cell::new((0, 0)),
             mouse_gesture: Cell::new(None),
+            copy_gesture: Cell::new(None),
+            clipboard_serial_seen: RefCell::new((String::new(), 0)),
+            program_clipboard_pending: RefCell::new(None),
             selection_middle: Cell::new(false),
             primary_handler: RefCell::new(None),
             drag_start: Cell::new((0.0, 0.0)),
@@ -2085,6 +2093,7 @@ impl View {
             }
             return;
         }
+        self.copy_gesture.set(Some(std::time::Instant::now()));
         self.command(
             "client.input",
             json!({"pane":*self.target.borrow(),"kind":"keyboard","text":text}),
@@ -2350,12 +2359,14 @@ impl View {
                         (
                             p["selection_offer"].as_u64().unwrap_or(0),
                             p["selection_request"].as_u64().unwrap_or(0),
+                            p["clipboard_offer"].as_u64().unwrap_or(0),
                         )
                     })
             };
             *self.frame.borrow_mut() = Some(frame);
-            if let Some(serials) = serials {
-                self.program_selection(serials);
+            if let Some((offer, request, clipboard)) = serials {
+                self.program_selection((offer, request));
+                self.program_clipboard(clipboard);
             }
             if !self.navigation.get() && !self.target.borrow().is_empty() {
                 let pending = std::mem::take(&mut *self.early.borrow_mut());
@@ -2368,6 +2379,9 @@ impl View {
             }
         }
         if let Some((method, v)) = s.reply.pop_front() {
+            if method == "pane.clipboard" {
+                self.apply_program_clipboard(&v);
+            }
             if method == "pane.selection" {
                 let matches = self
                     .program_selection_pending
@@ -2719,6 +2733,9 @@ impl View {
                     .mouse_gesture
                     .set(Some((button & !28, std::time::Instant::now()))),
                 _ => (),
+            }
+            if release && button & !28 < 3 {
+                self.copy_gesture.set(Some(std::time::Instant::now()));
             }
             self.command("client.input",json!({"pane":pane,"kind":"mouse","text":"","mouse_event":{"button":button,"x":c+1,"y":r+1,"release":release}}));
         }
@@ -3177,6 +3194,58 @@ impl View {
                 },
             );
         }
+    }
+    /// A program in the target pane wrote OSC 52 CLIPBOARD (e.g. Claude
+    /// Code's copy, or a nested RUWAC client relaying one). It reaches the
+    /// desktop CLIPBOARD only right after the user's own click or key press
+    /// in this pane; unsolicited writes are ignored. Reads are never served.
+    fn program_clipboard(&self, offer: u64) {
+        let pane = self.target.borrow().clone();
+        let (seen_pane, seen) = self.clipboard_serial_seen.replace((pane.clone(), offer));
+        // A newly targeted pane's existing offer is history, not a new copy.
+        if seen_pane != pane || offer <= seen {
+            return;
+        }
+        let recent = self
+            .copy_gesture
+            .get()
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(2000));
+        if !recent || !self.broker.borrow().desktop_enabled() || !self.area.has_focus() {
+            return;
+        }
+        *self.program_clipboard_pending.borrow_mut() =
+            Some((pane.clone(), self.broker.borrow().epoch(), offer));
+        self.command("pane.clipboard", json!({"pane":pane,"serial":offer}));
+    }
+    fn apply_program_clipboard(&self, v: &serde_json::Value) {
+        let pending = self.program_clipboard_pending.borrow().clone();
+        let Some((pane, epoch, serial)) = pending else {
+            return;
+        };
+        if v["request_pane"].as_str() != Some(pane.as_str())
+            || v["request_serial"].as_u64() != Some(serial)
+        {
+            return;
+        }
+        self.program_clipboard_pending.borrow_mut().take();
+        let Some(text) = v["text"].as_str() else {
+            return;
+        };
+        if pane != *self.target.borrow()
+            || epoch != self.broker.borrow().epoch()
+            || !self.area.has_focus()
+            || !self.broker.borrow().desktop_enabled()
+            || text.is_empty()
+            || text.len() > ruwac_clipboard::MAX_DESKTOP_TEXT
+        {
+            return;
+        }
+        self.broker.borrow_mut().local_copy();
+        self.area.display().clipboard().set_text(text);
+        self.status.set_text(&format!(
+            "Application copied {} bytes to the clipboard",
+            text.len()
+        ));
     }
     fn offer_program_selection(&self, text: &str) -> bool {
         if text.is_empty() || text.len() > ruwac_clipboard::MAX_DESKTOP_TEXT {

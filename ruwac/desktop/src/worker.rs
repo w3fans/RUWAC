@@ -709,6 +709,15 @@ impl Worker {
                                     (m, v)
                                 })
                             }
+                            // A replaced or unsupported offer is not a delivery failure.
+                            Command::Rpc(m, p) if m == "pane.clipboard" => {
+                                let (pane, serial) = (p["pane"].clone(), p["serial"].clone());
+                                let mut v =
+                                    rpc.call(&m, p).unwrap_or_else(|_| json!({"stale":true}));
+                                v["request_pane"] = pane;
+                                v["request_serial"] = serial;
+                                Ok((m, v))
+                            }
                             Command::Rpc(m, p) => rpc.call(&m, p).map(|v| (m, v)),
                             Command::Close => {
                                 halt.store(true, Ordering::Relaxed);
@@ -956,6 +965,7 @@ impl Worker {
                                     || reply.0 == "pane.capture"
                                     || reply.0 == "buffer.get"
                                     || reply.0 == "pane.selection"
+                                    || reply.0 == "pane.clipboard"
                                     || reply.0 == "paste"
                                     || reply.0 == "window.list"
                                 {

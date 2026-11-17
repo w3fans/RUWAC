@@ -21,6 +21,7 @@ pub const MIN_COLUMNS: u16 = alacritty_terminal::term::MIN_COLUMNS as u16;
 struct Pending {
     replies: Vec<String>,
     store: Option<String>,
+    clipboard: Option<String>,
     load: Option<Formatter>,
 }
 #[derive(Clone, Default)]
@@ -30,10 +31,12 @@ impl EventListener for Events {
         let mut pending = self.0.lock().unwrap();
         match e {
             Event::PtyWrite(s) => pending.replies.push(s),
-            // OSC 52 PRIMARY ("p"/"s") only, e.g. a nested RUWAC client's mouse
-            // selection. The desktop decides whether a user gesture backs it;
-            // CLIPBOARD ("c") writes and reads stay ignored.
+            // OSC 52 PRIMARY ("p"/"s"), e.g. a nested RUWAC client's mouse
+            // selection, and CLIPBOARD ("c") writes, e.g. Claude Code's copy.
+            // Both are only offers: the desktop decides whether a user gesture
+            // backs them. CLIPBOARD reads are never answered.
             Event::ClipboardStore(ClipboardType::Selection, text) => pending.store = Some(text),
+            Event::ClipboardStore(ClipboardType::Clipboard, text) => pending.clipboard = Some(text),
             Event::ClipboardLoad(ClipboardType::Selection, format) => pending.load = Some(format),
             _ => (),
         }
@@ -267,6 +270,7 @@ pub struct Terminal {
     events: Events,
     selection_serial: u64,
     selection: Option<(u64, String)>,
+    clipboard: Option<(u64, String)>,
     selection_request: Option<(u64, Formatter)>,
     pub rows: u16,
     pub cols: u16,
@@ -290,6 +294,7 @@ impl Terminal {
             selection_serial: 0,
             selection: None,
             selection_request: None,
+            clipboard: None,
             rows,
             cols,
             history_epoch: 0,
@@ -301,19 +306,24 @@ impl Terminal {
         }
         self.history_epoch = self.history_epoch.wrapping_add(1);
         self.parser.advance(&mut self.term, b);
-        let (replies, store, load) = {
+        let (replies, store, clipboard, load) = {
             let mut pending = self.events.0.lock().unwrap();
             (
                 std::mem::take(&mut pending.replies),
                 pending.store.take(),
+                pending.clipboard.take(),
                 pending.load.take(),
             )
         };
-        if let Some(text) =
-            store.filter(|t| !t.is_empty() && t.len() <= MAX_SELECTION && !t.contains('\0'))
-        {
+        let acceptable =
+            |t: &String| !t.is_empty() && t.len() <= MAX_SELECTION && !t.contains('\0');
+        if let Some(text) = store.filter(acceptable) {
             self.selection_serial += 1;
             self.selection = Some((self.selection_serial, text));
+        }
+        if let Some(text) = clipboard.filter(acceptable) {
+            self.selection_serial += 1;
+            self.clipboard = Some((self.selection_serial, text));
         }
         if let Some(format) = load {
             self.selection_serial += 1;
@@ -327,6 +337,16 @@ impl Terminal {
             self.selection.as_ref().map(|(n, _)| *n),
             self.selection_request.as_ref().map(|(n, _)| *n),
         )
+    }
+    /// Serial of the latest OSC 52 CLIPBOARD write offered by the program.
+    pub fn clipboard_serial(&self) -> Option<u64> {
+        self.clipboard.as_ref().map(|(n, _)| *n)
+    }
+    pub fn clipboard_offer(&self, serial: u64) -> Option<&str> {
+        self.clipboard
+            .as_ref()
+            .filter(|(n, _)| *n == serial)
+            .map(|(_, t)| t.as_str())
     }
     pub fn selection_offer(&self, serial: u64) -> Option<&str> {
         self.selection
@@ -1607,8 +1627,16 @@ mod tests {
     fn replies_and_clipboard() {
         let mut t = Terminal::new(4, 20);
         assert!(!t.feed(b"\x1b[6n").is_empty());
+        // CLIPBOARD writes become offers; reads are never answered.
         assert!(t.feed(b"\x1b]52;c;QUJD\x07").is_empty());
         assert_eq!(t.selection_serials(), (None, None));
+        let copied = t.clipboard_serial().expect("clipboard offer expected");
+        assert_eq!(t.clipboard_offer(copied), Some("ABC"));
+        assert_eq!(t.clipboard_offer(copied + 1), None);
+        assert!(t.feed(b"\x1b]52;c;?\x07").is_empty());
+        assert_eq!(t.selection_serials(), (None, None));
+        assert!(t.feed(b"\x1b]52;c;\x07").is_empty());
+        assert_eq!(t.clipboard_serial(), Some(copied));
         // PRIMARY offers and read requests wait for the desktop; nothing is
         // answered by the engine itself.
         assert!(t.feed(b"\x1b]52;p;QUJD\x07").is_empty());

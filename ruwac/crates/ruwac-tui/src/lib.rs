@@ -8,7 +8,7 @@ mod word;
 use ruwac_protocol::{MAX_TEXT, request, write_frame};
 use serde_json::{Value, json};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io::{self, Read, Write},
     os::unix::net::UnixStream,
     path::Path,
@@ -249,6 +249,49 @@ fn offer_selection(text: &str) {
     }
     let mut stdout = io::stdout().lock();
     let _ = write!(stdout, "\x1b]52;p;{}\x07", base64_encode(text.as_bytes()));
+    let _ = stdout.flush();
+}
+/// Seed relay state from a frame: offers that already exist are history.
+fn clipboard_offers(frame: &Value) -> HashMap<String, u64> {
+    frame["panes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| Some((p["id"].as_str()?.to_owned(), p["clipboard_offer"].as_u64()?)))
+        .collect()
+}
+/// A program in the active pane wrote OSC 52 CLIPBOARD right after the user's
+/// own input in this client (e.g. Claude Code copying a selection). Pass it
+/// on to the outer terminal, which applies its own gesture policy. Engines
+/// without CLIPBOARD offers (before 0.4.83) never report one.
+fn relay_clipboard(
+    s: &mut Connection,
+    frame: &Value,
+    seen: &mut HashMap<String, u64>,
+    gesture: bool,
+) {
+    let current = clipboard_offers(frame);
+    let active = frame["active_pane"].as_str().unwrap_or("");
+    let fresh = current
+        .get(active)
+        .copied()
+        .filter(|serial| seen.get(active).is_none_or(|old| serial > old));
+    seen.extend(current);
+    let Some(serial) = fresh.filter(|_| gesture) else {
+        return;
+    };
+    if let Ok(reply) = call(s, "pane.clipboard", json!({"pane":active,"serial":serial})) {
+        if let Some(text) = reply["text"].as_str() {
+            offer_clipboard(text);
+        }
+    }
+}
+fn offer_clipboard(text: &str) {
+    if text.is_empty() || text.len() > SELECTION_LIMIT {
+        return;
+    }
+    let mut stdout = io::stdout().lock();
+    let _ = write!(stdout, "\x1b]52;c;{}\x07", base64_encode(text.as_bytes()));
     let _ = stdout.flush();
 }
 fn find(b: &[u8], needle: &[u8]) -> Option<usize> {
@@ -1160,6 +1203,15 @@ impl Config {
         format!("^{}", (self.prefix + b'@') as char)
     }
 }
+static ENGINE_NOTE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// Which engine this attachment lives in (and other engines holding the same
+/// session name), shown in the status bar. Set once by the CLI before attach.
+pub fn set_engine_note(note: String) {
+    let _ = ENGINE_NOTE.set(note);
+}
+fn engine_note() -> &'static str {
+    ENGINE_NOTE.get().map_or("", String::as_str)
+}
 /// A package update replaced this client's program on disk; it keeps running
 /// the old code until it is reattached. Checked at most every five seconds.
 fn update_notice() -> &'static str {
@@ -1603,7 +1655,13 @@ fn draw_mode(
     if matches!(mode, Mode::Live) {
         return draw(
             snapshot,
-            &format!("{}{} · {}", config.label(), update_notice(), status),
+            &format!(
+                "{}{}{} · {}",
+                config.label(),
+                engine_note(),
+                update_notice(),
+                status
+            ),
             cache,
         );
     }
@@ -1858,6 +1916,7 @@ pub fn attach_with_role(
     labels.refresh(&mut snapshot, |m, p| call(&mut s, m, p));
     let mut running_windows = HashSet::new();
     observe_running_window(&snapshot, &mut running_windows);
+    let mut clipboard_seen = clipboard_offers(&snapshot);
     let mut status = String::new();
     let mut draw_cache = DrawCache::default();
     draw_mode(
@@ -1995,7 +2054,13 @@ pub fn attach_with_role(
                             &snapshot,
                             &b,
                             screen_size,
-                            &format!("{}{} · {}", config.label(), update_notice(), status),
+                            &format!(
+                                "{}{}{} · {}",
+                                config.label(),
+                                engine_note(),
+                                update_notice(),
+                                status
+                            ),
                         );
                         if bar {
                             clicks.clear();
@@ -2720,7 +2785,14 @@ pub fn attach_with_role(
                 // The revision counts changes in every session of the daemon;
                 // redraw only when this view's content changed, or a client
                 // nested in a RUWAC terminal redraws itself in a loop.
-                if accept_render_frame(&mut snapshot, fresh) {
+                let changed = accept_render_frame(&mut snapshot, fresh);
+                relay_clipboard(
+                    &mut s,
+                    &snapshot,
+                    &mut clipboard_seen,
+                    input_at.elapsed() < Duration::from_secs(2),
+                );
+                if changed {
                     let ended = snapshot["panes"]
                         .as_array()
                         .is_some_and(|p| !p.is_empty() && p.iter().all(|p| p["ended"] == true));
