@@ -29,6 +29,8 @@
   runs, also inside a pane, and flags session names that exist in several
   engines; `-ls --json` rows carry `duplicate_name`. The RUWAC session status
   bar shows the engine version and any other engine using the same name.
+- The desktop build uses libz-sys 1.1.33, which fixes a heap buffer overflow
+  in the bundled zlib (RUSTSEC-2026-0544, CVE-2026-85091).
 
 ## v0.4.82 — 2026-11-16 — Stable source release
 
