@@ -1,28 +1,34 @@
-RUWAC v0.4.82 — image paste to npm Claude Code and opt-in controller sizing
+RUWAC v0.4.83 — copy from Claude Code reaches the clipboard; one name, one session
 
-Ctrl+V of a clipboard image now reaches Claude Code installed through npm,
-whose native program runs as `.../@anthropic-ai/claude-code/bin/claude.exe`.
-A nested RUWAC session previously refused the handoff with "PNG handoff
-requires the selected local agent" while Codex in the same session worked.
-An unrelated program named `claude.exe` is still not treated as an agent.
+Copying in a program that uses OSC 52 for the clipboard now reaches the
+desktop clipboard: Claude Code's "copied to clipboard", and Neovim, tmux or
+remote shells set up for OSC 52. RUWAC dropped every such write, so Ctrl+V
+pasted older text. It also works through a nested RUWAC session. A write is
+applied only right after your own click or key press in that pane, and
+programs still cannot read the clipboard. A session that runs on an engine
+older than 0.4.83 keeps dropping these writes until it runs on a new engine.
 
-Sessions can opt in to controller-owned sizing: create one with
-`ruwac session create --size-policy controller_owned` (or `size_policy` in
-`session.create`). Only the client that explicitly claims control resizes it;
-every attachment, including older clients, starts as a viewer whose window
-never resizes the shared terminal. The TUI offers `size claim`, `size
-takeover` and `size release` in command mode and shows Controller or Viewer in
-its status bar. The GTK terminal shows "Take sizing control…" with Cancel as
-the default, or "Release sizing control". Detaching or losing the connection
-releases control and keeps the last size. Existing and ordinary sessions keep
-their current sizing.
+`ruwac -S NAME` and `ruwac -r NAME` typed inside a RUWAC pane now find the
+session in every running engine instead of only the pane's own engine. From a
+pane of an older engine, `-S d` used to create a second "d" beside the one
+that already ran elsewhere. A name that exists in more than one engine is now
+refused, with the `ruwac -r SESSION_ID` commands to choose one. `ruwac -ls`
+names the engine of every session whenever several engines run and flags
+duplicate names, and the session status bar shows its engine version.
 
-Verification covers headless and desktop unit tests, real-PTY sizing and
-compatibility suites with actual 0.4.49 and 0.4.81 terminals, and an isolated
-GTK comparison where the published 0.4.81 desktop fails the new checks. GTK
-pan/fit, SSH host acceptance of controlled sessions and physical
-two-workstation acceptance remain open. The desktop RSA advisory remains
-visible.
+Middle-click (touchpad three-finger tap) in a RUWAC session always pastes,
+also while the program in the pane tracks the mouse. In a Codex or Claude
+Code pane a plain left drag selects text in RUWAC, so middle-click pastes it;
+clicks, the wheel and pointer motion still reach the agent. Ctrl+Shift+R now
+reaches the terminal program or remote desktop instead of opening Machines,
+which stays on Alt+M. After a package update, a running window shows "Restart
+to update" and a RUWAC session shows "UPDATE INSTALLED" until reattached.
+
+Verification covers headless and desktop unit tests, real-PTY nested mouse,
+engine routing and lifecycle suites, and isolated GTK sessions in which the
+published 0.4.82 fails the new clipboard and session-name checks. Physical
+input and remote-desktop clipboard synchronisation remain open. The desktop
+RSA advisory remains visible.
 
 Update a Fedora machine with:
 
