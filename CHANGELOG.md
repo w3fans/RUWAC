@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- The machine editor no longer saves "wayland-0", a selection-sharing
+  account or the "ruwac" agent backend into entries that do not use them,
+  such as Windows hosts. Remote Wayland session shows "wayland-0" only as a
+  hint and is filled in when mouse selection sharing is switched on. Cleared
+  values stay cleared instead of reappearing after Save, and a save the editor
+  refuses now scrolls its reason into view.
+
 - `ruwac -wipe` now removes dead sessions in every running engine, not only
   in the default one. After an update the dead sessions usually live in a
   preserved engine, so `-wipe` reported "Removed 0" while `-ls` still showed

@@ -4037,11 +4037,10 @@ fn editor_seed(
     primary_user.set_text(&primary_account);
     let primary_display = gtk::Entry::new();
     primary_display.set_widget_name("primary-display");
-    primary_display.set_text(if original.preferences.primary_display.is_empty() {
-        "wayland-0"
-    } else {
-        &original.preferences.primary_display
-    });
+    // A hint, not a value: Windows and other entries without selection
+    // sharing keep this empty instead of silently saving "wayland-0".
+    primary_display.set_text(&original.preferences.primary_display);
+    primary_display.set_placeholder_text(Some("wayland-0"));
     let primary_port = gtk::SpinButton::with_range(0.0, 65535.0, 1.0);
     primary_port.set_value(original.preferences.primary_port as f64);
     form_row(&advanced, "Mouse selection sharing", &primary_sync);
@@ -4499,8 +4498,24 @@ fn editor_seed(
         .build();
     form.append(&expander);
     info.set_xalign(0.0);
+    info.set_wrap(true);
     form.append(&info);
     sc.set_child(Some(&form));
+    // The message sits below the advanced settings; bring any refusal into view
+    // instead of leaving Save looking like it did nothing.
+    {
+        let sc = sc.clone();
+        info.connect_label_notify(move |label| {
+            if label.label().is_empty() {
+                return;
+            }
+            let sc = sc.clone();
+            gtk::glib::idle_add_local_once(move || {
+                let adjustment = sc.vadjustment();
+                adjustment.set_value(adjustment.upper() - adjustment.page_size());
+            });
+        });
+    }
     for d in [&protocol, &display, &clipboard, &rdp_mode, &login, &backend] {
         dropdown_arrows(d);
     }
@@ -4530,7 +4545,7 @@ fn editor_seed(
             let(s,id,machine_id,st,parent)=(store.clone(),original.id.clone(),original.machine_id.clone(),status.clone(),d.clone());confirm.connect_response(move|c,r|{if r==gtk::ResponseType::Accept {let mut s=s.borrow_mut();let old=s.items.clone();s.items.retain(|p|p.id!=id&&(!machine||p.machine_id!=machine_id));if let Err(e)=s.save(){s.items=old;st.set_text(&e);}else{drop(s);st.set_text("Metadata deleted; previous library retained for Undo");refresh_widgets(parent.transient_for().as_ref());parent.close();}}c.close();});confirm.present();return;
         }
         if response!=gtk::ResponseType::Accept && response!=gtk::ResponseType::Other(1) && response!=gtk::ResponseType::Other(3) && response!=gtk::ResponseType::Other(5){d.close();return;}
-        let mut p=original.clone();p.preferences.primary_sync=primary_sync.is_active();p.preferences.primary_paste=primary_paste.is_active();p.preferences.primary_user=primary_user.text().into();p.preferences.primary_display=primary_display.text().into();p.preferences.primary_port=primary_port.value() as u16;p.preferences.ssh_auth=if p.protocol=="SSH"&&login.selected()==1{"password".into()}else{String::new()};p.preferences.kimi_command=kimi_command.text().into();p.preferences.agent_install_missing=auto_install.is_active();p.preferences.ruwac_install_missing=ruwac_install.is_active();p.preferences.agent_session=agent_session.text().into();p.preferences.codex_command=codex_command.text().into();p.preferences.claude_command=claude_command.text().into();p.preferences.agent_backend=["ruwac","screen","tmux","direct"][backend.selected()as usize].into();p.name=fields[0].text().into();p.group=fields[1].text().into();p.machine_id=fields[2].text().into();p.server=fields[3].text().into();p.username=fields[4].text().into();p.preferences.label=fields[5].text().into();p.preferences.network=fields[6].text().into();p.preferences.gateway=fields[7].text().into();p.preferences.ssh_jump_alias=ssh_jump.text().into();p.preferences.startup_command=startup.text().trim().into();p.tags=fields[8].text().split(',').map(str::trim).filter(|s|!s.is_empty()).map(str::to_owned).collect();p.secret_reference=fields[9].text().into();p.preferences.trust=fields[10].text().into();p.preferences.identity_file=fields[11].text().into();p.preferences.identity_secret_reference=identity_reference.text().into();p.preferences.known_hosts=fields[12].text().into();p.protocol=if protocol.selected()==1{"SSH"}else{"RDP"}.into();p.preferences.display=["fit","native","stretch","dynamic"][display.selected() as usize].into();p.preferences.clipboard=clipboard.selected();p.preferences.zoom=zoom.value();p.preferences.fullscreen=full.is_active();p.preferences.reconnect=retry.is_active();p.inherit=inherit.is_active();p.inherit_connection=inherit_connection.is_active();p.inherit_credential=inherit_credential.is_active();p.preferences.rdp_mode=["","gnome-remote-login","gnome-desktop-sharing"][rdp_mode.selected() as usize].into();p.preferences.gnome_auto_login=gnome_auto.is_active();p.preferences.gnome_username=gnome_user.text().into();p.preferences.gnome_secret_reference=if p.preferences.rdp_mode=="gnome-remote-login"||!original.preferences.gnome_secret_reference.is_empty(){gnome_ref.text().into()}else{String::new()};
+        let mut p=original.clone();p.preferences.primary_sync=primary_sync.is_active();p.preferences.primary_paste=primary_paste.is_active();let sharing=primary_sync.is_active()||primary_paste.is_active();p.preferences.primary_user=if sharing||!original.preferences.primary_user.is_empty(){primary_user.text().into()}else{String::new()};p.preferences.primary_display=match primary_display.text().trim(){"" if primary_sync.is_active()=>"wayland-0".into(),t=>t.into()};p.preferences.primary_port=primary_port.value() as u16;p.preferences.ssh_auth=if p.protocol=="SSH"&&login.selected()==1{"password".into()}else{String::new()};p.preferences.kimi_command=kimi_command.text().into();p.preferences.agent_install_missing=auto_install.is_active();p.preferences.ruwac_install_missing=ruwac_install.is_active();p.preferences.agent_session=agent_session.text().into();p.preferences.codex_command=codex_command.text().into();p.preferences.claude_command=claude_command.text().into();p.preferences.agent_backend=if original.preferences.agent_backend.is_empty()&&backend.selected()==0{String::new()}else{["ruwac","screen","tmux","direct"][backend.selected()as usize].into()};p.name=fields[0].text().into();p.group=fields[1].text().into();p.machine_id=fields[2].text().into();p.server=fields[3].text().into();p.username=fields[4].text().into();p.preferences.label=fields[5].text().into();p.preferences.network=fields[6].text().into();p.preferences.gateway=fields[7].text().into();p.preferences.ssh_jump_alias=ssh_jump.text().into();p.preferences.startup_command=startup.text().trim().into();p.tags=fields[8].text().split(',').map(str::trim).filter(|s|!s.is_empty()).map(str::to_owned).collect();p.secret_reference=fields[9].text().into();p.preferences.trust=fields[10].text().into();p.preferences.identity_file=fields[11].text().into();p.preferences.identity_secret_reference=identity_reference.text().into();p.preferences.known_hosts=fields[12].text().into();p.protocol=if protocol.selected()==1{"SSH"}else{"RDP"}.into();p.preferences.display=["fit","native","stretch","dynamic"][display.selected() as usize].into();p.preferences.clipboard=clipboard.selected();p.preferences.zoom=zoom.value();p.preferences.fullscreen=full.is_active();p.preferences.reconnect=retry.is_active();p.inherit=inherit.is_active();p.inherit_connection=inherit_connection.is_active();p.inherit_credential=inherit_credential.is_active();p.preferences.rdp_mode=["","gnome-remote-login","gnome-desktop-sharing"][rdp_mode.selected() as usize].into();p.preferences.gnome_auto_login=gnome_auto.is_active();p.preferences.gnome_username=gnome_user.text().into();p.preferences.gnome_secret_reference=if p.preferences.rdp_mode=="gnome-remote-login"||!original.preferences.gnome_secret_reference.is_empty(){gnome_ref.text().into()}else{String::new()};
         if response==gtk::ResponseType::Other(1){p.id=ruwac_protocol::id("endpoint");p.machine_id=ruwac_protocol::id("machine");p.secret_reference=p.id.clone();if !p.preferences.gnome_secret_reference.is_empty(){p.preferences.gnome_secret_reference=format!("{}.gnome",p.id);}p.name.push_str(" (copy)");}
         if response==gtk::ResponseType::Other(3){p.name=original.name.clone();p.group=original.group.clone();p.id=ruwac_protocol::id("endpoint");p.secret_reference=p.id.clone();if !p.preferences.gnome_secret_reference.is_empty(){p.preferences.gnome_secret_reference=format!("{}.gnome",p.id);}}
         if let Err(e)=p.validate(){info.set_text(&e);return;}
