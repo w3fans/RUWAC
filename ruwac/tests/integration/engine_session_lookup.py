@@ -77,13 +77,36 @@ try:
 
     listing = run('-ls', pane=second).stdout
     assert listing.count('Engine ') == 2, listing
-    assert '! Session name "d" exists in engines' in listing, listing
+    assert '! Session name "d" is used 2 times' in listing, listing
     rows = json.loads(run('-ls', '--json').stdout)['result']
     dup = {r['id']: r['duplicate_name'] for r in rows}
     assert dup[d] and dup[d2] and not any(dup[r['id']] for r in rows if r['name'] != 'd'), rows
     assert {r['engine_socket'] for r in rows} == {str(first), str(second)}, rows
     checks.append('-ls names each engine and flags the duplicate name')
 
+    # Dead sessions in a non-default engine are wiped by a plain -wipe, and
+    # -wipe NAME finds its session in whichever engine holds it.
+    def dead(socket, name):
+        sid = json.loads(run('rpc', 'session.create', '--params',
+                             json.dumps({'name': name, 'argv': ['/bin/sh', '-c', 'exit 0']}),
+                             socket=socket).stdout)['result']['session']
+        for _ in range(100):
+            panes = json.loads(run('pane', 'list', '--session', sid, '--json', socket=socket).stdout)['result']
+            if panes and all(x['ended'] for x in panes):
+                return sid
+            time.sleep(.05)
+        raise AssertionError('pane did not end')
+    gone1, gone2 = dead(second, 'gone1'), dead(second, 'gone2')
+    q = run('-wipe', '--json')
+    total = json.loads(q.stdout)
+    remaining = {x['id'] for x in sessions(first) + sessions(second)}
+    assert gone1 not in remaining and gone2 not in remaining and total['removed_sessions'] >= 2, q.stdout
+    assert d in remaining and d2 in remaining, remaining
+    checks.append('plain -wipe removes dead sessions in every engine and keeps live ones')
+    gone3 = dead(second, 'gone3')
+    run('-wipe', 'gone3', pane=first)
+    assert gone3 not in {x['id'] for x in sessions(second)}
+    checks.append('-wipe NAME from another engine pane cleans the session where it lives')
     (a.evidence / 'engine-session-lookup.json').write_text(
         json.dumps({'status': 'PASS', 'checks': checks}, indent=2))
     print(f'Engine session lookup PASS {len(checks)} checks')

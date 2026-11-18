@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `ruwac -wipe` now removes dead sessions in every running engine, not only
+  in the default one. After an update the dead sessions usually live in a
+  preserved engine, so `-wipe` reported "Removed 0" while `-ls` still showed
+  them. `ruwac -wipe NAME` cleans that session in whichever engine holds it.
+- The `-ls` duplicate-name warning names each engine once and says how many
+  sessions use the name.
+
 ## v0.4.83 — 2026-11-17 — Stable source release
 
 - Middle-click (touchpad three-finger tap) in a RUWAC session now always

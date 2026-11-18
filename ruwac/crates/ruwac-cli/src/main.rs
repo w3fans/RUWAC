@@ -694,6 +694,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut listing_engines = Vec::new();
     let mut session_engines = Vec::new();
+    // -wipe without --socket/--host cleans every engine of this user, like -ls lists them.
+    let mut wipe_engines: Vec<std::path::PathBuf> = Vec::new();
     if pane_routed {
         let named = a.get(1).filter(|_| a.len() == 2).map(String::as_str);
         let mut order = vec![socket.clone()];
@@ -710,6 +712,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 session_engines = engines_with_session(&order, named.unwrap_or_default());
             }
             Some("-ls" | "-list") => listing_engines = order,
+            Some("-wipe" | "wipe") => wipe_engines = order,
             _ => (),
         }
     }
@@ -739,7 +742,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 socket = engine::route_for_new_work(&default)?
             }
             Some("-ls" | "-list") => listing_engines = engine::lookup_order(&default),
-            Some("engine" | "serve" | "-wipe" | "wipe") | None => (),
+            Some("-wipe" | "wipe") => wipe_engines = order,
+            Some("engine" | "serve") | None => (),
             _ => socket = engine::current_route(&default),
         }
     }
@@ -889,16 +893,49 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if args.len() > 1 || a.len() > 3 {
                 return Err("usage: ruwac -wipe [NAME_OR_SESSION_ID] [--json]".into());
             }
-            let selected = args
-                .first()
-                .map(|name| {
-                    named_session_id(&call(&request("session.list", json!({})))?, name)?
-                        .ok_or_else(|| io::Error::other("No session with this exact name or ID"))
-                })
-                .transpose()?;
-            let result = cleanup::wipe(selected.as_deref(), |m, p| {
-                call(&request(m, p)).map(|v| v["result"].clone())
-            })?;
+            let mut targets = vec![socket.clone()];
+            if !wipe_engines.is_empty() {
+                targets = match args.first() {
+                    // A named session is cleaned where it lives; ambiguity is refused.
+                    Some(name) => vec![
+                        find_session(&wipe_engines, Some(name.as_str()))?
+                            .ok_or("No session with this exact name or ID")?,
+                    ],
+                    None => wipe_engines
+                        .iter()
+                        .filter(|s| startup::connect(s).is_ok())
+                        .cloned()
+                        .collect(),
+                };
+            }
+            let mut result = json!({"removed_panes":0,"removed_windows":0,"removed_sessions":0,"live_processes_preserved":true,"engines":[]});
+            for target in &targets {
+                let one = |m: &str, p: Value| -> io::Result<Value> {
+                    if remote.is_some() {
+                        call(&request(m, p)).map(|v| v["result"].clone())
+                    } else {
+                        rpc(target, &request(m, p)).map(|v| v["result"].clone())
+                    }
+                };
+                let selected = args
+                    .first()
+                    .map(|name| {
+                        named_session_id(&json!({"result":one("session.list", json!({}))?}), name)?
+                            .ok_or_else(|| {
+                                io::Error::other("No session with this exact name or ID")
+                            })
+                    })
+                    .transpose()?;
+                let part = cleanup::wipe(selected.as_deref(), one)?;
+                for key in ["removed_panes", "removed_windows", "removed_sessions"] {
+                    result[key] =
+                        json!(result[key].as_u64().unwrap_or(0) + part[key].as_u64().unwrap_or(0));
+                }
+                result["engines"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"socket":target,"result":part}));
+            }
             if a.iter().any(|v| v == "--json") {
                 println!("{result}");
             } else {
@@ -975,7 +1012,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             .push(version.into());
                     }
                 }
+                // Several sessions of one name in a single engine are also ambiguous;
+                // list each engine once.
                 engines_by_name.retain(|_, v| v.len() > 1);
+                for versions in engines_by_name.values_mut() {
+                    versions.dedup();
+                }
                 for row in all.iter_mut() {
                     row["duplicate_name"] = json!(
                         row["name"]
@@ -1006,8 +1048,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     for (name, versions) in &engines_by_name {
                         println!(
-                            "! Session name \"{name}\" exists in engines {}; ruwac -r NAME refuses it, attach with ruwac -r SESSION_ID",
-                            versions.join(" and ")
+                            "! Session name \"{name}\" is used {} times (engine {}); ruwac -r NAME refuses it, attach with ruwac -r SESSION_ID",
+                            all.iter().filter(|r| r["name"] == name.as_str()).count(),
+                            versions.join(", ")
                         );
                     }
                 }
