@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.4.83 — 2026-11-17 — Stable source release
+
 - Middle-click (touchpad three-finger tap) in a RUWAC session now always
   pastes, also while the program in the pane tracks the mouse (Codex, btm,
   editors). Such programs received the button and nothing was pasted.
