@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.4.84 — 2026-11-18 — Stable source release
+
 - Opening a GNOME remote-login or desktop-sharing connection while another
   RUWAC tab is still connected, or connecting, to the same machine now
   disconnects that tab first and waits a moment before connecting. GNOME
