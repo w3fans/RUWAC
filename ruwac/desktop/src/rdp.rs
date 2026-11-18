@@ -5495,6 +5495,17 @@ impl RdpView {
             self.command(Command::Release(events));
         }
     }
+    /// This tab drives (or is still trying to reach) the same GNOME remote
+    /// login or desktop-sharing endpoint as `p`. GNOME serves one such session
+    /// per machine; a second connection leaves both stuck in the handover.
+    pub fn same_gnome_target(&self, p: &crate::profiles::Profile) -> bool {
+        (self.connection.borrow().is_some() || self.pending_connect.borrow().is_some())
+            && self
+                .profile_metadata
+                .borrow()
+                .as_ref()
+                .is_some_and(|q| gnome_targets_match(q, p))
+    }
     pub fn close(&self) {
         self.clipboard_suspended.set(false);
         self.primary.borrow_mut().take();
@@ -6433,5 +6444,54 @@ mod queue_safety_tests {
         epoch.fetch_add(1, Ordering::AcqRel);
         assert!(command.stale(10));
         assert!(!Command::Release(vec![]).stale(11));
+    }
+}
+/// Both profiles reach the same GNOME remote-login or desktop-sharing endpoint
+/// (host compared case-insensitively, default port 3389). Plain RDP, e.g. to
+/// Windows, never matches: those servers handle several connections themselves.
+pub fn gnome_targets_match(a: &crate::profiles::Profile, b: &crate::profiles::Profile) -> bool {
+    let gnome = |q: &crate::profiles::Profile| q.preferences.rdp_mode.starts_with("gnome-");
+    let target = |q: &crate::profiles::Profile| {
+        crate::profiles::endpoint(&q.server, 3389)
+            .ok()
+            .map(|(host, port)| (host.to_ascii_lowercase(), port))
+    };
+    gnome(a) && gnome(b) && target(a).is_some() && target(a) == target(b)
+}
+#[cfg(test)]
+mod gnome_target_tests {
+    use super::gnome_targets_match;
+    fn profile(server: &str, mode: &str) -> crate::profiles::Profile {
+        let mut p: crate::profiles::Profile = serde_json::from_value(serde_json::json!({"id":"endpoint_target","machine_id":"machine_target","name":"Target","group":"","protocol":"RDP","server":server,"username":"user","secret_reference":"endpoint_target","favorite":false,"last_used":0,"tags":[]})).unwrap();
+        p.preferences.rdp_mode = mode.into();
+        p
+    }
+    #[test]
+    fn same_gnome_machine_matches_across_case_and_default_port() {
+        assert!(gnome_targets_match(
+            &profile("LHNUC", "gnome-remote-login"),
+            &profile("lhnuc:3389", "gnome-remote-login")
+        ));
+        assert!(gnome_targets_match(
+            &profile("lhnuc", "gnome-desktop-sharing"),
+            &profile("lhnuc", "gnome-remote-login")
+        ));
+    }
+    #[test]
+    fn other_hosts_ports_and_plain_rdp_never_match() {
+        let gnome = profile("lhnuc", "gnome-remote-login");
+        assert!(!gnome_targets_match(
+            &gnome,
+            &profile("svnuc", "gnome-remote-login")
+        ));
+        assert!(!gnome_targets_match(
+            &gnome,
+            &profile("lhnuc:3390", "gnome-remote-login")
+        ));
+        assert!(!gnome_targets_match(&gnome, &profile("lhnuc", "")));
+        assert!(!gnome_targets_match(
+            &profile("win", ""),
+            &profile("win", "")
+        ));
     }
 }

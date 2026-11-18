@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Opening a GNOME remote-login or desktop-sharing connection while another
+  RUWAC tab is still connected, or connecting, to the same machine now
+  disconnects that tab first and waits a moment before connecting. GNOME
+  serves one such session per machine, and two at once left both stuck.
+  Connections from other computers are not affected; Windows and other plain
+  RDP servers are never disconnected.
+
 - The machine editor no longer saves "wayland-0", a selection-sharing
   account or the "ruwac" agent backend into entries that do not use them,
   such as Windows hosts. Remote Wayland session shows "wayland-0" only as a
